@@ -8,6 +8,7 @@ from core.event_bus import EventBus
 from core.event_types import EventType
 from core.models.common import clamp_int
 from core.models.skill import Skill, ColorRGB
+from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
@@ -43,6 +44,8 @@ class SkillsPage(PickNotebookCrudPage):
             tab_names=["基本", "像素", "备注"],
         )
 
+        self._cap = ScreenCapture()
+
         tab_basic = self.tabs["基本"]
         tab_pixel = self.tabs["像素"]
         tab_note = self.tabs["备注"]
@@ -55,6 +58,7 @@ class SkillsPage(PickNotebookCrudPage):
         self.var_readbar = tk.IntVar(value=0)
 
         self.var_monitor = tk.StringVar(value="primary")
+        # UI 依旧使用“相对坐标（monitor 内）”
         self.var_x = tk.IntVar(value=0)
         self.var_y = tk.IntVar(value=0)
 
@@ -72,6 +76,13 @@ class SkillsPage(PickNotebookCrudPage):
         self._install_dirty_watchers()
 
         self.refresh_tree()
+
+    def destroy(self) -> None:
+        try:
+            self._cap.close()
+        except Exception:
+            pass
+        super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
@@ -94,6 +105,14 @@ class SkillsPage(PickNotebookCrudPage):
     def _make_new_record(self) -> Skill:
         sid = self._ctx.idgen.next_id()
         s = Skill(id=sid, name="新技能", enabled=True)
+        # default: primary monitor top-left (rel 0,0 -> abs)
+        try:
+            vx, vy = self._cap.rel_to_abs(0, 0, "primary")
+        except Exception:
+            vx, vy = 0, 0
+        s.pixel.monitor = "primary"
+        s.pixel.vx = int(vx)
+        s.pixel.vy = int(vy)
         return s
 
     def _clone_record(self, record: Skill) -> Skill:
@@ -115,7 +134,14 @@ class SkillsPage(PickNotebookCrudPage):
     def _record_row_values(self, s: Skill) -> tuple:
         sid = s.id or ""
         short = sid[-6:] if len(sid) >= 6 else sid
-        pos = f"({s.pixel.x},{s.pixel.y})"
+
+        # display rel coords for readability
+        try:
+            rx, ry = self._cap.abs_to_rel(int(s.pixel.vx), int(s.pixel.vy), s.pixel.monitor or "primary")
+        except Exception:
+            rx, ry = int(s.pixel.vx), int(s.pixel.vy)
+
+        pos = f"({rx},{ry})"
         hx = rgb_to_hex(s.pixel.color.r, s.pixel.color.g, s.pixel.color.b)
         return (
             "是" if s.enabled else "否",
@@ -155,10 +181,14 @@ class SkillsPage(PickNotebookCrudPage):
         tb.Combobox(parent, textvariable=self.var_monitor, values=["primary", "all", "monitor_1", "monitor_2"],
                     state="readonly").grid(row=0, column=1, sticky="ew", pady=4)
 
-        tb.Label(parent, text="X").grid(row=0, column=2, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(row=0, column=3, sticky="ew", pady=4)
-        tb.Label(parent, text="Y").grid(row=0, column=4, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(row=0, column=5, sticky="ew", pady=4)
+        tb.Label(parent, text="X(rel)").grid(row=0, column=2, sticky="w", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(
+            row=0, column=3, sticky="ew", pady=4
+        )
+        tb.Label(parent, text="Y(rel)").grid(row=0, column=4, sticky="w", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(
+            row=0, column=5, sticky="ew", pady=4
+        )
 
         self._swatch = ColorSwatch(parent)
         self._swatch.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 10))
@@ -221,7 +251,6 @@ class SkillsPage(PickNotebookCrudPage):
 
     def _clear_form(self) -> None:
         self._var_title.set("未选择")
-        # keep it minimal
         self._building_form = True
         try:
             self.var_id.set("")
@@ -259,9 +288,13 @@ class SkillsPage(PickNotebookCrudPage):
             self.var_trigger_key.set(s.trigger.key)
             self.var_readbar.set(int(s.cast.readbar_ms))
 
-            self.var_monitor.set(s.pixel.monitor)
-            self.var_x.set(int(s.pixel.x))
-            self.var_y.set(int(s.pixel.y))
+            self.var_monitor.set(s.pixel.monitor or "primary")
+            try:
+                rx, ry = self._cap.abs_to_rel(int(s.pixel.vx), int(s.pixel.vy), self.var_monitor.get())
+            except Exception:
+                rx, ry = 0, 0
+            self.var_x.set(int(rx))
+            self.var_y.set(int(ry))
 
             self.var_r.set(int(s.pixel.color.r))
             self.var_g.set(int(s.pixel.color.g))
@@ -291,9 +324,17 @@ class SkillsPage(PickNotebookCrudPage):
         s.trigger.key = self.var_trigger_key.get()
         s.cast.readbar_ms = clamp_int(int(self.var_readbar.get()), 0, 10**9)
 
-        s.pixel.monitor = self.var_monitor.get() or "primary"
-        s.pixel.x = clamp_int(int(self.var_x.get()), 0, 10**9)
-        s.pixel.y = clamp_int(int(self.var_y.get()), 0, 10**9)
+        mon = self.var_monitor.get() or "primary"
+        rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
+        rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
+
+        s.pixel.monitor = mon
+        try:
+            vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
+        except Exception:
+            vx, vy = rel_x, rel_y
+        s.pixel.vx = clamp_int(int(vx), -10**9, 10**9)
+        s.pixel.vy = clamp_int(int(vy), -10**9, 10**9)
 
         r = clamp_int(int(self.var_r.get()), 0, 255)
         g = clamp_int(int(self.var_g.get()), 0, 255)
@@ -324,22 +365,33 @@ class SkillsPage(PickNotebookCrudPage):
         s = self._find_skill(rid)
         if s is None:
             return False
-        x = int(payload.get("x", 0))
-        y = int(payload.get("y", 0))
+
+        # prefer vx/vy (new), fallback to abs_x/abs_y
+        if "vx" in payload and "vy" in payload:
+            vx = int(payload.get("vx", 0))
+            vy = int(payload.get("vy", 0))
+        else:
+            vx = int(payload.get("abs_x", 0))
+            vy = int(payload.get("abs_y", 0))
+
         r = clamp_int(int(payload.get("r", 0)), 0, 255)
         g = clamp_int(int(payload.get("g", 0)), 0, 255)
         b = clamp_int(int(payload.get("b", 0)), 0, 255)
 
-        s.pixel.x, s.pixel.y = x, y
+        s.pixel.vx, s.pixel.vy = vx, vy
+        mon = payload.get("monitor")
+        if isinstance(mon, str) and mon:
+            s.pixel.monitor = mon
         s.pixel.color = ColorRGB(r=r, g=g, b=b)
         return True
 
     def _sync_form_after_pick(self, rid: str, payload: dict) -> None:
-        # update current form vars
         self._building_form = True
         try:
+            # x/y are rel coords in event payload
             self.var_x.set(int(payload.get("x", 0)))
             self.var_y.set(int(payload.get("y", 0)))
+
             r = clamp_int(int(payload.get("r", 0)), 0, 255)
             g = clamp_int(int(payload.get("g", 0)), 0, 255)
             b = clamp_int(int(payload.get("b", 0)), 0, 255)
@@ -347,5 +399,9 @@ class SkillsPage(PickNotebookCrudPage):
             self.var_g.set(g)
             self.var_b.set(b)
             self._swatch.set_rgb(r, g, b)
+
+            mon = payload.get("monitor")
+            if isinstance(mon, str) and mon:
+                self.var_monitor.set(mon)
         finally:
             self._building_form = False

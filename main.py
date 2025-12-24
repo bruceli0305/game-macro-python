@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import ttkbootstrap as tb
+import logging
 
 from core.event_bus import EventBus
 from core.idgen.snowflake import SnowflakeGenerator
 from core.profiles import ProfileManager
 from core.repos.app_state_repo import AppStateRepo
+from core.logging_setup import setup_logging
 from ui.app_window import AppWindow
 
 

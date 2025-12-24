@@ -10,6 +10,7 @@ from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
 from core.models.skill import ColorRGB
+from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
@@ -43,6 +44,8 @@ class PointsPage(PickNotebookCrudPage):
             tab_names=["基本", "颜色&采样", "备注"],
         )
 
+        self._cap = ScreenCapture()
+
         tab_basic = self.tabs["基本"]
         tab_color = self.tabs["颜色&采样"]
         tab_note = self.tabs["备注"]
@@ -50,6 +53,8 @@ class PointsPage(PickNotebookCrudPage):
         self.var_id = tk.StringVar(value="")
         self.var_name = tk.StringVar(value="")
         self.var_monitor = tk.StringVar(value="primary")
+
+        # UI 依旧使用“相对坐标（monitor 内）”
         self.var_x = tk.IntVar(value=0)
         self.var_y = tk.IntVar(value=0)
 
@@ -67,6 +72,13 @@ class PointsPage(PickNotebookCrudPage):
         self._install_dirty_watchers()
 
         self.refresh_tree()
+
+    def destroy(self) -> None:
+        try:
+            self._cap.close()
+        except Exception:
+            pass
+        super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
@@ -88,12 +100,16 @@ class PointsPage(PickNotebookCrudPage):
 
     def _make_new_record(self) -> Point:
         pid = self._ctx.idgen.next_id()
+        try:
+            vx, vy = self._cap.rel_to_abs(0, 0, "primary")
+        except Exception:
+            vx, vy = 0, 0
         p = Point(
             id=pid,
             name="新点位",
             monitor="primary",
-            x=0,
-            y=0,
+            vx=int(vx),
+            vy=int(vy),
             color=ColorRGB(0, 0, 0),
             captured_at=now_iso_utc(),
         )
@@ -121,7 +137,13 @@ class PointsPage(PickNotebookCrudPage):
     def _record_row_values(self, p: Point) -> tuple:
         pid = p.id or ""
         short = pid[-6:] if len(pid) >= 6 else pid
-        pos = f"({p.x},{p.y})"
+
+        try:
+            rx, ry = self._cap.abs_to_rel(int(p.vx), int(p.vy), p.monitor or "primary")
+        except Exception:
+            rx, ry = int(p.vx), int(p.vy)
+
+        pos = f"({rx},{ry})"
         hx = rgb_to_hex(p.color.r, p.color.g, p.color.b)
         return (p.name, short, p.monitor, pos, hx, p.captured_at)
 
@@ -139,15 +161,11 @@ class PointsPage(PickNotebookCrudPage):
         tb.Combobox(parent, textvariable=self.var_monitor, values=["primary", "all", "monitor_1", "monitor_2"],
                     state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
 
-        tb.Label(parent, text="X").grid(row=3, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(
-            row=3, column=1, sticky="ew", pady=4
-        )
+        tb.Label(parent, text="X(rel)").grid(row=3, column=0, sticky="w", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(row=3, column=1, sticky="ew", pady=4)
 
-        tb.Label(parent, text="Y").grid(row=4, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(
-            row=4, column=1, sticky="ew", pady=4
-        )
+        tb.Label(parent, text="Y(rel)").grid(row=4, column=0, sticky="w", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(row=4, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="captured_at").grid(row=5, column=0, sticky="w", pady=4)
         tb.Entry(parent, textvariable=self.var_captured_at).grid(row=5, column=1, sticky="ew", pady=4)
@@ -160,17 +178,11 @@ class PointsPage(PickNotebookCrudPage):
         self._swatch.grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
 
         tb.Label(parent, text="R").grid(row=1, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(
-            row=1, column=1, sticky="ew", pady=4
-        )
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(row=1, column=1, sticky="ew", pady=4)
         tb.Label(parent, text="G").grid(row=1, column=2, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(
-            row=1, column=3, sticky="ew", pady=4
-        )
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(row=1, column=3, sticky="ew", pady=4)
         tb.Label(parent, text="B").grid(row=1, column=4, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(
-            row=1, column=5, sticky="ew", pady=4
-        )
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(row=1, column=5, sticky="ew", pady=4)
 
         tb.Label(parent, text="采样模式").grid(row=2, column=0, sticky="w", pady=4)
         tb.Combobox(parent, textvariable=self.var_sample_mode, values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),
@@ -253,9 +265,14 @@ class PointsPage(PickNotebookCrudPage):
         try:
             self.var_id.set(p.id)
             self.var_name.set(p.name)
-            self.var_monitor.set(p.monitor)
-            self.var_x.set(int(p.x))
-            self.var_y.set(int(p.y))
+            self.var_monitor.set(p.monitor or "primary")
+
+            try:
+                rx, ry = self._cap.abs_to_rel(int(p.vx), int(p.vy), self.var_monitor.get())
+            except Exception:
+                rx, ry = 0, 0
+            self.var_x.set(int(rx))
+            self.var_y.set(int(ry))
 
             self.var_r.set(int(p.color.r))
             self.var_g.set(int(p.color.g))
@@ -280,9 +297,17 @@ class PointsPage(PickNotebookCrudPage):
             return False
 
         p.name = self.var_name.get()
-        p.monitor = self.var_monitor.get() or "primary"
-        p.x = clamp_int(int(self.var_x.get()), 0, 10**9)
-        p.y = clamp_int(int(self.var_y.get()), 0, 10**9)
+        mon = self.var_monitor.get() or "primary"
+        p.monitor = mon
+
+        rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
+        rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
+        try:
+            vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
+        except Exception:
+            vx, vy = rel_x, rel_y
+        p.vx = clamp_int(int(vx), -10**9, 10**9)
+        p.vy = clamp_int(int(vy), -10**9, 10**9)
 
         r = clamp_int(int(self.var_r.get()), 0, 255)
         g = clamp_int(int(self.var_g.get()), 0, 255)
@@ -313,13 +338,22 @@ class PointsPage(PickNotebookCrudPage):
         p = self._find_point(rid)
         if p is None:
             return False
-        x = int(payload.get("x", 0))
-        y = int(payload.get("y", 0))
+
+        if "vx" in payload and "vy" in payload:
+            vx = int(payload.get("vx", 0))
+            vy = int(payload.get("vy", 0))
+        else:
+            vx = int(payload.get("abs_x", 0))
+            vy = int(payload.get("abs_y", 0))
+
         r = clamp_int(int(payload.get("r", 0)), 0, 255)
         g = clamp_int(int(payload.get("g", 0)), 0, 255)
         b = clamp_int(int(payload.get("b", 0)), 0, 255)
 
-        p.x, p.y = x, y
+        p.vx, p.vy = vx, vy
+        mon = payload.get("monitor")
+        if isinstance(mon, str) and mon:
+            p.monitor = mon
         p.color = ColorRGB(r=r, g=g, b=b)
         p.captured_at = now_iso_utc()
         return True
@@ -329,6 +363,7 @@ class PointsPage(PickNotebookCrudPage):
         try:
             self.var_x.set(int(payload.get("x", 0)))
             self.var_y.set(int(payload.get("y", 0)))
+
             r = clamp_int(int(payload.get("r", 0)), 0, 255)
             g = clamp_int(int(payload.get("g", 0)), 0, 255)
             b = clamp_int(int(payload.get("b", 0)), 0, 255)
@@ -336,7 +371,12 @@ class PointsPage(PickNotebookCrudPage):
             self.var_g.set(g)
             self.var_b.set(b)
             self._swatch.set_rgb(r, g, b)
+
             self.var_captured_at.set(now_iso_utc())
+
+            mon = payload.get("monitor")
+            if isinstance(mon, str) and mon:
+                self.var_monitor.set(mon)
         finally:
             self._building_form = False
 

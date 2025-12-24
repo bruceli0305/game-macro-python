@@ -9,11 +9,17 @@ from core.models.skill import ColorRGB, SampleConfig  # 复用颜色/采样结�
 
 @dataclass
 class Point:
+    """
+    Point position is stored in virtual screen absolute coordinates (vx, vy).
+
+    - vx/vy: OS virtual screen coordinates (can be negative).
+    - monitor: kept as hint/policy for UI and conversions.
+    """
     id: str = ""          # snowflake id string
     name: str = ""
     monitor: str = "primary"
-    x: int = 0
-    y: int = 0
+    vx: int = 0
+    vy: int = 0
     color: ColorRGB = field(default_factory=ColorRGB)
     sample: SampleConfig = field(default_factory=SampleConfig)
     captured_at: str = ""  # ISO string
@@ -22,12 +28,23 @@ class Point:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Point":
         d = as_dict(d)
+
+        # Backward compatibility:
+        # - new schema uses vx/vy
+        # - older schema used x/y (relative coords), repos will migrate on load.
+        vx_raw = d.get("vx", None)
+        vy_raw = d.get("vy", None)
+        if vx_raw is None:
+            vx_raw = d.get("abs_x", d.get("x", 0))
+        if vy_raw is None:
+            vy_raw = d.get("abs_y", d.get("y", 0))
+
         return Point(
             id=as_str(d.get("id", "")),
             name=as_str(d.get("name", "")),
             monitor=as_str(d.get("monitor", "primary"), "primary"),
-            x=clamp_int(as_int(d.get("x", 0), 0), 0, 10**9),
-            y=clamp_int(as_int(d.get("y", 0), 0), 0, 10**9),
+            vx=clamp_int(as_int(vx_raw, 0), -10**9, 10**9),
+            vy=clamp_int(as_int(vy_raw, 0), -10**9, 10**9),
             color=ColorRGB.from_dict(d.get("color", {}) or {}),
             sample=SampleConfig.from_dict(d.get("sample", {}) or {}),
             captured_at=as_str(d.get("captured_at", "")),
@@ -39,8 +56,8 @@ class Point:
             "id": self.id,
             "name": self.name,
             "monitor": self.monitor,
-            "x": int(self.x),
-            "y": int(self.y),
+            "vx": int(self.vx),
+            "vy": int(self.vy),
             "color": self.color.to_dict(),
             "sample": self.sample.to_dict(),
             "captured_at": self.captured_at,
@@ -50,7 +67,7 @@ class Point:
 
 @dataclass
 class PointsFile:
-    schema_version: int = 1
+    schema_version: int = 2
     points: List[Point] = field(default_factory=list)
 
     @staticmethod
@@ -62,7 +79,7 @@ class PointsFile:
             if isinstance(item, dict):
                 points.append(Point.from_dict(item))
         return PointsFile(
-            schema_version=as_int(d.get("schema_version", 1), 1),
+            schema_version=as_int(d.get("schema_version", 2), 2),
             points=points,
         )
 

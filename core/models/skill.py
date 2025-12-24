@@ -44,9 +44,15 @@ class SampleConfig:
 
 @dataclass
 class PixelSpec:
+    """
+    Pixel position is stored in virtual screen absolute coordinates (vx, vy).
+
+    - vx/vy: OS virtual screen coordinates (can be negative on multi-monitor setups).
+    - monitor: still kept as a hint / UI selection / policy (e.g. "primary", "monitor_2", "all").
+    """
     monitor: str = "primary"
-    x: int = 0
-    y: int = 0
+    vx: int = 0
+    vy: int = 0
     color: ColorRGB = field(default_factory=ColorRGB)
     tolerance: int = 0
     sample: SampleConfig = field(default_factory=SampleConfig)
@@ -54,10 +60,21 @@ class PixelSpec:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "PixelSpec":
         d = as_dict(d)
+
+        # Backward compatibility:
+        # - new schema uses vx/vy
+        # - older schema used x/y (relative coords), but repos will migrate those on load.
+        vx_raw = d.get("vx", None)
+        vy_raw = d.get("vy", None)
+        if vx_raw is None:
+            vx_raw = d.get("abs_x", d.get("x", 0))
+        if vy_raw is None:
+            vy_raw = d.get("abs_y", d.get("y", 0))
+
         return PixelSpec(
             monitor=as_str(d.get("monitor", "primary"), "primary"),
-            x=clamp_int(as_int(d.get("x", 0), 0), 0, 10**9),
-            y=clamp_int(as_int(d.get("y", 0), 0), 0, 10**9),
+            vx=clamp_int(as_int(vx_raw, 0), -10**9, 10**9),
+            vy=clamp_int(as_int(vy_raw, 0), -10**9, 10**9),
             color=ColorRGB.from_dict(d.get("color", {}) or {}),
             tolerance=clamp_int(as_int(d.get("tolerance", 0), 0), 0, 255),
             sample=SampleConfig.from_dict(d.get("sample", {}) or {}),
@@ -66,8 +83,8 @@ class PixelSpec:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "monitor": self.monitor,
-            "x": int(self.x),
-            "y": int(self.y),
+            "vx": int(self.vx),
+            "vy": int(self.vy),
             "color": self.color.to_dict(),
             "tolerance": int(self.tolerance),
             "sample": self.sample.to_dict(),
@@ -145,7 +162,7 @@ class Skill:
 
 @dataclass
 class SkillsFile:
-    schema_version: int = 1
+    schema_version: int = 2
     skills: List[Skill] = field(default_factory=list)
 
     @staticmethod
@@ -157,7 +174,7 @@ class SkillsFile:
             if isinstance(item, dict):
                 skills.append(Skill.from_dict(item))
         return SkillsFile(
-            schema_version=as_int(d.get("schema_version", 1), 1),
+            schema_version=as_int(d.get("schema_version", 2), 2),
             skills=skills,
         )
 

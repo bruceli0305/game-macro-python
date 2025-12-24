@@ -105,6 +105,33 @@ class ScreenCapture:
             height=int(m["height"]),
         )
 
+    def find_monitor_key_for_abs(self, x_abs: int, y_abs: int, *, default: str = "primary") -> str:
+        """
+        Find which physical monitor contains (x_abs, y_abs).
+        Returns "primary" for idx==1, otherwise "monitor_N".
+        If not found, returns default.
+        """
+        sct = self._get_sct()
+        monitors = sct.monitors  # type: ignore[attr-defined]
+        x_abs = int(x_abs)
+        y_abs = int(y_abs)
+
+        # scan physical monitors (1..n)
+        for idx in range(1, len(monitors)):
+            m = monitors[idx]
+            rect = Rect(
+                left=int(m["left"]),
+                top=int(m["top"]),
+                width=int(m["width"]),
+                height=int(m["height"]),
+            )
+            if rect.contains_abs(x_abs, y_abs):
+                if idx == 1:
+                    return "primary"
+                return f"monitor_{idx}"
+
+        return (default or "primary").strip() or "primary"
+
     # -------- coordinate conversion --------
 
     def abs_to_rel(self, x_abs: int, y_abs: int, monitor_key: str) -> Tuple[int, int]:
@@ -128,6 +155,8 @@ class ScreenCapture:
     ) -> Tuple[int, int, int]:
         """
         在指定 monitor_key 的屏幕矩形内，用绝对坐标采样。
+        - require_inside=True: 若点不在 rect 内则抛错
+        - require_inside=False: 自动 clamp 到 rect 内采样
         """
         rect = self.get_monitor_rect(monitor_key)
         x_abs = int(x_abs)

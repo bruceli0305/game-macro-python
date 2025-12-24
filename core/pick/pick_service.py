@@ -24,11 +24,16 @@ class PickConfig:
 
 class PickService:
     """
-    坐标策略（本版本）：
-    - 鼠标回调拿到的是绝对坐标 (abs_x, abs_y)
+    坐标策略（当前版本）：
+    - 鼠标回调拿到的是绝对坐标 (abs_x, abs_y)，等同 OS 虚拟屏幕坐标（可为负）
     - 对外事件里提供：
-        x,y -> 相对坐标（相对 monitor_key 左上角）
-        abs_x, abs_y -> 绝对坐标（调试用）
+        x,y   -> 相对坐标（相对 monitor_used 左上角）
+        vx,vy -> 虚拟屏幕坐标（= abs_x/abs_y，持久化用）
+        abs_x, abs_y -> 兼容保留（调试用）
+    - 新增：
+        monitor_requested -> 配置/对象期望的 monitor
+        monitor (monitor_used) -> 实际用于计算/采样的 monitor
+        inside -> 鼠标是否在 requested monitor 内
     """
 
     def __init__(
@@ -153,6 +158,28 @@ class PickService:
         except Exception:
             pass
 
+    def _resolve_monitor(self, abs_x: int, abs_y: int, requested: str) -> tuple[str, bool]:
+        """
+        Return (monitor_used, inside_requested).
+        """
+        req = (requested or "primary").strip().lower() or "primary"
+        try:
+            rect_req = self._cap.get_monitor_rect(req)
+            inside = rect_req.contains_abs(int(abs_x), int(abs_y))
+        except Exception:
+            inside = True
+
+        if req == "all":
+            # keep "all" semantics: rel coords are virtual-screen-relative
+            return "all", inside
+
+        if inside:
+            return req, True
+
+        # outside requested -> use monitor containing cursor (best UX)
+        used = self._cap.find_monitor_key_for_abs(int(abs_x), int(abs_y), default=req)
+        return used, False
+
     def _on_click(self, abs_x: int, abs_y: int, button, pressed: bool) -> None:
         try:
             if not self._active or not pressed:
@@ -166,24 +193,28 @@ class PickService:
                 return
 
             ctx = self._context or {}
-            sample, mon = self._capture_spec_provider(ctx)
+            sample, mon_req = self._capture_spec_provider(ctx)
+            mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
 
-            r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon, require_inside=True)
+            # sample (never pause on cross-monitor)
+            r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
 
-            rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon)
+            rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon_used)
             hx = f"#{r:02X}{g:02X}{b:02X}"
 
             self._bus.post(
                 EventType.PICK_CONFIRMED,
                 context=ctx,
-                monitor=mon,
+                monitor_requested=mon_req,
+                monitor=mon_used,
+                inside=bool(inside),
                 x=int(rel_x),
                 y=int(rel_y),
+                vx=int(abs_x),
+                vy=int(abs_y),
                 abs_x=int(abs_x),
                 abs_y=int(abs_y),
-                r=r,
-                g=g,
-                b=b,
+                r=r, g=g, b=b,
                 hex=hx,
             )
             self.stop(reason="confirmed")
@@ -209,10 +240,11 @@ class PickService:
             try:
                 abs_x, abs_y = ctrl.position
                 ctx = self._context or {}
-                sample, mon = self._capture_spec_provider(ctx)
+                sample, mon_req = self._capture_spec_provider(ctx)
+                mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
 
-                r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon, require_inside=True)
-                rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon)
+                r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
+                rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon_used)
                 hx = f"#{r:02X}{g:02X}{b:02X}"
 
                 if not self._announced_preview:
@@ -222,20 +254,22 @@ class PickService:
                 self._bus.post(
                     EventType.PICK_PREVIEW,
                     context=ctx,
-                    monitor=mon,
+                    monitor_requested=mon_req,
+                    monitor=mon_used,
+                    inside=bool(inside),
                     x=int(rel_x),
                     y=int(rel_y),
+                    vx=int(abs_x),
+                    vy=int(abs_y),
                     abs_x=int(abs_x),
                     abs_y=int(abs_y),
-                    r=r,
-                    g=g,
-                    b=b,
+                    r=r, g=g, b=b,
                     hex=hx,
                 )
 
             except Exception as e:
                 if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                     self._last_err_t = now
-                    self._bus.post(EventType.STATUS, msg=f"取色预览暂停: {e}")
+                    self._bus.post(EventType.STATUS, msg=f"取色预览异常: {e}")
 
             time.sleep(max(0.005, float(cfg.preview_throttle_ms) / 1000.0))
