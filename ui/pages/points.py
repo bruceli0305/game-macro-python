@@ -4,24 +4,16 @@ import tkinter as tk
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
+from core.app.services.points_service import PointsService
 from core.event_bus import EventBus
 from core.event_types import EventType
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
-from core.models.skill import ColorRGB
-from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
 from ui.widgets.color_swatch import ColorSwatch
-
-
-def rgb_to_hex(r: int, g: int, b: int) -> str:
-    r = clamp_int(int(r), 0, 255)
-    g = clamp_int(int(g), 0, 255)
-    b = clamp_int(int(b), 0, 255)
-    return f"#{r:02X}{g:02X}{b:02X}"
 
 
 class PointsPage(PickNotebookCrudPage):
@@ -44,7 +36,7 @@ class PointsPage(PickNotebookCrudPage):
             tab_names=["基本", "颜色&采样", "备注"],
         )
 
-        self._cap = ScreenCapture()
+        self._svc = PointsService(ctx_provider=lambda: self._ctx, bus=self._bus)
 
         tab_basic = self.tabs["基本"]
         tab_color = self.tabs["颜色&采样"]
@@ -53,10 +45,8 @@ class PointsPage(PickNotebookCrudPage):
         self.var_id = tk.StringVar(value="")
         self.var_name = tk.StringVar(value="")
         self.var_monitor = tk.StringVar(value="primary")
-
-        # UI 依旧使用“相对坐标（monitor 内）”
-        self.var_x = tk.IntVar(value=0)
-        self.var_y = tk.IntVar(value=0)
+        self.var_x = tk.IntVar(value=0)  # rel
+        self.var_y = tk.IntVar(value=0)  # rel
 
         self.var_r = tk.IntVar(value=0)
         self.var_g = tk.IntVar(value=0)
@@ -75,7 +65,7 @@ class PointsPage(PickNotebookCrudPage):
 
     def destroy(self) -> None:
         try:
-            self._cap.close()
+            self._svc.close()
         except Exception:
             pass
         super().destroy()
@@ -91,42 +81,16 @@ class PointsPage(PickNotebookCrudPage):
         return self._ctx.points.points
 
     def _save_to_disk(self) -> bool:
-        try:
-            self._ctx.points_repo.save(self._ctx.points, backup=self._ctx.base.io.backup_on_save)
-            return True
-        except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"保存 points.json 失败: {e}")
-            return False
+        return self._svc.save()
 
     def _make_new_record(self) -> Point:
-        pid = self._ctx.idgen.next_id()
-        try:
-            vx, vy = self._cap.rel_to_abs(0, 0, "primary")
-        except Exception:
-            vx, vy = 0, 0
-        p = Point(
-            id=pid,
-            name="新点位",
-            monitor="primary",
-            vx=int(vx),
-            vy=int(vy),
-            color=ColorRGB(0, 0, 0),
-            captured_at=now_iso_utc(),
-        )
-        p.sample.mode = "single"
-        p.sample.radius = 0
-        return p
+        return self._svc.make_new()
 
     def _clone_record(self, record: Point) -> Point:
-        new_id = self._ctx.idgen.next_id()
-        clone = Point.from_dict(record.to_dict())
-        clone.id = new_id
-        clone.name = f"{record.name} (副本)"
-        clone.captured_at = now_iso_utc()
-        return clone
+        return self._svc.clone(record)
 
     def _delete_record_by_id(self, rid: str) -> None:
-        self._ctx.points.points = [x for x in self._ctx.points.points if x.id != rid]
+        self._svc.delete_by_id(rid)
 
     def _record_id(self, record: Point) -> str:
         return record.id
@@ -135,17 +99,7 @@ class PointsPage(PickNotebookCrudPage):
         return record.name
 
     def _record_row_values(self, p: Point) -> tuple:
-        pid = p.id or ""
-        short = pid[-6:] if len(pid) >= 6 else pid
-
-        try:
-            rx, ry = self._cap.abs_to_rel(int(p.vx), int(p.vy), p.monitor or "primary")
-        except Exception:
-            rx, ry = int(p.vx), int(p.vy)
-
-        pos = f"({rx},{ry})"
-        hx = rgb_to_hex(p.color.r, p.color.g, p.color.b)
-        return (p.name, short, p.monitor, pos, hx, p.captured_at)
+        return self._svc.row_values(p)
 
     # ----- form -----
     def _build_tab_basic(self, parent: tk.Misc) -> None:
@@ -254,23 +208,20 @@ class PointsPage(PickNotebookCrudPage):
             self._building_form = False
 
     def _load_into_form(self, rid: str) -> None:
-        p = self._find_point(rid)
+        p = self._svc.find_by_id(rid)
         if p is None:
             return
         self._current_id = rid
         short = rid[-6:] if len(rid) >= 6 else rid
         self.set_header_title(f"{p.name}  [{short}]")
 
+        rx, ry = self._svc.load_rel_xy(p)
+
         self._building_form = True
         try:
             self.var_id.set(p.id)
             self.var_name.set(p.name)
             self.var_monitor.set(p.monitor or "primary")
-
-            try:
-                rx, ry = self._cap.abs_to_rel(int(p.vx), int(p.vy), self.var_monitor.get())
-            except Exception:
-                rx, ry = 0, 0
             self.var_x.set(int(rx))
             self.var_y.set(int(ry))
 
@@ -292,33 +243,24 @@ class PointsPage(PickNotebookCrudPage):
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
-        p = self._find_point(self._current_id)
+        p = self._svc.find_by_id(self._current_id)
         if p is None:
             return False
 
-        p.name = self.var_name.get()
-        mon = self.var_monitor.get() or "primary"
-        p.monitor = mon
-
-        rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
-        rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
-        try:
-            vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
-        except Exception:
-            vx, vy = rel_x, rel_y
-        p.vx = clamp_int(int(vx), -10**9, 10**9)
-        p.vy = clamp_int(int(vy), -10**9, 10**9)
-
-        r = clamp_int(int(self.var_r.get()), 0, 255)
-        g = clamp_int(int(self.var_g.get()), 0, 255)
-        b = clamp_int(int(self.var_b.get()), 0, 255)
-        p.color = ColorRGB(r=r, g=g, b=b)
-
-        p.captured_at = self.var_captured_at.get().strip()
-        p.sample.mode = SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single")
-        p.sample.radius = clamp_int(int(self.var_sample_radius.get()), 0, 50)
-
-        p.note = self._txt_note.get("1.0", "end").rstrip("\n")
+        self._svc.apply_form(
+            p,
+            name=self.var_name.get(),
+            monitor=self.var_monitor.get(),
+            rel_x=int(self.var_x.get()),
+            rel_y=int(self.var_y.get()),
+            r=int(self.var_r.get()),
+            g=int(self.var_g.get()),
+            b=int(self.var_b.get()),
+            captured_at=self.var_captured_at.get(),
+            sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
+            sample_radius=int(self.var_sample_radius.get()),
+            note=self._txt_note.get("1.0", "end").rstrip("\n"),
+        )
 
         self.update_tree_row(p.id)
 
@@ -327,35 +269,12 @@ class PointsPage(PickNotebookCrudPage):
                 self.clear_dirty()
         return True
 
-    def _find_point(self, pid: str) -> Point | None:
-        for p in self._ctx.points.points:
-            if p.id == pid:
-                return p
-        return None
-
     # ----- pick hook -----
     def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
-        p = self._find_point(rid)
+        p = self._svc.find_by_id(rid)
         if p is None:
             return False
-
-        if "vx" in payload and "vy" in payload:
-            vx = int(payload.get("vx", 0))
-            vy = int(payload.get("vy", 0))
-        else:
-            vx = int(payload.get("abs_x", 0))
-            vy = int(payload.get("abs_y", 0))
-
-        r = clamp_int(int(payload.get("r", 0)), 0, 255)
-        g = clamp_int(int(payload.get("g", 0)), 0, 255)
-        b = clamp_int(int(payload.get("b", 0)), 0, 255)
-
-        p.vx, p.vy = vx, vy
-        mon = payload.get("monitor")
-        if isinstance(mon, str) and mon:
-            p.monitor = mon
-        p.color = ColorRGB(r=r, g=g, b=b)
-        p.captured_at = now_iso_utc()
+        self._svc.apply_pick_payload(p, payload)
         return True
 
     def _sync_form_after_pick(self, rid: str, payload: dict) -> None:
