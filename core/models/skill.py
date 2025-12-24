@@ -1,0 +1,168 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List
+
+from core.models.common import as_bool, as_dict, as_int, as_list, as_str, clamp_int
+
+
+@dataclass
+class ColorRGB:
+    r: int = 0
+    g: int = 0
+    b: int = 0
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "ColorRGB":
+        d = as_dict(d)
+        return ColorRGB(
+            r=clamp_int(as_int(d.get("r", 0), 0), 0, 255),
+            g=clamp_int(as_int(d.get("g", 0), 0), 0, 255),
+            b=clamp_int(as_int(d.get("b", 0), 0), 0, 255),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"r": int(self.r), "g": int(self.g), "b": int(self.b)}
+
+
+@dataclass
+class SampleConfig:
+    mode: str = "single"  # "single" | "mean_square" (future)
+    radius: int = 0
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "SampleConfig":
+        d = as_dict(d)
+        return SampleConfig(
+            mode=as_str(d.get("mode", "single"), "single"),
+            radius=clamp_int(as_int(d.get("radius", 0), 0), 0, 50),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"mode": self.mode, "radius": int(self.radius)}
+
+
+@dataclass
+class PixelSpec:
+    monitor: str = "primary"
+    x: int = 0
+    y: int = 0
+    color: ColorRGB = field(default_factory=ColorRGB)
+    tolerance: int = 0
+    sample: SampleConfig = field(default_factory=SampleConfig)
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "PixelSpec":
+        d = as_dict(d)
+        return PixelSpec(
+            monitor=as_str(d.get("monitor", "primary"), "primary"),
+            x=clamp_int(as_int(d.get("x", 0), 0), 0, 10**9),
+            y=clamp_int(as_int(d.get("y", 0), 0), 0, 10**9),
+            color=ColorRGB.from_dict(d.get("color", {}) or {}),
+            tolerance=clamp_int(as_int(d.get("tolerance", 0), 0), 0, 255),
+            sample=SampleConfig.from_dict(d.get("sample", {}) or {}),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "monitor": self.monitor,
+            "x": int(self.x),
+            "y": int(self.y),
+            "color": self.color.to_dict(),
+            "tolerance": int(self.tolerance),
+            "sample": self.sample.to_dict(),
+        }
+
+
+@dataclass
+class TriggerConfig:
+    type: str = "key"  # "key" (一期先这样)
+    key: str = ""
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "TriggerConfig":
+        d = as_dict(d)
+        return TriggerConfig(
+            type=as_str(d.get("type", "key"), "key"),
+            key=as_str(d.get("key", ""), ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"type": self.type, "key": self.key}
+
+
+@dataclass
+class CastConfig:
+    readbar_ms: int = 0
+    cooldown_ms: int = 0  # 预留
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "CastConfig":
+        d = as_dict(d)
+        return CastConfig(
+            readbar_ms=clamp_int(as_int(d.get("readbar_ms", 0), 0), 0, 10**9),
+            cooldown_ms=clamp_int(as_int(d.get("cooldown_ms", 0), 0), 0, 10**9),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"readbar_ms": int(self.readbar_ms), "cooldown_ms": int(self.cooldown_ms)}
+
+
+@dataclass
+class Skill:
+    id: str = ""          # snowflake id string
+    name: str = ""
+    enabled: bool = True
+    trigger: TriggerConfig = field(default_factory=TriggerConfig)
+    cast: CastConfig = field(default_factory=CastConfig)
+    pixel: PixelSpec = field(default_factory=PixelSpec)
+    note: str = ""
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "Skill":
+        d = as_dict(d)
+        return Skill(
+            id=as_str(d.get("id", "")),
+            name=as_str(d.get("name", "")),
+            enabled=as_bool(d.get("enabled", True), True),
+            trigger=TriggerConfig.from_dict(d.get("trigger", {}) or {}),
+            cast=CastConfig.from_dict(d.get("cast", {}) or {}),
+            pixel=PixelSpec.from_dict(d.get("pixel", {}) or {}),
+            note=as_str(d.get("note", "")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "enabled": bool(self.enabled),
+            "trigger": self.trigger.to_dict(),
+            "cast": self.cast.to_dict(),
+            "pixel": self.pixel.to_dict(),
+            "note": self.note,
+        }
+
+
+@dataclass
+class SkillsFile:
+    schema_version: int = 1
+    skills: List[Skill] = field(default_factory=list)
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "SkillsFile":
+        d = as_dict(d)
+        skills_raw = as_list(d.get("skills", []))
+        skills: List[Skill] = []
+        for item in skills_raw:
+            if isinstance(item, dict):
+                skills.append(Skill.from_dict(item))
+        return SkillsFile(
+            schema_version=as_int(d.get("schema_version", 1), 1),
+            skills=skills,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": int(self.schema_version),
+            "skills": [s.to_dict() for s in self.skills],
+        }
