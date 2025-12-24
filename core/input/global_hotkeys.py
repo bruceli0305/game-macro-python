@@ -6,6 +6,7 @@ from typing import Optional, Callable
 from pynput import keyboard
 
 from core.event_bus import EventBus
+from core.event_types import EventType
 from core.input.hotkey_strings import to_pynput_hotkey
 
 
@@ -35,26 +36,26 @@ class GlobalHotkeyService:
             hk_enter = to_pynput_hotkey(cfg.enter_pick_mode)
             hk_cancel = to_pynput_hotkey(cfg.cancel_pick)
         except Exception as e:
-            self._bus.post("ERROR", msg=f"热键格式错误: {e}")
+            self._bus.post(EventType.ERROR, msg=f"热键格式错误: {e}")
             return
 
         # 冲突检测：相同组合会导致映射覆盖/行为异常
         if hk_enter == hk_cancel:
-            self._bus.post("ERROR", msg="热键冲突：进入取色 与 取消取色 不能相同")
+            self._bus.post(EventType.ERROR, msg="热键冲突：进入取色 与 取消取色 不能相同")
             return
 
         mapping = {
-            hk_enter: lambda: self._bus.post("PICK_START_LAST"),
-            hk_cancel: lambda: self._bus.post("PICK_CANCEL_REQUEST"),
+            hk_enter: lambda: self._bus.post(EventType.PICK_START_LAST),
+            hk_cancel: lambda: self._bus.post(EventType.PICK_CANCEL_REQUEST),
         }
 
         try:
             self._listener = keyboard.GlobalHotKeys(mapping)
             self._listener.start()
-            self._bus.post("INFO", msg=f"全局热键已启用: enter={hk_enter}, cancel={hk_cancel}")
+            self._bus.post(EventType.INFO, msg=f"全局热键已启用: enter={hk_enter}, cancel={hk_cancel}")
         except Exception as e:
             self._listener = None
-            self._bus.post("ERROR", msg=f"全局热键启动失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"全局热键启动失败: {e}")
 
     def stop(self) -> None:
         if self._listener is not None:

@@ -5,6 +5,7 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
 from core.event_bus import EventBus
+from core.event_types import EventType
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
@@ -82,7 +83,7 @@ class PointsPage(PickNotebookCrudPage):
             self._ctx.points_repo.save(self._ctx.points, backup=self._ctx.base.io.backup_on_save)
             return True
         except Exception as e:
-            self._bus.post("ERROR", msg=f"保存 points.json 失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"保存 points.json 失败: {e}")
             return False
 
     def _make_new_record(self) -> Point:
@@ -139,10 +140,14 @@ class PointsPage(PickNotebookCrudPage):
                     state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="X").grid(row=3, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(row=3, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(
+            row=3, column=1, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="Y").grid(row=4, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(row=4, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(
+            row=4, column=1, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="captured_at").grid(row=5, column=0, sticky="w", pady=4)
         tb.Entry(parent, textvariable=self.var_captured_at).grid(row=5, column=1, sticky="ew", pady=4)
@@ -155,11 +160,17 @@ class PointsPage(PickNotebookCrudPage):
         self._swatch.grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
 
         tb.Label(parent, text="R").grid(row=1, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(row=1, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(
+            row=1, column=1, sticky="ew", pady=4
+        )
         tb.Label(parent, text="G").grid(row=1, column=2, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(row=1, column=3, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(
+            row=1, column=3, sticky="ew", pady=4
+        )
         tb.Label(parent, text="B").grid(row=1, column=4, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(row=1, column=5, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(
+            row=1, column=5, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="采样模式").grid(row=2, column=0, sticky="w", pady=4)
         tb.Combobox(parent, textvariable=self.var_sample_mode, values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),

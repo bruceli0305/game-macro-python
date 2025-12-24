@@ -7,10 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, DefaultDict, Dict, List, Optional
 from collections import defaultdict
 
+from core.event_types import EventType, as_event_type
+
 
 @dataclass(frozen=True)
 class Event:
-    type: str
+    type: EventType
     payload: Dict[str, Any] = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
     thread_id: int = field(default_factory=lambda: threading.get_ident())
@@ -28,7 +30,7 @@ class EventBus:
 
     def __init__(self) -> None:
         self._q: "queue.Queue[Event]" = queue.Queue()
-        self._handlers: DefaultDict[str, List[Handler]] = defaultdict(list)
+        self._handlers: DefaultDict[EventType, List[Handler]] = defaultdict(list)
         self._lock = threading.RLock()
 
     # ---------- publish side (thread-safe) ----------
@@ -39,31 +41,32 @@ class EventBus:
             raise TypeError("publish() expects an Event")
         self._q.put(event)
 
-    def post(self, event_type: str, **payload: Any) -> None:
+    def post(self, event_type: EventType | str, **payload: Any) -> None:
         """Convenience: create + publish."""
-        self.publish(Event(type=event_type, payload=dict(payload)))
+        et = as_event_type(event_type)
+        self.publish(Event(type=et, payload=dict(payload)))
 
     # ---------- subscribe side ----------
 
-    def subscribe(self, event_type: str, handler: Handler) -> None:
+    def subscribe(self, event_type: EventType | str, handler: Handler) -> None:
         """
         Subscribe handler to an event type.
-        event_type="*" means receive all events.
+        event_type=EventType.ANY (or "*") means receive all events.
         """
-        if not event_type:
-            raise ValueError("event_type cannot be empty")
+        et = as_event_type(event_type)
         if handler is None:
             raise ValueError("handler cannot be None")
 
         with self._lock:
-            self._handlers[event_type].append(handler)
+            self._handlers[et].append(handler)
 
-    def unsubscribe(self, event_type: str, handler: Handler) -> None:
+    def unsubscribe(self, event_type: EventType | str, handler: Handler) -> None:
+        et = as_event_type(event_type)
         with self._lock:
-            if event_type not in self._handlers:
+            if et not in self._handlers:
                 return
-            lst = self._handlers[event_type]
-            self._handlers[event_type] = [h for h in lst if h is not handler]
+            lst = self._handlers[et]
+            self._handlers[et] = [h for h in lst if h is not handler]
 
     # ---------- dispatch side (call from UI thread) ----------
 
@@ -101,9 +104,9 @@ class EventBus:
     def _dispatch_one(self, ev: Event) -> None:
         with self._lock:
             specific = list(self._handlers.get(ev.type, []))
-            wildcard = list(self._handlers.get("*", []))
+            wildcard = list(self._handlers.get(EventType.ANY, []))
 
-        # 先 specific，再 wildcard（可按你喜好调整）
+        # 先 specific，再 wildcard
         for h in specific:
             h(ev)
         for h in wildcard:

@@ -7,6 +7,7 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import LEFT, X, Y, VERTICAL
 
 from core.event_bus import EventBus, Event
+from core.event_types import EventType
 from core.models.app_state import AppState
 from core.profiles import ProfileContext, ProfileManager
 from core.repos.app_state_repo import AppStateRepo
@@ -157,21 +158,21 @@ class AppWindow(tb.Window):
             )
 
         # ---- EventBus ----
-        self._bus.subscribe("UI_THEME_CHANGE", self._on_theme_change)
-        self._bus.subscribe("HOTKEYS_CHANGED", lambda _ev: self._hotkeys.start())
-        self._bus.subscribe("INFO", self._on_info)
-        self._bus.subscribe("ERROR", self._on_error)
-        self._bus.subscribe("STATUS", self._on_status)
+        self._bus.subscribe(EventType.UI_THEME_CHANGE, self._on_theme_change)
+        self._bus.subscribe(EventType.HOTKEYS_CHANGED, lambda _ev: self._hotkeys.start())
+        self._bus.subscribe(EventType.INFO, self._on_info)
+        self._bus.subscribe(EventType.ERROR, self._on_error)
+        self._bus.subscribe(EventType.STATUS, self._on_status)
 
         # pick ui subscriptions
-        self._bus.subscribe("PICK_MODE_ENTERED", self._on_pick_mode_entered)
-        self._bus.subscribe("PICK_PREVIEW", self._on_pick_preview)
-        self._bus.subscribe("PICK_MODE_EXITED", self._on_pick_mode_exited)
-        self._bus.subscribe("PICK_CANCELED", self._on_pick_canceled)
-        self._bus.subscribe("PICK_CONFIRMED", self._on_pick_confirmed)
+        self._bus.subscribe(EventType.PICK_MODE_ENTERED, self._on_pick_mode_entered)
+        self._bus.subscribe(EventType.PICK_PREVIEW, self._on_pick_preview)
+        self._bus.subscribe(EventType.PICK_MODE_EXITED, self._on_pick_mode_exited)
+        self._bus.subscribe(EventType.PICK_CANCELED, self._on_pick_canceled)
+        self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed)
 
         # preview window click cancel -> bus cancel
-        self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post("PICK_CANCEL_REQUEST"))
+        self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post(EventType.PICK_CANCEL_REQUEST))
 
         self.after(16, self._pump_events)
 
@@ -211,6 +212,7 @@ class AppWindow(tb.Window):
             pass
 
         return SampleSpec(mode=mode, radius=radius), mon
+
     # ---------------- Pages ----------------
     def _build_pages(self) -> None:
         self._pages["base"] = BaseSettingsPage(self._content, ctx=self._ctx, bus=self._bus)
@@ -241,7 +243,7 @@ class AppWindow(tb.Window):
             self._refresh_profile_list(select=self._ctx.profile_name)
             return
         # cancel pick if active to avoid weird state
-        self._bus.post("PICK_CANCEL_REQUEST")
+        self._bus.post(EventType.PICK_CANCEL_REQUEST)
         self._switch_profile(name)
 
     def _on_profile_action(self, action: str) -> None:
@@ -260,7 +262,7 @@ class AppWindow(tb.Window):
                 ctx = self._pm.create_profile(name)
                 self._switch_profile(ctx.profile_name)
             except Exception as e:
-                self._bus.post("ERROR", msg=f"新建失败: {e}")
+                self._bus.post(EventType.ERROR, msg=f"新建失败: {e}")
             return
 
         if action == "copy":
@@ -271,7 +273,7 @@ class AppWindow(tb.Window):
                 ctx = self._pm.copy_profile(cur, name)
                 self._switch_profile(ctx.profile_name)
             except Exception as e:
-                self._bus.post("ERROR", msg=f"复制失败: {e}")
+                self._bus.post(EventType.ERROR, msg=f"复制失败: {e}")
             return
 
         if action == "rename":
@@ -282,7 +284,7 @@ class AppWindow(tb.Window):
                 ctx = self._pm.rename_profile(cur, name)
                 self._switch_profile(ctx.profile_name)
             except Exception as e:
-                self._bus.post("ERROR", msg=f"重命名失败: {e}")
+                self._bus.post(EventType.ERROR, msg=f"重命名失败: {e}")
             return
 
         if action == "delete":
@@ -302,14 +304,14 @@ class AppWindow(tb.Window):
                         try:
                             page.set_context(self._ctx)  # type: ignore[attr-defined]
                         except Exception as e:
-                            self._bus.post("ERROR", msg=f"页面刷新失败({key}): {e}")
+                            self._bus.post(EventType.ERROR, msg=f"页面刷新失败({key}): {e}")
 
                 self._hotkeys.start()
                 self._refresh_profile_list(select=self._ctx.profile_name)
-                self._bus.post("INFO", msg=f"已删除 profile 并切换到 {self._ctx.profile_name}")
+                self._bus.post(EventType.INFO, msg=f"已删除 profile 并切换到 {self._ctx.profile_name}")
                 self._update_global_dirty_indicator()
             except Exception as e:
-                self._bus.post("ERROR", msg=f"删除失败: {e}")
+                self._bus.post(EventType.ERROR, msg=f"删除失败: {e}")
             return
 
     def _switch_profile(self, name: str) -> None:
@@ -318,7 +320,7 @@ class AppWindow(tb.Window):
         try:
             new_ctx = self._pm.open_profile(name)
         except Exception as e:
-            self._bus.post("ERROR", msg=f"打开 profile 失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"打开 profile 失败: {e}")
             self._refresh_profile_list(select=self._ctx.profile_name)
             return
 
@@ -335,11 +337,11 @@ class AppWindow(tb.Window):
                 try:
                     page.set_context(self._ctx)  # type: ignore[attr-defined]
                 except Exception as e:
-                    self._bus.post("ERROR", msg=f"页面刷新失败({key}): {e}")
+                    self._bus.post(EventType.ERROR, msg=f"页面刷新失败({key}): {e}")
 
         self._hotkeys.start()
         self._refresh_profile_list(select=self._ctx.profile_name)
-        self._bus.post("INFO", msg=f"已切换 profile: {self._ctx.profile_name}")
+        self._bus.post(EventType.INFO, msg=f"已切换 profile: {self._ctx.profile_name}")
         self._update_global_dirty_indicator()
 
     # ---------------- Pick UI closure ----------------
@@ -429,7 +431,7 @@ class AppWindow(tb.Window):
                 self._preview.hide()
             except Exception:
                 pass
-        self._bus.post("STATUS", msg="取色模式已进入")
+        self._bus.post(EventType.STATUS, msg="取色模式已进入")
 
     def _on_pick_preview(self, ev: Event) -> None:
         # status text (still use sampled x/y)
@@ -526,10 +528,10 @@ class AppWindow(tb.Window):
     def _on_pick_confirmed(self, ev: Event) -> None:
         hx = ev.payload.get("hex", "")
         if isinstance(hx, str) and hx:
-            self._bus.post("INFO", msg=f"取色确认: {hx}")
+            self._bus.post(EventType.INFO, msg=f"取色确认: {hx}")
 
     def _on_pick_canceled(self, _ev: Event) -> None:
-        self._bus.post("INFO", msg="取色已取消")
+        self._bus.post(EventType.INFO, msg="取色已取消")
 
     def _on_pick_mode_exited(self, _ev: Event) -> None:
         self._pick_active = False
@@ -543,7 +545,8 @@ class AppWindow(tb.Window):
             self._preview = None
 
         self._restore_after_exit()
-        self._bus.post("STATUS", msg="取色模式已退出")
+        self._bus.post(EventType.STATUS, msg="取色模式已退出")
+
     def _get_virtual_screen_bounds(self) -> tuple[int, int, int, int]:
         """
         Return (L, T, R, B) bounds in screen coordinates.
@@ -565,6 +568,7 @@ class AppWindow(tb.Window):
         except Exception:
             # fallback: primary screen only
             return 0, 0, int(self.winfo_screenwidth()), int(self.winfo_screenheight())
+
     @staticmethod
     def _clamp(v: int, lo: int, hi: int) -> int:
         if v < lo:
@@ -572,6 +576,7 @@ class AppWindow(tb.Window):
         if v > hi:
             return hi
         return v
+
     # ---------------- Global dirty handling ----------------
 
     def _iter_pages(self):
@@ -686,7 +691,7 @@ class AppWindow(tb.Window):
     def _pump_events(self) -> None:
         self._bus.dispatch_pending(
             max_events=200,
-            on_error=lambda ev, e: self.set_status(f"ERROR: handler failed ({ev.type}): {e}", ttl_ms=5000),
+            on_error=lambda ev, e: self.set_status(f"ERROR: handler failed ({ev.type.value}): {e}", ttl_ms=5000),
         )
         self._update_global_dirty_indicator()
         self.after(16, self._pump_events)
@@ -735,7 +740,7 @@ class AppWindow(tb.Window):
             return
 
         # cancel pick session
-        self._bus.post("PICK_CANCEL_REQUEST")
+        self._bus.post(EventType.PICK_CANCEL_REQUEST)
 
         try:
             self._hotkeys.stop()

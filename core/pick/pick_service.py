@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from pynput import keyboard, mouse
 
 from core.event_bus import EventBus
+from core.event_types import EventType
 from core.pick.capture import ScreenCapture, SampleSpec
 
 
@@ -57,9 +58,9 @@ class PickService:
         self._last_err_t = 0.0
         self._announced_preview = False
 
-        self._bus.subscribe("PICK_REQUEST", self._on_pick_request)
-        self._bus.subscribe("PICK_START_LAST", self._on_pick_start_last)
-        self._bus.subscribe("PICK_CANCEL_REQUEST", self._on_pick_cancel)
+        self._bus.subscribe(EventType.PICK_REQUEST, self._on_pick_request)
+        self._bus.subscribe(EventType.PICK_START_LAST, self._on_pick_start_last)
+        self._bus.subscribe(EventType.PICK_CANCEL_REQUEST, self._on_pick_cancel)
 
     def close(self) -> None:
         self.stop(reason="shutdown")
@@ -68,13 +69,13 @@ class PickService:
     def _on_pick_request(self, ev) -> None:
         ctx = ev.payload.get("context")
         if not isinstance(ctx, dict) or not ctx.get("id") or not ctx.get("type"):
-            self._bus.post("ERROR", msg="PICK_REQUEST 缺少有效 context")
+            self._bus.post(EventType.ERROR, msg="PICK_REQUEST 缺少有效 context")
             return
         self.start(ctx)
 
     def _on_pick_start_last(self, _ev) -> None:
         if self._last_context is None:
-            self._bus.post("INFO", msg="未设置取色目标：请在技能/点位页点击“从屏幕取色”")
+            self._bus.post(EventType.INFO, msg="未设置取色目标：请在技能/点位页点击“从屏幕取色”")
             return
         self.start(self._last_context)
 
@@ -95,13 +96,13 @@ class PickService:
         self._last_err_t = 0.0
         self._announced_preview = False
 
-        self._bus.post("PICK_MODE_ENTERED", context=self._context)
+        self._bus.post(EventType.PICK_MODE_ENTERED, context=self._context)
 
         try:
             self._mouse_listener = mouse.Listener(on_click=self._on_click)
             self._mouse_listener.start()
         except Exception as e:
-            self._bus.post("ERROR", msg=f"鼠标监听启动失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"鼠标监听启动失败: {e}")
             self.stop(reason="mouse_listener_failed")
             return
 
@@ -109,19 +110,19 @@ class PickService:
             self._kbd_listener = keyboard.Listener(on_press=self._on_key_press)
             self._kbd_listener.start()
         except Exception as e:
-            self._bus.post("ERROR", msg=f"键盘监听启动失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"键盘监听启动失败: {e}")
             self.stop(reason="kbd_listener_failed")
             return
 
         self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._preview_thread.start()
 
-        self._bus.post("STATUS", msg="取色模式：移动鼠标预览，左键确认，Esc/右键取消")
+        self._bus.post(EventType.STATUS, msg="取色模式：移动鼠标预览，左键确认，Esc/右键取消")
 
     def cancel(self) -> None:
         if not self._active:
             return
-        self._bus.post("PICK_CANCELED", context=self._context or {})
+        self._bus.post(EventType.PICK_CANCELED, context=self._context or {})
         self.stop(reason="canceled")
 
     def stop(self, *, reason: str) -> None:
@@ -143,7 +144,7 @@ class PickService:
         self._mouse_listener = None
         self._kbd_listener = None
 
-        self._bus.post("PICK_MODE_EXITED", context=ctx, reason=reason)
+        self._bus.post(EventType.PICK_MODE_EXITED, context=ctx, reason=reason)
 
     def _on_key_press(self, key) -> None:
         try:
@@ -173,14 +174,16 @@ class PickService:
             hx = f"#{r:02X}{g:02X}{b:02X}"
 
             self._bus.post(
-                "PICK_CONFIRMED",
+                EventType.PICK_CONFIRMED,
                 context=ctx,
                 monitor=mon,
                 x=int(rel_x),
                 y=int(rel_y),
                 abs_x=int(abs_x),
                 abs_y=int(abs_y),
-                r=r, g=g, b=b,
+                r=r,
+                g=g,
+                b=b,
                 hex=hx,
             )
             self.stop(reason="confirmed")
@@ -190,7 +193,7 @@ class PickService:
             cfg = self._pick_config_provider()
             if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                 self._last_err_t = now
-                self._bus.post("ERROR", msg=f"取色确认失败: {e}")
+                self._bus.post(EventType.ERROR, msg=f"取色确认失败: {e}")
 
     def _preview_loop(self) -> None:
         ctrl = mouse.Controller()
@@ -214,23 +217,25 @@ class PickService:
 
                 if not self._announced_preview:
                     self._announced_preview = True
-                    self._bus.post("INFO", msg="取色预览已开始")
+                    self._bus.post(EventType.INFO, msg="取色预览已开始")
 
                 self._bus.post(
-                    "PICK_PREVIEW",
+                    EventType.PICK_PREVIEW,
                     context=ctx,
                     monitor=mon,
                     x=int(rel_x),
                     y=int(rel_y),
                     abs_x=int(abs_x),
                     abs_y=int(abs_y),
-                    r=r, g=g, b=b,
+                    r=r,
+                    g=g,
+                    b=b,
                     hex=hx,
                 )
 
             except Exception as e:
                 if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                     self._last_err_t = now
-                    self._bus.post("STATUS", msg=f"取色预览暂停: {e}")
+                    self._bus.post(EventType.STATUS, msg=f"取色预览暂停: {e}")
 
             time.sleep(max(0.005, float(cfg.preview_throttle_ms) / 1000.0))

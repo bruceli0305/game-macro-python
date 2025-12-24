@@ -5,6 +5,7 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
 from core.event_bus import EventBus
+from core.event_types import EventType
 from core.models.common import clamp_int
 from core.models.skill import Skill, ColorRGB
 from core.profiles import ProfileContext
@@ -87,7 +88,7 @@ class SkillsPage(PickNotebookCrudPage):
             self._ctx.skills_repo.save(self._ctx.skills, backup=self._ctx.base.io.backup_on_save)
             return True
         except Exception as e:
-            self._bus.post("ERROR", msg=f"保存 skills.json 失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"保存 skills.json 失败: {e}")
             return False
 
     def _make_new_record(self) -> Skill:

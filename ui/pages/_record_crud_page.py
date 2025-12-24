@@ -9,6 +9,7 @@ from ttkbootstrap.constants import LEFT, X
 from tkinter import messagebox  # 修复：不要用 tk.messagebox
 
 from core.event_bus import EventBus
+from core.event_types import EventType
 
 
 @dataclass
@@ -216,12 +217,12 @@ class RecordCrudPage(tb.Frame):
 
         self.mark_dirty()
         self._auto_save_if_needed()
-        self._bus.post("INFO", msg=f"已新增{self._record_noun}: {rid[-6:] if rid else ''}")
+        self._bus.post(EventType.INFO, msg=f"已新增{self._record_noun}: {rid[-6:] if rid else ''}")
 
     def _on_duplicate(self) -> None:
         sel = self._tv.selection()
         if not sel:
-            self._bus.post("ERROR", msg=f"请先选择要复制的{self._record_noun}")
+            self._bus.post(EventType.ERROR, msg=f"请先选择要复制的{self._record_noun}")
             return
 
         self._apply_form_to_current(auto_save=True)
@@ -229,7 +230,7 @@ class RecordCrudPage(tb.Frame):
         rid = sel[0]
         src = self._find_record_by_id(rid)
         if src is None:
-            self._bus.post("ERROR", msg=f"源{self._record_noun}不存在")
+            self._bus.post(EventType.ERROR, msg=f"源{self._record_noun}不存在")
             return
 
         clone = self._clone_record(src)
@@ -242,18 +243,18 @@ class RecordCrudPage(tb.Frame):
 
         self.mark_dirty()
         self._auto_save_if_needed()
-        self._bus.post("INFO", msg=f"已复制{self._record_noun}: {new_id[-6:] if new_id else ''}")
+        self._bus.post(EventType.INFO, msg=f"已复制{self._record_noun}: {new_id[-6:] if new_id else ''}")
 
     def _on_delete(self) -> None:
         sel = self._tv.selection()
         if not sel:
-            self._bus.post("ERROR", msg=f"请先选择要删除的{self._record_noun}")
+            self._bus.post(EventType.ERROR, msg=f"请先选择要删除的{self._record_noun}")
             return
 
         rid = sel[0]
         rec = self._find_record_by_id(rid)
         if rec is None:
-            self._bus.post("ERROR", msg=f"{self._record_noun}不存在")
+            self._bus.post(EventType.ERROR, msg=f"{self._record_noun}不存在")
             return
 
         ok = messagebox.askyesno(
@@ -269,14 +270,14 @@ class RecordCrudPage(tb.Frame):
 
         self.mark_dirty()
         self._auto_save_if_needed()
-        self._bus.post("INFO", msg=f"已删除{self._record_noun}: {rid[-6:]}")
+        self._bus.post(EventType.INFO, msg=f"已删除{self._record_noun}: {rid[-6:]}")
 
     def _on_save_clicked(self) -> None:
         if not self._apply_form_to_current(auto_save=False):
             return
         if self._save_to_disk():
             self.clear_dirty()
-            self._bus.post("INFO", msg=f"{self._record_noun}已保存")
+            self._bus.post(EventType.INFO, msg=f"{self._record_noun}已保存")
 
     def _auto_save_if_needed(self) -> None:
         try:

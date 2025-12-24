@@ -6,6 +6,7 @@ from typing import Any
 import ttkbootstrap as tb
 
 from core.event_bus import EventBus, Event
+from core.event_types import EventType
 from ui.pages._record_crud_page import RecordCrudPage
 from ui.widgets.scrollable_frame import ScrollableFrame
 
@@ -60,15 +61,15 @@ class PickNotebookCrudPage(RecordCrudPage):
             self.tabs[name] = tab
 
         # pick event hook
-        self._bus.subscribe("PICK_CONFIRMED", self._on_pick_confirmed_event)
+        self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed_event)
 
     def request_pick_current(self) -> None:
         if not self.current_id:
-            self._bus.post("ERROR", msg=f"请先选择一个{self._record_noun}")
+            self._bus.post(EventType.ERROR, msg=f"请先选择一个{self._record_noun}")
             return
         # flush form so sample/monitor etc are up-to-date
         self._apply_form_to_current(auto_save=False)
-        self._bus.post("PICK_REQUEST", context={"type": self._pick_context_type, "id": self.current_id})
+        self._bus.post(EventType.PICK_REQUEST, context={"type": self._pick_context_type, "id": self.current_id})
 
     def _on_pick_confirmed_event(self, ev: Event) -> None:
         ctx = ev.payload.get("context")

@@ -7,6 +7,7 @@ from tkinter import messagebox
 
 from core.input.hotkey_strings import to_pynput_hotkey
 from core.event_bus import EventBus
+from core.event_types import EventType
 from core.models.common import clamp_int
 from core.profiles import ProfileContext
 from ui.widgets.hotkey_entry import HotkeyEntry
@@ -218,7 +219,7 @@ class BaseSettingsPage(tb.Frame):
             self.var_hotkey_cancel_pick.set(b.hotkeys.cancel_pick or "esc")
 
             av = b.pick.avoidance
-            self.var_avoid_mode_disp.set(_AVOID_VAL_TO_DISP.get(av.mode, "隐藏主窗口"))
+            self.var_avoid_mode_disp.set(_AVOID_DISP_TO_VAL.get(av.mode, "隐藏主窗口"))
             self.var_avoid_delay.set(int(av.delay_ms))
             self.var_preview_follow.set(bool(av.preview_follow_cursor))
             self.var_preview_offset_x.set(int(av.preview_offset[0]))
@@ -237,9 +238,9 @@ class BaseSettingsPage(tb.Frame):
             # 从磁盘重新加载 base.json
             self._ctx.base = self._ctx.base_repo.load_or_create()
             self.set_context(self._ctx)
-            self._bus.post("INFO", msg="已重新加载 base.json")
+            self._bus.post(EventType.INFO, msg="已重新加载 base.json")
         except Exception as e:
-            self._bus.post("ERROR", msg=f"重新加载失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"重新加载失败: {e}")
 
     def _on_save(self) -> None:
         b = self._ctx.base
@@ -255,19 +256,19 @@ class BaseSettingsPage(tb.Frame):
         cancel_raw = (self.var_hotkey_cancel_pick.get() or "").strip()
 
         if not enter_raw or not cancel_raw:
-            self._bus.post("ERROR", msg="热键不能为空")
+            self._bus.post(EventType.ERROR, msg="热键不能为空")
             messagebox.showerror("保存失败", "热键不能为空", parent=self.winfo_toplevel())
             return
         try:
             enter_pp = to_pynput_hotkey(enter_raw)
             cancel_pp = to_pynput_hotkey(cancel_raw)
         except Exception as e:
-            self._bus.post("ERROR", msg=f"热键格式错误: {e}")
+            self._bus.post(EventType.ERROR, msg=f"热键格式错误: {e}")
             messagebox.showerror("保存失败", f"热键格式错误：{e}", parent=self.winfo_toplevel())
             return
 
         if enter_pp == cancel_pp:
-            self._bus.post("ERROR", msg="热键冲突：进入取色 与 取消取色 不能相同")
+            self._bus.post(EventType.ERROR, msg="热键冲突：进入取色 与 取消取色 不能相同")
             messagebox.showerror("保存失败", "热键冲突：进入取色 与 取消取色 不能相同", parent=self.winfo_toplevel())
             return
         b.hotkeys.enter_pick_mode = (self.var_hotkey_enter_pick.get() or "").strip()
@@ -286,8 +287,8 @@ class BaseSettingsPage(tb.Frame):
         try:
             self._ctx.base_repo.save(b, backup=b.io.backup_on_save)
             self._set_dirty(False)
-            self._bus.post("INFO", msg="base.json 已保存")
-            self._bus.post("UI_THEME_CHANGE", theme=b.ui.theme)
-            self._bus.post("HOTKEYS_CHANGED")
+            self._bus.post(EventType.INFO, msg="base.json 已保存")
+            self._bus.post(EventType.UI_THEME_CHANGE, theme=b.ui.theme)
+            self._bus.post(EventType.HOTKEYS_CHANGED)
         except Exception as e:
-            self._bus.post("ERROR", msg=f"保存失败: {e}")
+            self._bus.post(EventType.ERROR, msg=f"保存失败: {e}")
