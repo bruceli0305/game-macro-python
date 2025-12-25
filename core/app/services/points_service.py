@@ -101,8 +101,14 @@ class PointsService:
             except Exception:
                 saved = False
 
-        return (True, saved)
+        # Step 5: 变更后统一发事件，让 UI 刷新（不要由页面主动 update_tree_row）
+        if self._bus is not None:
+            self._bus.post_payload(
+                EventType.RECORD_UPDATED,
+                RecordUpdatedPayload(record_type="point", id=pid, source="form", saved=bool(saved)),
+            )
 
+        return (True, saved)
     def create_point(self, *, name: str = "新点位") -> Point:
         pid = self.ctx.idgen.next_id()
         p = Point(

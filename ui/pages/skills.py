@@ -284,6 +284,9 @@ class SkillsPage(PickNotebookCrudPage):
             self._schedule_apply()
 
     def _clear_form(self) -> None:
+        # Step 5: 清空前取消 debounce，避免旧定时器误 apply
+        self._cancel_pending_apply()
+
         self._var_title.set("未选择")
         self._building_form = True
         try:
@@ -305,8 +308,10 @@ class SkillsPage(PickNotebookCrudPage):
             self._txt_note.edit_modified(False)
         finally:
             self._building_form = False
-
     def _load_into_form(self, rid: str) -> None:
+        # Step 5: 切换记录前取消 debounce，避免旧定时器用旧 rid 触发 apply
+        self._cancel_pending_apply()
+
         s = self._find_skill(rid)
         if s is None:
             return
@@ -344,9 +349,8 @@ class SkillsPage(PickNotebookCrudPage):
             self._txt_note.edit_modified(False)
         finally:
             self._building_form = False
-
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
-        # Step 4: 所有表单 apply 都视为内存更新（auto_save 应为 False）
+        # Step 5: 页面不再主动刷新 tree，统一靠 RECORD_UPDATED 事件
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
 
@@ -382,15 +386,13 @@ class SkillsPage(PickNotebookCrudPage):
         )
 
         try:
-            changed, _saved = self._services.skills.apply_form_patch(sid, patch, auto_save=False)
+            # Step 4/5 的规则：表单编辑一律 auto_save=False（CRUD/pick 才可能自动保存）
+            self._services.skills.apply_form_patch(sid, patch, auto_save=False)
         except Exception as e:
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
             return False
 
-        if changed:
-            self.update_tree_row(sid)
         return True
-
     def _find_skill(self, sid: str) -> Skill | None:
         for s in self._ctx.skills.skills:
             if s.id == sid:

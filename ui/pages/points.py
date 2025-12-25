@@ -106,6 +106,17 @@ class PointsPage(PickNotebookCrudPage):
         super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
+        # Step 6: 切换 context 时，清掉 pending select & debounce，避免误选/误 apply
+        try:
+            self._cancel_pending_apply()
+        except Exception:
+            pass
+
+        try:
+            self._set_pending_select(None)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
         self._ctx = ctx
         self._current_id = None
         self.refresh_tree()
@@ -270,6 +281,9 @@ class PointsPage(PickNotebookCrudPage):
             self._schedule_apply()
 
     def _clear_form(self) -> None:
+        # Step 5: 清空前取消 debounce，避免旧定时器误 apply
+        self._cancel_pending_apply()
+
         self.set_header_title("未选择")
         self._building_form = True
         try:
@@ -290,6 +304,9 @@ class PointsPage(PickNotebookCrudPage):
             self._building_form = False
 
     def _load_into_form(self, rid: str) -> None:
+        # Step 5: 切换记录前取消 debounce，避免旧定时器用旧 rid 触发 apply
+        self._cancel_pending_apply()
+
         p = self._find_point(rid)
         if p is None:
             return
@@ -358,15 +375,12 @@ class PointsPage(PickNotebookCrudPage):
         )
 
         try:
-            changed, _saved = self._services.points.apply_form_patch(pid, patch, auto_save=False)
+            self._services.points.apply_form_patch(pid, patch, auto_save=False)
         except Exception as e:
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
             return False
 
-        if changed:
-            self.update_tree_row(pid)
         return True
-
     def _find_point(self, pid: str) -> Point | None:
         for p in self._ctx.points.points:
             if p.id == pid:

@@ -94,6 +94,7 @@ class SkillsService:
         if after == before:
             return (False, False)
 
+        # apply to real object
         self._apply_patch_to_skill(s, patch)
         self.mark_dirty()
         self._notify_dirty()
@@ -109,8 +110,14 @@ class SkillsService:
             except Exception:
                 saved = False
 
-        return (True, saved)
+        # Step 5: 变更后统一发事件，让 UI 刷新（不要由页面主动 update_tree_row）
+        if self._bus is not None:
+            self._bus.post_payload(
+                EventType.RECORD_UPDATED,
+                RecordUpdatedPayload(record_type="skill_pixel", id=sid, source="form", saved=bool(saved)),
+            )
 
+        return (True, saved)
     def create_skill(self, *, name: str = "新技能") -> Skill:
         sid = self.ctx.idgen.next_id()
         s = Skill(id=sid, name=name, enabled=True)

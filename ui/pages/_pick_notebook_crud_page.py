@@ -25,9 +25,11 @@ SAMPLE_VALUE_TO_DISPLAY = {v: k for k, v in SAMPLE_DISPLAY_TO_VALUE.items()}
 
 class PickNotebookCrudPage(RecordCrudPage):
     """
-    - request_pick_current 发 PICK_REQUEST
-    - UI 消费 RECORD_UPDATED/RECORD_DELETED 来刷新（严格 typed）
-    - dirty 展示由 UoW DIRTY_STATE_CHANGED 驱动（本类不再 mark/clear dirty）
+    Step 6:
+    - CRUD 点击时不再本地插入/删除行（由 RecordCrudPage 做到）
+    - 本类作为“事件消费端”：
+        - RECORD_UPDATED: update_tree_row + (必要时) select pending + (非 form) reload form
+        - RECORD_DELETED: delete row + 处理选中
     """
 
     def __init__(
@@ -81,7 +83,6 @@ class PickNotebookCrudPage(RecordCrudPage):
             )
             return
 
-        # flush current form -> model (no auto-save)
         self._apply_form_to_current(auto_save=False)
 
         self._bus.post_payload(
@@ -102,15 +103,22 @@ class PickNotebookCrudPage(RecordCrudPage):
         if not rid:
             return
 
+        # 1) 插入/刷新 row（此处是唯一刷新来源）
         self.update_tree_row(rid)
 
-        if self.current_id == rid:
-            try:
-                self._load_into_form(rid)
-            except Exception:
-                pass
+        # 2) Step 6: 如果是 pending select，则在 row 确保存在后选中
+        if self.consume_pending_select_if_match(rid):
+            self.try_select_id_if_exists(rid)
+            return
 
-        # Step 4: dirty 不在这里处理（UoW 统一）
+        # 3) Step 5: form 事件不 reload 表单（避免打断输入）
+        if self.current_id == rid:
+            src = (p.source or "").strip().lower()
+            if src != "form":
+                try:
+                    self._load_into_form(rid)
+                except Exception:
+                    pass
 
     def _on_record_deleted(self, ev: Event) -> None:
         p = ev.payload
@@ -125,13 +133,13 @@ class PickNotebookCrudPage(RecordCrudPage):
 
         is_current = (self.current_id == rid)
 
+        # 删除 row（事件消费端执行）
         try:
             if self._tv.exists(rid):
                 self._tv.delete(rid)
         except Exception:
             pass
 
+        # 若删的是当前选中，选中一个合理项
         if is_current:
             self._select_first_if_any()
-
-        # Step 4: dirty 不在这里处理（UoW 统一）
