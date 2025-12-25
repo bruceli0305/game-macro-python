@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
@@ -55,7 +56,6 @@ class PointsService:
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("points")
 
-    # -------- patch apply (idempotent) --------
     def _apply_patch_to_point(self, p: Point, patch: PointFormPatch) -> None:
         p.name = (patch.name or "").strip()
         p.monitor = (patch.monitor or "primary").strip() or "primary"
@@ -74,9 +74,6 @@ class PointsService:
         p.note = patch.note or ""
 
     def apply_form_patch(self, pid: str, patch: PointFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
-        """
-        Returns (changed, saved).
-        """
         p = self.find(pid)
         if p is None:
             return (False, False)
@@ -106,7 +103,6 @@ class PointsService:
 
         return (True, saved)
 
-    # ---------------- pure mutation CRUD (no events) ----------------
     def create_point(self, *, name: str = "新点位") -> Point:
         pid = self.ctx.idgen.next_id()
         p = Point(
@@ -146,11 +142,9 @@ class PointsService:
             return True
         return False
 
-    # ---------------- manual save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
         self._uow.commit(parts={"points"}, backup=backup, touch_meta=True)
 
-    # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
         p = self.find(pid)
         if p is None:
@@ -164,7 +158,6 @@ class PointsService:
         self.mark_dirty()
         return True
 
-    # ---------------- command CRUD (events + autosave + notify) ----------------
     def _maybe_autosave(self) -> bool:
         try:
             auto = bool(getattr(self.ctx.base.io, "auto_save", False))
@@ -190,7 +183,10 @@ class PointsService:
             self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.RECORD_UPDATED, record_type="point", id=p.id, source="crud_add", saved=bool(saved))
+            self._bus.post_payload(
+                EventType.RECORD_UPDATED,
+                RecordUpdatedPayload(record_type="point", id=p.id, source="crud_add", saved=bool(saved)),
+            )
         return p
 
     def clone_point_cmd(self, src_id: str) -> Optional[Point]:
@@ -206,7 +202,10 @@ class PointsService:
             self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.RECORD_UPDATED, record_type="point", id=clone.id, source="crud_duplicate", saved=bool(saved))
+            self._bus.post_payload(
+                EventType.RECORD_UPDATED,
+                RecordUpdatedPayload(record_type="point", id=clone.id, source="crud_duplicate", saved=bool(saved)),
+            )
         return clone
 
     def delete_point_cmd(self, pid: str) -> bool:
@@ -222,5 +221,8 @@ class PointsService:
             self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.RECORD_DELETED, record_type="point", id=pid, source="crud_delete", saved=bool(saved))
+            self._bus.post_payload(
+                EventType.RECORD_DELETED,
+                RecordDeletedPayload(record_type="point", id=pid, source="crud_delete", saved=bool(saved)),
+            )
         return True

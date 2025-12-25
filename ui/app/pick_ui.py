@@ -5,6 +5,7 @@ from typing import Callable, Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
+from core.events.utils import pick_preview_from_payload
 from ui.pick_preview_window import PickPreviewWindow
 
 
@@ -160,22 +161,16 @@ class PickUiController:
         self._bus.post(EventType.STATUS, msg="取色模式已退出")
 
     def _on_pick_preview(self, ev: Event) -> None:
-        try:
-            x = int(ev.payload.get("x", 0))
-            y = int(ev.payload.get("y", 0))
-            r = int(ev.payload.get("r", 0))
-            g = int(ev.payload.get("g", 0))
-            b = int(ev.payload.get("b", 0))
-        except Exception:
+        p = pick_preview_from_payload(ev.payload)
+        if p is None:
             return
 
         self._ensure_preview()
         if self._preview is None:
             return
 
-        # update content
         try:
-            self._preview.update_preview(x=x, y=y, r=r, g=g, b=b)
+            self._preview.update_preview(x=p.x, y=p.y, r=p.r, g=p.g, b=p.b)
         except Exception:
             pass
 
@@ -184,12 +179,12 @@ class PickUiController:
         except Exception:
             pass
 
-        # positioning options from ctx
         av = getattr(getattr(getattr(self._ctx(), "base", None), "pick", None), "avoidance", None)
         follow = bool(getattr(av, "preview_follow_cursor", True))
         anchor = str(getattr(av, "preview_anchor", "bottom_right") or "bottom_right")
         try:
-            ox, oy = int(getattr(av, "preview_offset", (30, 30))[0]), int(getattr(av, "preview_offset", (30, 30))[1])
+            off = getattr(av, "preview_offset", (30, 30))
+            ox, oy = int(off[0]), int(off[1])
         except Exception:
             ox, oy = 30, 30
 
@@ -197,7 +192,7 @@ class PickUiController:
             px = int(self._root.winfo_pointerx())
             py = int(self._root.winfo_pointery())
         except Exception:
-            px, py = x, y
+            px, py = p.x, p.y
 
         try:
             pw, ph = self._preview.size

@@ -7,6 +7,8 @@ import ttkbootstrap as tb
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
+from core.events.utils import record_updated_from_payload, record_deleted_from_payload
+
 from ui.pages._record_crud_page import RecordCrudPage
 from ui.widgets.scrollable_frame import ScrollableFrame
 
@@ -74,48 +76,39 @@ class PickNotebookCrudPage(RecordCrudPage):
         self._bus.post(EventType.PICK_REQUEST, context={"type": self._pick_context_type, "id": self.current_id})
 
     def _on_record_updated(self, ev: Event) -> None:
-        rt = ev.payload.get("record_type")
-        rid = ev.payload.get("id")
-        saved = bool(ev.payload.get("saved", False))
-
-        if rt != self._pick_context_type:
+        p = record_updated_from_payload(ev.payload)
+        if p is None:
             return
-        if not isinstance(rid, str) or not rid:
+        if p.record_type != self._pick_context_type:
+            return
+        rid = p.id
+        if not rid:
             return
 
-        # ensure row exists and is up to date
         self.update_tree_row(rid)
 
-        # if current is same, reload form from model
         if self.current_id == rid:
             try:
                 self._load_into_form(rid)
             except Exception:
                 pass
 
-        # if it's a newly created record and nothing selected, select it
-        try:
-            if self.current_id is None and self._tv.exists(rid):
-                self._select_id(rid)
-        except Exception:
-            pass
-
-        if saved:
+        if p.saved:
             self.clear_dirty()
         else:
             self.mark_dirty()
 
+
     def _on_record_deleted(self, ev: Event) -> None:
-        rt = ev.payload.get("record_type")
-        rid = ev.payload.get("id")
-        saved = bool(ev.payload.get("saved", False))
-
-        if rt != self._pick_context_type:
+        p = record_deleted_from_payload(ev.payload)
+        if p is None:
             return
-        if not isinstance(rid, str) or not rid:
+        if p.record_type != self._pick_context_type:
+            return
+        rid = p.id
+        if not rid:
             return
 
-        # incremental delete
         is_current = (self.current_id == rid)
         try:
             if self._tv.exists(rid):
@@ -126,11 +119,10 @@ class PickNotebookCrudPage(RecordCrudPage):
         if is_current:
             self._select_first_if_any()
 
-        if saved:
+        if p.saved:
             self.clear_dirty()
         else:
             self.mark_dirty()
-
     # legacy hooks retained (not used by pick flow now)
     def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
         raise NotImplementedError

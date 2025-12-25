@@ -6,6 +6,7 @@ from core.app.services.skills_service import SkillsService
 from core.app.services.points_service import PointsService
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import DirtyStateChangedPayload
 from core.profiles import ProfileContext
 
 
@@ -28,4 +29,5 @@ class AppServices:
 
     def notify_dirty(self) -> None:
         parts = sorted(list(self.uow.dirty_parts()))
-        self.bus.post(EventType.DIRTY_STATE_CHANGED, dirty=bool(self.uow.is_dirty()), parts=parts)
+        payload = DirtyStateChangedPayload(dirty=bool(self.uow.is_dirty()), parts=parts)
+        self.bus.post_payload(EventType.DIRTY_STATE_CHANGED, payload)

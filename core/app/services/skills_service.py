@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload
 from core.models.common import clamp_int
 from core.models.skill import Skill, ColorRGB
 
@@ -57,7 +58,6 @@ class SkillsService:
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("skills")
 
-    # -------- patch apply (idempotent) --------
     def _apply_patch_to_skill(self, s: Skill, patch: SkillFormPatch) -> None:
         s.name = (patch.name or "").strip()
         s.enabled = bool(patch.enabled)
@@ -82,11 +82,6 @@ class SkillsService:
         s.note = patch.note or ""
 
     def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
-        """
-        Returns (changed, saved).
-        - changed=False -> no-op, do not mark dirty
-        - saved=True only when auto_save triggered and commit succeeded
-        """
         s = self.find(sid)
         if s is None:
             return (False, False)
@@ -99,7 +94,6 @@ class SkillsService:
         if after == before:
             return (False, False)
 
-        # apply for real
         self._apply_patch_to_skill(s, patch)
         self.mark_dirty()
         self._notify_dirty()
@@ -117,7 +111,6 @@ class SkillsService:
 
         return (True, saved)
 
-    # ---------------- pure mutation CRUD (no events) ----------------
     def create_skill(self, *, name: str = "新技能") -> Skill:
         sid = self.ctx.idgen.next_id()
         s = Skill(id=sid, name=name, enabled=True)
@@ -149,11 +142,9 @@ class SkillsService:
             return True
         return False
 
-    # ---------------- manual save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
         self._uow.commit(parts={"skills"}, backup=backup, touch_meta=True)
 
-    # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, sid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
         s = self.find(sid)
         if s is None:
@@ -166,7 +157,6 @@ class SkillsService:
         self.mark_dirty()
         return True
 
-    # ---------------- command CRUD (events + autosave + notify) ----------------
     def _maybe_autosave(self) -> bool:
         try:
             auto = bool(getattr(self.ctx.base.io, "auto_save", False))
@@ -192,7 +182,10 @@ class SkillsService:
             self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.RECORD_UPDATED, record_type="skill_pixel", id=s.id, source="crud_add", saved=bool(saved))
+            self._bus.post_payload(
+                EventType.RECORD_UPDATED,
+                RecordUpdatedPayload(record_type="skill_pixel", id=s.id, source="crud_add", saved=bool(saved)),
+            )
         return s
 
     def clone_skill_cmd(self, src_id: str) -> Optional[Skill]:
@@ -208,7 +201,10 @@ class SkillsService:
             self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.RECORD_UPDATED, record_type="skill_pixel", id=clone.id, source="crud_duplicate", saved=bool(saved))
+            self._bus.post_payload(
+                EventType.RECORD_UPDATED,
+                RecordUpdatedPayload(record_type="skill_pixel", id=clone.id, source="crud_duplicate", saved=bool(saved)),
+            )
         return clone
 
     def delete_skill_cmd(self, sid: str) -> bool:
@@ -224,5 +220,8 @@ class SkillsService:
             self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.RECORD_DELETED, record_type="skill_pixel", id=sid, source="crud_delete", saved=bool(saved))
+            self._bus.post_payload(
+                EventType.RECORD_DELETED,
+                RecordDeletedPayload(record_type="skill_pixel", id=sid, source="crud_delete", saved=bool(saved)),
+            )
         return True

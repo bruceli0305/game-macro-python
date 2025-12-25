@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import ConfigSavedPayload
 from core.input.hotkey_strings import to_pynput_hotkey
 from core.models.base import BaseFile
 from core.models.common import clamp_int
@@ -31,13 +32,6 @@ class BaseSettingsPatch:
 
 
 class BaseSettingsService:
-    """
-    Application service for base.json settings.
-
-    Key property:
-    - apply_patch() is idempotent: if patch doesn't change model, it will NOT mark dirty.
-    """
-
     def __init__(
         self,
         *,
@@ -54,14 +48,6 @@ class BaseSettingsService:
         return self._uow.ctx
 
     def validate_patch(self, patch: BaseSettingsPatch) -> None:
-        """
-        Validate patch and raise ValueError with FIELD-PREFIXED messages.
-
-        Conventions:
-          - "enter_pick_mode: <msg>"
-          - "cancel_pick: <msg>"
-          - "hotkeys: <msg>" (conflict etc.)
-        """
         enter_raw = (patch.hotkey_enter_pick or "").strip()
         cancel_raw = (patch.hotkey_cancel_pick or "").strip()
 
@@ -105,14 +91,9 @@ class BaseSettingsService:
         b.io.backup_on_save = bool(patch.backup_on_save)
 
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
-        """
-        Apply patch to in-memory model.
-        Returns changed(bool). If unchanged, does NOT mark dirty.
-        """
         self.validate_patch(patch)
 
         before = self.ctx.base.to_dict()
-
         tmp = BaseFile.from_dict(before)
         self._apply_to_basefile(tmp, patch)
         after = tmp.to_dict()
@@ -126,14 +107,8 @@ class BaseSettingsService:
         return True
 
     def save_cmd(self, patch: BaseSettingsPatch) -> None:
-        """
-        Manual save:
-        - If patch is unchanged AND base is not dirty -> no-op.
-        - If base is already dirty (from previous apply/flush), still commit.
-        """
         changed = self.apply_patch(patch)
 
-        # Important: base might already be dirty even if patch matches current model.
         try:
             base_dirty = "base" in self._uow.dirty_parts()
         except Exception:
@@ -151,13 +126,13 @@ class BaseSettingsService:
         if self._bus is not None:
             self._bus.post(EventType.UI_THEME_CHANGE, theme=self.ctx.base.ui.theme)
             self._bus.post(EventType.HOTKEYS_CHANGED)
-            self._bus.post(EventType.CONFIG_SAVED, section="base", source="manual_save", saved=True)
+            self._bus.post_payload(
+                EventType.CONFIG_SAVED,
+                ConfigSavedPayload(section="base", source="manual_save", saved=True),
+            )
             self._bus.post(EventType.INFO, msg="base.json 已保存")
 
     def reload_cmd(self) -> None:
-        """
-        Reload base.json from disk and reset dirty state for base.
-        """
         self.ctx.base = self.ctx.base_repo.load_or_create()
 
         self._uow.clear_dirty("base")
@@ -165,7 +140,10 @@ class BaseSettingsService:
         self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.CONFIG_SAVED, section="base", source="reload", saved=False)
+            self._bus.post_payload(
+                EventType.CONFIG_SAVED,
+                ConfigSavedPayload(section="base", source="reload", saved=False),
+            )
             self._bus.post(EventType.INFO, msg="已重新加载 base.json")
             self._bus.post(EventType.UI_THEME_CHANGE, theme=self.ctx.base.ui.theme)
             self._bus.post(EventType.HOTKEYS_CHANGED)

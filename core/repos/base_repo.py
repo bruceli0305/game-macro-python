@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.io.json_store import atomic_write_json, ensure_dir, read_json
+from core.migrations.base_json import migrate_base_json
 from core.models.base import BaseFile
 
 
@@ -16,13 +17,18 @@ class BaseRepo:
         return self._profile_dir / "base.json"
 
     def load_or_create(self) -> BaseFile:
+        existed = self.path.exists()
         data = read_json(self.path, default={})
+
+        mig = migrate_base_json(data)
+        data = mig.data
+
         base = BaseFile.from_dict(data)
 
-        # 文件不存在或缺 schema_version 时，写回一个规范化版本
-        if (not self.path.exists()) or ("schema_version" not in data):
-            self.save(base, backup=False)
-
+        # If file missing or migration changed, write back canonicalized form.
+        if (not existed) or mig.changed:
+            # backup only when migrating an existing file
+            self.save(base, backup=bool(existed and mig.changed))
         return base
 
     def save(self, base: BaseFile, *, backup: bool = True) -> None:

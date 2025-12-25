@@ -9,10 +9,11 @@ from pynput import keyboard, mouse
 
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import PickContextRef, PickPreviewPayload, PickConfirmedPayload
 from core.pick.capture import ScreenCapture, SampleSpec
 
 
-PickContext = Dict[str, Any]  # {"type":"skill_pixel"|"point", "id":"..."}
+PickContext = Dict[str, Any]  # request context dict from UI: {"type": "...", "id": "..."}
 
 
 @dataclass
@@ -23,19 +24,6 @@ class PickConfig:
 
 
 class PickService:
-    """
-    坐标策略（当前版本）：
-    - 鼠标回调拿到的是绝对坐标 (abs_x, abs_y)，等同 OS 虚拟屏幕坐标（可为负）
-    - 对外事件里提供：
-        x,y   -> 相对坐标（相对 monitor_used 左上角）
-        vx,vy -> 虚拟屏幕坐标（= abs_x/abs_y，持久化用）
-        abs_x, abs_y -> 兼容保留（调试用）
-    - 新增：
-        monitor_requested -> 配置/对象期望的 monitor
-        monitor (monitor_used) -> 实际用于计算/采样的 monitor
-        inside -> 鼠标是否在 requested monitor 内
-    """
-
     def __init__(
         self,
         *,
@@ -57,7 +45,6 @@ class PickService:
         self._kbd_listener: Optional[keyboard.Listener] = None
 
         self._start_t = 0.0
-
         self._preview_thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
         self._last_err_t = 0.0
@@ -72,7 +59,10 @@ class PickService:
         self._cap.close()
 
     def _on_pick_request(self, ev) -> None:
-        ctx = ev.payload.get("context")
+        ctx = getattr(ev, "payload", None)
+        # payload from EventBus.post() is a dict with key "context"
+        if isinstance(ctx, dict):
+            ctx = ctx.get("context")
         if not isinstance(ctx, dict) or not ctx.get("id") or not ctx.get("type"):
             self._bus.post(EventType.ERROR, msg="PICK_REQUEST 缺少有效 context")
             return
@@ -159,9 +149,6 @@ class PickService:
             pass
 
     def _resolve_monitor(self, abs_x: int, abs_y: int, requested: str) -> tuple[str, bool]:
-        """
-        Return (monitor_used, inside_requested).
-        """
         req = (requested or "primary").strip().lower() or "primary"
         try:
             rect_req = self._cap.get_monitor_rect(req)
@@ -170,15 +157,21 @@ class PickService:
             inside = True
 
         if req == "all":
-            # keep "all" semantics: rel coords are virtual-screen-relative
             return "all", inside
 
         if inside:
             return req, True
 
-        # outside requested -> use monitor containing cursor (best UX)
         used = self._cap.find_monitor_key_for_abs(int(abs_x), int(abs_y), default=req)
         return used, False
+
+    def _ctx_ref(self) -> Optional[PickContextRef]:
+        ctx = self._context or {}
+        t = ctx.get("type")
+        i = ctx.get("id")
+        if isinstance(t, str) and isinstance(i, str) and i:
+            return PickContextRef(type=t, id=i)  # type: ignore[arg-type]
+        return None
 
     def _on_click(self, abs_x: int, abs_y: int, button, pressed: bool) -> None:
         try:
@@ -193,18 +186,21 @@ class PickService:
                 return
 
             ctx = self._context or {}
+            ctx_ref = self._ctx_ref()
+            if ctx_ref is None:
+                self._bus.post(EventType.ERROR, msg="取色确认失败: context 无效")
+                return
+
             sample, mon_req = self._capture_spec_provider(ctx)
             mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
 
-            # sample (never pause on cross-monitor)
             r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
 
             rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon_used)
             hx = f"#{r:02X}{g:02X}{b:02X}"
 
-            self._bus.post(
-                EventType.PICK_CONFIRMED,
-                context=ctx,
+            payload = PickConfirmedPayload(
+                context=ctx_ref,
                 monitor_requested=mon_req,
                 monitor=mon_used,
                 inside=bool(inside),
@@ -214,9 +210,12 @@ class PickService:
                 vy=int(abs_y),
                 abs_x=int(abs_x),
                 abs_y=int(abs_y),
-                r=r, g=g, b=b,
+                r=int(r),
+                g=int(g),
+                b=int(b),
                 hex=hx,
             )
+            self._bus.post_payload(EventType.PICK_CONFIRMED, payload)
             self.stop(reason="confirmed")
 
         except Exception as e:
@@ -239,7 +238,15 @@ class PickService:
 
             try:
                 abs_x, abs_y = ctrl.position
+                abs_x = int(abs_x)
+                abs_y = int(abs_y)
+
                 ctx = self._context or {}
+                ctx_ref = self._ctx_ref()
+                if ctx_ref is None:
+                    time.sleep(0.02)
+                    continue
+
                 sample, mon_req = self._capture_spec_provider(ctx)
                 mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
 
@@ -251,9 +258,8 @@ class PickService:
                     self._announced_preview = True
                     self._bus.post(EventType.INFO, msg="取色预览已开始")
 
-                self._bus.post(
-                    EventType.PICK_PREVIEW,
-                    context=ctx,
+                payload = PickPreviewPayload(
+                    context=ctx_ref,
                     monitor_requested=mon_req,
                     monitor=mon_used,
                     inside=bool(inside),
@@ -263,9 +269,12 @@ class PickService:
                     vy=int(abs_y),
                     abs_x=int(abs_x),
                     abs_y=int(abs_y),
-                    r=r, g=g, b=b,
+                    r=int(r),
+                    g=int(g),
+                    b=int(b),
                     hex=hx,
                 )
+                self._bus.post_payload(EventType.PICK_PREVIEW, payload)
 
             except Exception as e:
                 if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):

@@ -8,6 +8,7 @@ from ttkbootstrap.constants import LEFT, X, Y, VERTICAL
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
+from core.events.payloads import InfoPayload, StatusPayload, ErrorPayload, ThemeChangePayload
 
 try:
     from ttkbootstrap.toast import ToastNotification  # type: ignore
@@ -41,6 +42,7 @@ class StatusBar(tb.Frame):
 class StatusController:
     """
     Owns status bar + toast + theme apply.
+    Strict typed payload version (no dict compatibility).
     """
 
     def __init__(self, *, root: tb.Window, bar: StatusBar, bus: EventBus) -> None:
@@ -88,28 +90,44 @@ class StatusController:
             pass
 
     def _on_theme_change(self, ev: Event) -> None:
-        theme = ev.payload.get("theme")
-        if isinstance(theme, str) and theme:
-            try:
-                self._root.style.theme_use(theme)  # ttkbootstrap Window has .style
-                self.set_status(f"INFO: theme -> {theme}", ttl_ms=2500)
-            except Exception as e:
-                self.set_status(f"ERROR: theme apply failed: {e}", ttl_ms=6000)
-                self._toast("ERROR", f"theme apply failed: {e}", "danger")
+        p = ev.payload
+        if not isinstance(p, ThemeChangePayload):
+            return
+        theme = (p.theme or "").strip()
+        if not theme:
+            return
+        try:
+            self._root.style.theme_use(theme)  # ttkbootstrap Window has .style
+            self.set_status(f"INFO: theme -> {theme}", ttl_ms=2500)
+        except Exception as e:
+            self.set_status(f"ERROR: theme apply failed: {e}", ttl_ms=6000)
+            self._toast("ERROR", f"theme apply failed: {e}", "danger")
 
     def _on_info(self, ev: Event) -> None:
-        msg = ev.payload.get("msg", "")
-        if isinstance(msg, str) and msg:
-            self.set_status(f"INFO: {msg}", ttl_ms=3000)
-            self._toast("INFO", msg, "success")
+        p = ev.payload
+        if not isinstance(p, InfoPayload):
+            return
+        msg = (p.msg or "").strip()
+        if not msg:
+            return
+        self.set_status(f"INFO: {msg}", ttl_ms=3000)
+        self._toast("INFO", msg, "success")
 
     def _on_error(self, ev: Event) -> None:
-        msg = ev.payload.get("msg", "")
-        if isinstance(msg, str) and msg:
-            self.set_status(f"ERROR: {msg}", ttl_ms=6000)
-            self._toast("ERROR", msg, "danger")
+        p = ev.payload
+        if not isinstance(p, ErrorPayload):
+            return
+        msg = (p.msg or "").strip()
+        if not msg:
+            return
+        self.set_status(f"ERROR: {msg}", ttl_ms=6000)
+        self._toast("ERROR", msg, "danger")
 
     def _on_status(self, ev: Event) -> None:
-        msg = ev.payload.get("msg", "")
-        if isinstance(msg, str) and msg:
-            self.set_status(msg, ttl_ms=2000)
+        p = ev.payload
+        if not isinstance(p, StatusPayload):
+            return
+        msg = (p.msg or "").strip()
+        if not msg:
+            return
+        self.set_status(msg, ttl_ms=2000)
