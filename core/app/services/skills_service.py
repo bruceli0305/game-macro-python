@@ -1,19 +1,42 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.models.common import clamp_int
 from core.models.skill import Skill, ColorRGB
+
+
+@dataclass(frozen=True)
+class SkillFormPatch:
+    name: str
+    enabled: bool
+    trigger_key: str
+    readbar_ms: int
+
+    monitor: str
+    vx: int
+    vy: int
+
+    r: int
+    g: int
+    b: int
+
+    tolerance: int
+    sample_mode: str
+    sample_radius: int
+
+    note: str
 
 
 class SkillsService:
     """
     Two layers of API:
-    - Pure mutation methods: create_skill / clone_skill / delete_skill (no events)
-    - Command methods: create_skill_cmd / clone_skill_cmd / delete_skill_cmd
-      (publish RECORD_UPDATED/RECORD_DELETED + optional auto-save + notify_dirty)
+    - Pure mutation methods: create/clone/delete/apply_pick/apply_form_patch (no events)
+    - Command methods: *_cmd (publish events + optional auto-save + notify_dirty)
     """
 
     def __init__(
@@ -39,6 +62,54 @@ class SkillsService:
 
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("skills")
+
+    # ---------------- pure mutation: form apply (NEW) ----------------
+    def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> bool:
+        """
+        Apply UI form patch -> model, optionally auto-save (touch_meta=False).
+        Returns saved(bool).
+        """
+        s = self.find(sid)
+        if s is None:
+            return False
+
+        s.name = (patch.name or "").strip()
+        s.enabled = bool(patch.enabled)
+
+        s.trigger.type = "key"
+        s.trigger.key = (patch.trigger_key or "").strip()
+        s.cast.readbar_ms = clamp_int(int(patch.readbar_ms), 0, 10**9)
+
+        s.pixel.monitor = (patch.monitor or "primary").strip() or "primary"
+        s.pixel.vx = clamp_int(int(patch.vx), -10**9, 10**9)
+        s.pixel.vy = clamp_int(int(patch.vy), -10**9, 10**9)
+
+        r = clamp_int(int(patch.r), 0, 255)
+        g = clamp_int(int(patch.g), 0, 255)
+        b = clamp_int(int(patch.b), 0, 255)
+        s.pixel.color = ColorRGB(r=r, g=g, b=b)
+
+        s.pixel.tolerance = clamp_int(int(patch.tolerance), 0, 255)
+        s.pixel.sample.mode = (patch.sample_mode or "single").strip() or "single"
+        s.pixel.sample.radius = clamp_int(int(patch.sample_radius), 0, 50)
+
+        s.note = patch.note or ""
+
+        self.mark_dirty()
+        self._notify_dirty()
+
+        # auto-save for form apply: do NOT touch meta
+        if auto_save:
+            try:
+                if bool(getattr(self.ctx.base.io, "auto_save", False)):
+                    backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+                    self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
+                    self._notify_dirty()
+                    return True
+            except Exception:
+                # caller will surface errors via _save_to_disk or UI message
+                pass
+        return False
 
     # ---------------- pure mutation CRUD (no events) ----------------
     def create_skill(self, *, name: str = "新技能") -> Skill:
@@ -74,7 +145,8 @@ class SkillsService:
 
     # ---------------- save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
+        # manual save: keep touch_meta default True
+        self._uow.commit(parts={"skills"}, backup=backup, touch_meta=True)
 
     # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, sid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
@@ -101,7 +173,7 @@ class SkillsService:
             backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
         except Exception:
             backup = True
-        self._uow.commit(parts={"skills"}, backup=backup)
+        self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
         return True
 
     def create_skill_cmd(self, *, name: str = "新技能") -> Skill:

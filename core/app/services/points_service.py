@@ -1,23 +1,36 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
 from core.io.json_store import now_iso_utc
+from core.models.common import clamp_int
 from core.models.point import Point
 from core.models.skill import ColorRGB
 
 
-class PointsService:
-    """
-    Two layers of API:
-    - Pure mutation methods: create_point / clone_point / delete_point (no events)
-    - Command methods: create_point_cmd / clone_point_cmd / delete_point_cmd
-      (publish RECORD_UPDATED/RECORD_DELETED + optional auto-save + notify_dirty)
-    """
+@dataclass(frozen=True)
+class PointFormPatch:
+    name: str
+    monitor: str
+    vx: int
+    vy: int
 
+    r: int
+    g: int
+    b: int
+
+    captured_at: str
+    sample_mode: str
+    sample_radius: int
+
+    note: str
+
+
+class PointsService:
     def __init__(
         self,
         *,
@@ -41,6 +54,42 @@ class PointsService:
 
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("points")
+
+    # ---------------- pure mutation: form apply (NEW) ----------------
+    def apply_form_patch(self, pid: str, patch: PointFormPatch, *, auto_save: bool) -> bool:
+        p = self.find(pid)
+        if p is None:
+            return False
+
+        p.name = (patch.name or "").strip()
+        p.monitor = (patch.monitor or "primary").strip() or "primary"
+        p.vx = clamp_int(int(patch.vx), -10**9, 10**9)
+        p.vy = clamp_int(int(patch.vy), -10**9, 10**9)
+
+        r = clamp_int(int(patch.r), 0, 255)
+        g = clamp_int(int(patch.g), 0, 255)
+        b = clamp_int(int(patch.b), 0, 255)
+        p.color = ColorRGB(r=r, g=g, b=b)
+
+        p.captured_at = (patch.captured_at or "").strip()
+        p.sample.mode = (patch.sample_mode or "single").strip() or "single"
+        p.sample.radius = clamp_int(int(patch.sample_radius), 0, 50)
+
+        p.note = patch.note or ""
+
+        self.mark_dirty()
+        self._notify_dirty()
+
+        if auto_save:
+            try:
+                if bool(getattr(self.ctx.base.io, "auto_save", False)):
+                    backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+                    self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
+                    self._notify_dirty()
+                    return True
+            except Exception:
+                pass
+        return False
 
     # ---------------- pure mutation CRUD (no events) ----------------
     def create_point(self, *, name: str = "新点位") -> Point:
@@ -84,7 +133,7 @@ class PointsService:
 
     # ---------------- save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
+        self._uow.commit(parts={"points"}, backup=backup, touch_meta=True)
 
     # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
@@ -112,7 +161,7 @@ class PointsService:
             backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
         except Exception:
             backup = True
-        self._uow.commit(parts={"points"}, backup=backup)
+        self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
         return True
 
     def create_point_cmd(self, *, name: str = "新点位") -> Point:

@@ -340,46 +340,62 @@ class SkillsPage(PickNotebookCrudPage):
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
-        s = self._find_skill(self._current_id)
-        if s is None:
-            return False
 
-        s.name = self.var_name.get()
-        s.enabled = bool(self.var_enabled.get())
-        s.trigger.type = "key"
-        s.trigger.key = self.var_trigger_key.get()
-        s.cast.readbar_ms = clamp_int(int(self.var_readbar.get()), 0, 10**9)
+        sid = self._current_id
 
-        mon = self.var_monitor.get() or "primary"
+        # 1) 先把 UI 输入整理成 vx/vy（UI 做坐标换算，不写模型）
+        mon = (self.var_monitor.get() or "primary").strip() or "primary"
         rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
         rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
-
-        s.pixel.monitor = mon
         try:
             vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
         except Exception:
             vx, vy = rel_x, rel_y
-        s.pixel.vx = clamp_int(int(vx), -10**9, 10**9)
-        s.pixel.vy = clamp_int(int(vy), -10**9, 10**9)
 
-        r = clamp_int(int(self.var_r.get()), 0, 255)
-        g = clamp_int(int(self.var_g.get()), 0, 255)
-        b = clamp_int(int(self.var_b.get()), 0, 255)
-        s.pixel.color = ColorRGB(r=r, g=g, b=b)
+        from core.app.services.skills_service import SkillFormPatch  # local import to avoid cycles
 
-        s.pixel.tolerance = clamp_int(int(self.var_tol.get()), 0, 255)
-        s.pixel.sample.mode = SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single")
-        s.pixel.sample.radius = clamp_int(int(self.var_sample_radius.get()), 0, 50)
+        patch = SkillFormPatch(
+            name=self.var_name.get(),
+            enabled=bool(self.var_enabled.get()),
+            trigger_key=self.var_trigger_key.get(),
+            readbar_ms=int(self.var_readbar.get()),
 
-        s.note = self._txt_note.get("1.0", "end").rstrip("\n")
+            monitor=mon,
+            vx=int(vx),
+            vy=int(vy),
 
-        self.update_tree_row(s.id)
+            r=int(self.var_r.get()),
+            g=int(self.var_g.get()),
+            b=int(self.var_b.get()),
 
-        if auto_save and self._ctx.base.io.auto_save:
-            if self._save_to_disk():
+            tolerance=int(self.var_tol.get()),
+            sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
+            sample_radius=int(self.var_sample_radius.get()),
+
+            note=self._txt_note.get("1.0", "end").rstrip("\n"),
+        )
+
+        # 2) 交给 service 更新模型 + 可选 autosave（touch_meta=False）
+        if self._services is not None:
+            try:
+                saved = self._services.skills.apply_form_patch(sid, patch, auto_save=bool(auto_save))
+            except Exception as e:
+                self._bus.post(EventType.ERROR, msg=f"应用表单失败: {e}")
+                return False
+
+            # 本地 UI 刷新 tree 行（更快，不依赖事件）
+            self.update_tree_row(sid)
+
+            if saved:
                 self.clear_dirty()
-        return True
+            else:
+                # 只要发生了 apply，就应该算 dirty（除非已 autosave）
+                self.mark_dirty()
 
+            return True
+
+        # 没 services 的极端 fallback：保持原逻辑（直接认为 ok）
+        return True
     def _find_skill(self, sid: str) -> Skill | None:
         for s in self._ctx.skills.skills:
             if s.id == sid:

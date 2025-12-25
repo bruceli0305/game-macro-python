@@ -323,41 +323,53 @@ class PointsPage(PickNotebookCrudPage):
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
-        p = self._find_point(self._current_id)
-        if p is None:
-            return False
 
-        p.name = self.var_name.get()
-        mon = self.var_monitor.get() or "primary"
-        p.monitor = mon
+        pid = self._current_id
 
+        mon = (self.var_monitor.get() or "primary").strip() or "primary"
         rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
         rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
         try:
             vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
         except Exception:
             vx, vy = rel_x, rel_y
-        p.vx = clamp_int(int(vx), -10**9, 10**9)
-        p.vy = clamp_int(int(vy), -10**9, 10**9)
 
-        r = clamp_int(int(self.var_r.get()), 0, 255)
-        g = clamp_int(int(self.var_g.get()), 0, 255)
-        b = clamp_int(int(self.var_b.get()), 0, 255)
-        p.color = ColorRGB(r=r, g=g, b=b)
+        from core.app.services.points_service import PointFormPatch  # local import to avoid cycles
 
-        p.captured_at = self.var_captured_at.get().strip()
-        p.sample.mode = SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single")
-        p.sample.radius = clamp_int(int(self.var_sample_radius.get()), 0, 50)
+        patch = PointFormPatch(
+            name=self.var_name.get(),
+            monitor=mon,
+            vx=int(vx),
+            vy=int(vy),
 
-        p.note = self._txt_note.get("1.0", "end").rstrip("\n")
+            r=int(self.var_r.get()),
+            g=int(self.var_g.get()),
+            b=int(self.var_b.get()),
 
-        self.update_tree_row(p.id)
+            captured_at=self.var_captured_at.get(),
+            sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
+            sample_radius=int(self.var_sample_radius.get()),
 
-        if auto_save and self._ctx.base.io.auto_save:
-            if self._save_to_disk():
+            note=self._txt_note.get("1.0", "end").rstrip("\n"),
+        )
+
+        if self._services is not None:
+            try:
+                saved = self._services.points.apply_form_patch(pid, patch, auto_save=bool(auto_save))
+            except Exception as e:
+                self._bus.post(EventType.ERROR, msg=f"应用表单失败: {e}")
+                return False
+
+            self.update_tree_row(pid)
+
+            if saved:
                 self.clear_dirty()
-        return True
+            else:
+                self.mark_dirty()
 
+            return True
+
+        return True
     def _find_point(self, pid: str) -> Point | None:
         for p in self._ctx.points.points:
             if p.id == pid:
