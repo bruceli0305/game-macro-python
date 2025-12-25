@@ -1,35 +1,30 @@
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Literal, Optional, Set
 
+from core.models.base import BaseFile
+from core.models.meta import ProfileMeta
+from core.models.point import PointsFile
+from core.models.skill import SkillsFile
 from core.profiles import ProfileContext
 
+Part = Literal["base", "skills", "points", "meta"]
 
-@dataclass
-class ProfileSnapshot:
-    base: dict
-    skills: dict
-    points: dict
-    meta: dict
+
+@dataclass(frozen=True)
+class Snapshot:
+    base: Dict[str, Any]
+    skills: Dict[str, Any]
+    points: Dict[str, Any]
+    meta: Dict[str, Any]
 
 
 class ProfileUnitOfWork:
-    """
-    Phase-1 UoW (minimal but useful):
-    - begin(): snapshot current ctx in-memory state
-    - rollback(): restore from snapshot (in-memory only)
-    - commit(): save_all to disk
-
-    Notes:
-    - This does NOT yet unify "dirty" across pages; pages still manage their own dirty flags.
-    - Later we will move all mutations to services and drive dirty from UoW.
-    """
-
     def __init__(self, ctx: ProfileContext) -> None:
-        self._ctx: ProfileContext = ctx
-        self._snap: Optional[ProfileSnapshot] = None
+        self._ctx = ctx
+        self._dirty: Set[Part] = set()
+        self._snap = self._take_snapshot()
 
     @property
     def ctx(self) -> ProfileContext:
@@ -37,26 +32,99 @@ class ProfileUnitOfWork:
 
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
-        self._snap = None
+        self._dirty.clear()
+        self._snap = self._take_snapshot()
 
-    def begin(self) -> None:
-        self._snap = ProfileSnapshot(
-            base=copy.deepcopy(self._ctx.base.to_dict()),
-            skills=copy.deepcopy(self._ctx.skills.to_dict()),
-            points=copy.deepcopy(self._ctx.points.to_dict()),
-            meta=copy.deepcopy(self._ctx.meta.to_dict()),
-        )
+    def dirty_parts(self) -> Set[Part]:
+        return set(self._dirty)
+
+    def is_dirty(self) -> bool:
+        return bool(self._dirty)
+
+    def mark_dirty(self, part: Part) -> None:
+        self._dirty.add(part)
+
+    def clear_dirty(self, part: Part) -> None:
+        self._dirty.discard(part)
+
+    def clear_all_dirty(self) -> None:
+        self._dirty.clear()
+
+    def refresh_snapshot(self, *, parts: Optional[Set[Part]] = None) -> None:
+        """
+        Refresh snapshot for selected parts (or all if parts is None).
+        Does not change dirty flags.
+        """
+        ctx = self._ctx
+        old = self._snap
+        target = set(parts) if parts is not None else {"base", "skills", "points", "meta"}
+
+        base = ctx.base.to_dict() if "base" in target else old.base
+        skills = ctx.skills.to_dict() if "skills" in target else old.skills
+        points = ctx.points.to_dict() if "points" in target else old.points
+        meta = ctx.meta.to_dict() if "meta" in target else old.meta
+
+        self._snap = Snapshot(base=base, skills=skills, points=points, meta=meta)
+
+    def commit(self, *, parts: Optional[Set[Part]] = None, backup: Optional[bool] = None) -> None:
+        target: Set[Part] = set(self._dirty) if parts is None else set(parts)
+        if not target:
+            return
+
+        ctx = self._ctx
+
+        if backup is None:
+            try:
+                backup = bool(ctx.base.io.backup_on_save)
+            except Exception:
+                backup = True
+
+        if "base" in target:
+            ctx.base_repo.save(ctx.base, backup=backup)
+            self._dirty.discard("base")
+
+        if "skills" in target:
+            ctx.skills_repo.save(ctx.skills, backup=backup)
+            self._dirty.discard("skills")
+
+        if "points" in target:
+            ctx.points_repo.save(ctx.points, backup=backup)
+            self._dirty.discard("points")
+
+        # always touch meta on any commit
+        ctx.meta_repo.save(ctx.meta, backup=backup)
+        self._dirty.discard("meta")
+
+        self._snap = self._take_snapshot()
 
     def rollback(self) -> None:
-        if self._snap is None:
-            return
-        # restore objects (keep repos/idgen references in ctx)
-        self._ctx.base = self._ctx.base.__class__.from_dict(copy.deepcopy(self._snap.base))
-        self._ctx.skills = self._ctx.skills.__class__.from_dict(copy.deepcopy(self._snap.skills))
-        self._ctx.points = self._ctx.points.__class__.from_dict(copy.deepcopy(self._snap.points))
-        self._ctx.meta = self._ctx.meta.__class__.from_dict(copy.deepcopy(self._snap.meta))
+        ctx = self._ctx
+        snap = self._snap
 
-    def commit(self, *, backup: bool = True) -> None:
-        self._ctx.save_all(backup=backup)
-        # refresh snapshot after successful commit
-        self.begin()
+        try:
+            ctx.base = BaseFile.from_dict(snap.base)
+        except Exception:
+            pass
+        try:
+            ctx.skills = SkillsFile.from_dict(snap.skills)
+        except Exception:
+            pass
+        try:
+            ctx.points = PointsFile.from_dict(snap.points)
+        except Exception:
+            pass
+        try:
+            ctx.meta = ProfileMeta.from_dict(snap.meta)
+        except Exception:
+            pass
+
+        self._dirty.clear()
+
+    def _take_snapshot(self) -> Snapshot:
+        ctx = self._ctx
+        return Snapshot(
+            base=ctx.base.to_dict(),
+            skills=ctx.skills.to_dict(),
+            points=ctx.points.to_dict(),
+            meta=ctx.meta.to_dict(),
+        )

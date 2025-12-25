@@ -17,9 +17,10 @@ SAMPLE_VALUE_TO_DISPLAY = {v: k for k, v in SAMPLE_DISPLAY_TO_VALUE.items()}
 
 class PickNotebookCrudPage(RecordCrudPage):
     """
-    第二轮封装：
-    - 统一右侧：ScrollableFrame + Notebook + tabs 字典
-    - 统一 pick：request_pick_current + PICK_CONFIRMED 过滤分发（按 context.type）
+    第二轮封装（升级）：
+    - request_pick_current 仍然发 PICK_REQUEST
+    - 不再消费 PICK_CONFIRMED（业务更新由应用层 PickOrchestrator 做）
+    - 改为消费 RECORD_UPDATED 来刷新 UI（列表/表单/dirty）
     """
 
     def __init__(
@@ -60,51 +61,55 @@ class PickNotebookCrudPage(RecordCrudPage):
             self.nb.add(tab, text=name)
             self.tabs[name] = tab
 
-        # pick event hook
-        self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed_event)
+        # Application-level update hook
+        self._bus.subscribe(EventType.RECORD_UPDATED, self._on_record_updated)
 
     def request_pick_current(self) -> None:
         if not self.current_id:
             self._bus.post(EventType.ERROR, msg=f"请先选择一个{self._record_noun}")
             return
-        # flush form so sample/monitor etc are up-to-date
+        # flush form so config is up-to-date before pick (important!)
         self._apply_form_to_current(auto_save=False)
         self._bus.post(EventType.PICK_REQUEST, context={"type": self._pick_context_type, "id": self.current_id})
 
-    def _on_pick_confirmed_event(self, ev: Event) -> None:
-        ctx = ev.payload.get("context")
-        if not isinstance(ctx, dict):
+    def _on_record_updated(self, ev: Event) -> None:
+        """
+        Payload:
+          - record_type: "skill_pixel" | "point"
+          - id: record id
+          - source: e.g. "pick"
+          - saved: bool
+        """
+        rt = ev.payload.get("record_type")
+        rid = ev.payload.get("id")
+        saved = bool(ev.payload.get("saved", False))
+
+        if rt != self._pick_context_type:
             return
-        if ctx.get("type") != self._pick_context_type:
-            return
-        rid = ctx.get("id")
         if not isinstance(rid, str) or not rid:
             return
 
-        if not self._apply_pick_payload_to_model(rid, ev.payload):
-            return
-
+        # refresh row
         self.update_tree_row(rid)
 
-        # if current is same, allow subclass to sync form widgets
+        # if current is same, refresh full form from model (robust, no payload dependency)
         if self.current_id == rid:
-            self._sync_form_after_pick(rid, ev.payload)
+            try:
+                self._load_into_form(rid)
+            except Exception:
+                pass
 
-        self.mark_dirty()
-        if getattr(self._ctx.base.io, "auto_save", False):
-            if self._save_to_disk():
-                self.clear_dirty()
+        # dirty decision
+        if saved:
+            # PickOrchestrator already committed skills/points to disk.
+            # Clearing is safe because request_pick_current already flushed form into model.
+            self.clear_dirty()
+        else:
+            self.mark_dirty()
 
-    # ----- hooks for subclasses -----
+    # ----- legacy hooks retained for subclasses (may still be used elsewhere) -----
     def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
-        """
-        Update underlying model with payload (x,y,r,g,b, optional monitor, etc).
-        Must be implemented by subclasses.
-        """
         raise NotImplementedError
 
     def _sync_form_after_pick(self, rid: str, payload: dict) -> None:
-        """
-        Optional: update UI variables after pick.
-        """
         return

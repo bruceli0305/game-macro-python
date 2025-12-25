@@ -4,18 +4,26 @@ import tkinter as tk
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
-from core.app.services.skills_service import SkillsService
 from core.event_bus import EventBus
+from core.event_types import EventType
 from core.models.common import clamp_int
-from core.models.skill import Skill
+from core.models.skill import Skill, ColorRGB
+from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
 from ui.widgets.color_swatch import ColorSwatch
 
 
+def rgb_to_hex(r: int, g: int, b: int) -> str:
+    r = clamp_int(int(r), 0, 255)
+    g = clamp_int(int(g), 0, 255)
+    b = clamp_int(int(b), 0, 255)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
 class SkillsPage(PickNotebookCrudPage):
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus) -> None:
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services=None) -> None:
         super().__init__(
             master,
             ctx=ctx,
@@ -36,7 +44,8 @@ class SkillsPage(PickNotebookCrudPage):
             tab_names=["基本", "像素", "备注"],
         )
 
-        self._svc = SkillsService(ctx_provider=lambda: self._ctx, bus=self._bus)
+        self._services = services
+        self._cap = ScreenCapture()
 
         tab_basic = self.tabs["基本"]
         tab_pixel = self.tabs["像素"]
@@ -50,8 +59,9 @@ class SkillsPage(PickNotebookCrudPage):
         self.var_readbar = tk.IntVar(value=0)
 
         self.var_monitor = tk.StringVar(value="primary")
-        self.var_x = tk.IntVar(value=0)  # rel
-        self.var_y = tk.IntVar(value=0)  # rel
+        # UI 使用 rel 坐标（可读性）
+        self.var_x = tk.IntVar(value=0)
+        self.var_y = tk.IntVar(value=0)
 
         self.var_r = tk.IntVar(value=0)
         self.var_g = tk.IntVar(value=0)
@@ -70,7 +80,7 @@ class SkillsPage(PickNotebookCrudPage):
 
     def destroy(self) -> None:
         try:
-            self._svc.close()
+            self._cap.close()
         except Exception:
             pass
         super().destroy()
@@ -81,30 +91,98 @@ class SkillsPage(PickNotebookCrudPage):
         self.clear_dirty()
         self.refresh_tree()
 
+    # --- UoW dirty bridge ---
+    def mark_dirty(self) -> None:
+        super().mark_dirty()
+        if self._services is not None:
+            try:
+                self._services.uow.mark_dirty("skills")
+            except Exception:
+                pass
+
+    def clear_dirty(self) -> None:
+        super().clear_dirty()
+        if self._services is not None:
+            try:
+                self._services.uow.clear_dirty("skills")
+            except Exception:
+                pass
+
     # ----- RecordCrudPage hooks -----
     def _records(self) -> list:
         return self._ctx.skills.skills
 
     def _save_to_disk(self) -> bool:
-        return self._svc.save()
+        try:
+            if self._services is not None:
+                self._services.uow.commit(parts={"skills"}, backup=self._ctx.base.io.backup_on_save)
+            else:
+                self._ctx.skills_repo.save(self._ctx.skills, backup=self._ctx.base.io.backup_on_save)
+            return True
+        except Exception as e:
+            self._bus.post(EventType.ERROR, msg=f"保存 skills.json 失败: {e}")
+            return False
 
     def _make_new_record(self) -> Skill:
-        return self._svc.make_new()
+        if self._services is not None:
+            return self._services.skills.create_skill(name="新技能")
 
+        # fallback（极少走到）
+        sid = self._ctx.idgen.next_id()
+        s = Skill(id=sid, name="新技能", enabled=True)
+        s.pixel.monitor = "primary"
+        s.pixel.vx = 0
+        s.pixel.vy = 0
+        return s
     def _clone_record(self, record: Skill) -> Skill:
-        return self._svc.clone(record)
+        if self._services is not None:
+            clone = self._services.skills.clone_skill(record.id)
+            if clone is not None:
+                return clone
+
+        new_id = self._ctx.idgen.next_id()
+        clone = Skill.from_dict(record.to_dict())
+        clone.id = new_id
+        clone.name = f"{record.name} (副本)"
+        return clone
 
     def _delete_record_by_id(self, rid: str) -> None:
-        self._svc.delete_by_id(rid)
-
+        if self._services is not None:
+            self._services.skills.delete_skill(rid)
+            return
+        self._ctx.skills.skills = [x for x in self._ctx.skills.skills if x.id != rid]
     def _record_id(self, record: Skill) -> str:
         return record.id
 
     def _record_title(self, record: Skill) -> str:
         return record.name
 
+    def _store_add_record(self, record) -> None:
+        # 如果走了 service，它已经 append 过了，这里不再 append
+        if self._services is None:
+            self._ctx.skills.skills.append(record)
+            
     def _record_row_values(self, s: Skill) -> tuple:
-        return self._svc.row_values(s)
+        sid = s.id or ""
+        short = sid[-6:] if len(sid) >= 6 else sid
+
+        try:
+            rx, ry = self._cap.abs_to_rel(int(s.pixel.vx), int(s.pixel.vy), s.pixel.monitor or "primary")
+        except Exception:
+            rx, ry = int(s.pixel.vx), int(s.pixel.vy)
+
+        pos = f"({rx},{ry})"
+        hx = rgb_to_hex(s.pixel.color.r, s.pixel.color.g, s.pixel.color.b)
+        return (
+            "是" if s.enabled else "否",
+            s.name,
+            short,
+            s.trigger.key,
+            pos,
+            hx,
+            str(s.pixel.tolerance),
+            str(s.cast.readbar_ms),
+        )
 
     # ----- form -----
     def _build_tab_basic(self, parent: tk.Misc) -> None:
@@ -221,14 +299,12 @@ class SkillsPage(PickNotebookCrudPage):
             self._building_form = False
 
     def _load_into_form(self, rid: str) -> None:
-        s = self._svc.find_by_id(rid)
+        s = self._find_skill(rid)
         if s is None:
             return
         self._current_id = rid
         short = rid[-6:] if len(rid) >= 6 else rid
         self.set_header_title(f"{s.name}  [{short}]")
-
-        rx, ry = self._svc.load_rel_xy(s)
 
         self._building_form = True
         try:
@@ -239,6 +315,10 @@ class SkillsPage(PickNotebookCrudPage):
             self.var_readbar.set(int(s.cast.readbar_ms))
 
             self.var_monitor.set(s.pixel.monitor or "primary")
+            try:
+                rx, ry = self._cap.abs_to_rel(int(s.pixel.vx), int(s.pixel.vy), self.var_monitor.get())
+            except Exception:
+                rx, ry = 0, 0
             self.var_x.set(int(rx))
             self.var_y.set(int(ry))
 
@@ -260,27 +340,38 @@ class SkillsPage(PickNotebookCrudPage):
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
-        s = self._svc.find_by_id(self._current_id)
+        s = self._find_skill(self._current_id)
         if s is None:
             return False
 
-        self._svc.apply_form(
-            s,
-            name=self.var_name.get(),
-            enabled=bool(self.var_enabled.get()),
-            trigger_key=self.var_trigger_key.get(),
-            readbar_ms=int(self.var_readbar.get()),
-            monitor=self.var_monitor.get(),
-            rel_x=int(self.var_x.get()),
-            rel_y=int(self.var_y.get()),
-            r=int(self.var_r.get()),
-            g=int(self.var_g.get()),
-            b=int(self.var_b.get()),
-            tolerance=int(self.var_tol.get()),
-            sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
-            sample_radius=int(self.var_sample_radius.get()),
-            note=self._txt_note.get("1.0", "end").rstrip("\n"),
-        )
+        s.name = self.var_name.get()
+        s.enabled = bool(self.var_enabled.get())
+        s.trigger.type = "key"
+        s.trigger.key = self.var_trigger_key.get()
+        s.cast.readbar_ms = clamp_int(int(self.var_readbar.get()), 0, 10**9)
+
+        mon = self.var_monitor.get() or "primary"
+        rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
+        rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
+
+        s.pixel.monitor = mon
+        try:
+            vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
+        except Exception:
+            vx, vy = rel_x, rel_y
+        s.pixel.vx = clamp_int(int(vx), -10**9, 10**9)
+        s.pixel.vy = clamp_int(int(vy), -10**9, 10**9)
+
+        r = clamp_int(int(self.var_r.get()), 0, 255)
+        g = clamp_int(int(self.var_g.get()), 0, 255)
+        b = clamp_int(int(self.var_b.get()), 0, 255)
+        s.pixel.color = ColorRGB(r=r, g=g, b=b)
+
+        s.pixel.tolerance = clamp_int(int(self.var_tol.get()), 0, 255)
+        s.pixel.sample.mode = SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single")
+        s.pixel.sample.radius = clamp_int(int(self.var_sample_radius.get()), 0, 50)
+
+        s.note = self._txt_note.get("1.0", "end").rstrip("\n")
 
         self.update_tree_row(s.id)
 
@@ -289,12 +380,34 @@ class SkillsPage(PickNotebookCrudPage):
                 self.clear_dirty()
         return True
 
-    # ----- pick hook -----
+    def _find_skill(self, sid: str) -> Skill | None:
+        for s in self._ctx.skills.skills:
+            if s.id == sid:
+                return s
+        return None
+
+    # ----- pick hook from PickNotebookCrudPage -----
     def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
-        s = self._svc.find_by_id(rid)
+        s = self._find_skill(rid)
         if s is None:
             return False
-        self._svc.apply_pick_payload(s, payload)
+
+        if "vx" in payload and "vy" in payload:
+            vx = int(payload.get("vx", 0))
+            vy = int(payload.get("vy", 0))
+        else:
+            vx = int(payload.get("abs_x", 0))
+            vy = int(payload.get("abs_y", 0))
+
+        r = clamp_int(int(payload.get("r", 0)), 0, 255)
+        g = clamp_int(int(payload.get("g", 0)), 0, 255)
+        b = clamp_int(int(payload.get("b", 0)), 0, 255)
+
+        s.pixel.vx, s.pixel.vy = vx, vy
+        mon = payload.get("monitor")
+        if isinstance(mon, str) and mon:
+            s.pixel.monitor = mon
+        s.pixel.color = ColorRGB(r=r, g=g, b=b)
         return True
 
     def _sync_form_after_pick(self, rid: str, payload: dict) -> None:

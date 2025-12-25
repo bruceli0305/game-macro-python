@@ -4,14 +4,6 @@ from enum import Enum
 
 
 class EventType(str, Enum):
-    """
-    Centralized event types.
-
-    Note:
-    - Inherit from str so it's easy to print/serialize.
-    - Use EventType.ANY as wildcard subscription.
-    """
-
     ANY = "*"
 
     # common messages
@@ -34,15 +26,17 @@ class EventType(str, Enum):
     PICK_CANCELED = "PICK_CANCELED"
     PICK_MODE_EXITED = "PICK_MODE_EXITED"
 
+    # application-level
+    RECORD_UPDATED = "RECORD_UPDATED"
+
+    # dirty state
+    DIRTY_STATE_CHANGED = "DIRTY_STATE_CHANGED"  # payload: dirty(bool), parts(list[str])
+
     def __str__(self) -> str:
         return self.value
 
 
-def as_event_type(t: EventType | str) -> EventType:
-    """
-    Convert a string (or EventType) into EventType.
-    Keeps backward compatibility during migration.
-    """
+def as_event_type(t: "EventType | str") -> EventType:
     if isinstance(t, EventType):
         return t
 

@@ -42,10 +42,11 @@ _ANCHOR_VAL_TO_DISP = {v: k for k, v in _ANCHOR_DISP_TO_VAL.items()}
 
 
 class BaseSettingsPage(tb.Frame):
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus) -> None:
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services=None) -> None:
         super().__init__(master)
         self._ctx = ctx
         self._bus = bus
+        self._services = services
 
         self._building = False
         self._dirty = False
@@ -98,11 +99,9 @@ class BaseSettingsPage(tb.Frame):
         self._install_dirty_watchers()
         self._set_dirty(False)
 
-    # ---- public for AppWindow ----
     def is_dirty(self) -> bool:
         return bool(self._dirty)
 
-    # ---------------- dirty ----------------
     def _install_dirty_watchers(self) -> None:
         def on_any(*_args) -> None:
             if self._building:
@@ -129,6 +128,15 @@ class BaseSettingsPage(tb.Frame):
         self._dirty = bool(flag)
         self._var_dirty.set("未保存*" if self._dirty else "")
 
+        if self._services is not None:
+            try:
+                if self._dirty:
+                    self._services.uow.mark_dirty("base")
+                else:
+                    self._services.uow.clear_dirty("base")
+                self._services.notify_dirty()
+            except Exception:
+                pass
     # ---------------- UI groups ----------------
     def _build_ui_group(self, master: tb.Frame) -> None:
         lf = tb.Labelframe(master, text="界面 / 截图 / 热键", padding=10)
@@ -219,7 +227,7 @@ class BaseSettingsPage(tb.Frame):
             self.var_hotkey_cancel_pick.set(b.hotkeys.cancel_pick or "esc")
 
             av = b.pick.avoidance
-            self.var_avoid_mode_disp.set(_AVOID_DISP_TO_VAL.get(av.mode, "隐藏主窗口"))
+            self.var_avoid_mode_disp.set(_AVOID_VAL_TO_DISP.get(av.mode, "隐藏主窗口"))
             self.var_avoid_delay.set(int(av.delay_ms))
             self.var_preview_follow.set(bool(av.preview_follow_cursor))
             self.var_preview_offset_x.set(int(av.preview_offset[0]))
@@ -235,10 +243,13 @@ class BaseSettingsPage(tb.Frame):
     # ---------------- actions ----------------
     def _on_reload(self) -> None:
         try:
-            # 从磁盘重新加载 base.json
             self._ctx.base = self._ctx.base_repo.load_or_create()
             self.set_context(self._ctx)
             self._bus.post(EventType.INFO, msg="已重新加载 base.json")
+            if self._services is not None:
+                self._services.uow.clear_dirty("base")
+                self._services.uow.refresh_snapshot(parts={"base"})
+                self._services.notify_dirty()
         except Exception as e:
             self._bus.post(EventType.ERROR, msg=f"重新加载失败: {e}")
 
@@ -259,6 +270,7 @@ class BaseSettingsPage(tb.Frame):
             self._bus.post(EventType.ERROR, msg="热键不能为空")
             messagebox.showerror("保存失败", "热键不能为空", parent=self.winfo_toplevel())
             return
+
         try:
             enter_pp = to_pynput_hotkey(enter_raw)
             cancel_pp = to_pynput_hotkey(cancel_raw)
@@ -271,8 +283,9 @@ class BaseSettingsPage(tb.Frame):
             self._bus.post(EventType.ERROR, msg="热键冲突：进入取色 与 取消取色 不能相同")
             messagebox.showerror("保存失败", "热键冲突：进入取色 与 取消取色 不能相同", parent=self.winfo_toplevel())
             return
-        b.hotkeys.enter_pick_mode = (self.var_hotkey_enter_pick.get() or "").strip()
-        b.hotkeys.cancel_pick = (self.var_hotkey_cancel_pick.get() or "").strip()
+
+        b.hotkeys.enter_pick_mode = enter_raw
+        b.hotkeys.cancel_pick = cancel_raw
 
         av = b.pick.avoidance
         av.mode = _AVOID_DISP_TO_VAL.get(self.var_avoid_mode_disp.get(), "hide_main")
@@ -285,7 +298,11 @@ class BaseSettingsPage(tb.Frame):
         b.io.backup_on_save = bool(self.var_backup.get())
 
         try:
-            self._ctx.base_repo.save(b, backup=b.io.backup_on_save)
+            if self._services is not None:
+                self._services.uow.commit(parts={"base"}, backup=b.io.backup_on_save)
+            else:
+                self._ctx.base_repo.save(b, backup=b.io.backup_on_save)
+
             self._set_dirty(False)
             self._bus.post(EventType.INFO, msg="base.json 已保存")
             self._bus.post(EventType.UI_THEME_CHANGE, theme=b.ui.theme)

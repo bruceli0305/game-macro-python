@@ -6,7 +6,7 @@ from typing import Any
 
 import ttkbootstrap as tb
 from ttkbootstrap.constants import LEFT, X
-from tkinter import messagebox  # 修复：不要用 tk.messagebox
+from tkinter import messagebox
 
 from core.event_bus import EventBus
 from core.event_types import EventType
@@ -22,7 +22,7 @@ class ColumnDef:
 
 class RecordCrudPage(tb.Frame):
     """
-    公共封装（第一轮基类，第二轮继续保留）：
+    公共封装（基类）：
     - 左侧 Treeview CRUD（新增/复制/删除/保存）
     - 选择切换时自动 apply 当前表单（auto_save 可选）
     - dirty 管理 + auto_save
@@ -40,6 +40,10 @@ class RecordCrudPage(tb.Frame):
       - _load_into_form(record_id) -> None
       - _apply_form_to_current(auto_save: bool) -> bool
       - _clear_form() -> None
+
+    新增可选 hooks（用于把 CRUD 的实际存取交给 Service）：
+      - _store_add_record(record) -> None
+      - _store_delete_record(record_id) -> None
     """
 
     def __init__(
@@ -203,12 +207,21 @@ class RecordCrudPage(tb.Frame):
 
         self._load_into_form(rid)
 
+    # ---------- NEW store hooks ----------
+    def _store_add_record(self, record: Any) -> None:
+        """Default behavior: append to underlying list."""
+        self._records().append(record)
+
+    def _store_delete_record(self, rid: str) -> None:
+        """Default behavior: call subclass delete hook."""
+        self._delete_record_by_id(rid)
+
     # ---------- CRUD ----------
     def _on_add(self) -> None:
         self._apply_form_to_current(auto_save=True)
 
         rec = self._make_new_record()
-        self._records().append(rec)
+        self._store_add_record(rec)
         rid = self._record_id(rec)
 
         self.refresh_tree()
@@ -234,7 +247,7 @@ class RecordCrudPage(tb.Frame):
             return
 
         clone = self._clone_record(src)
-        self._records().append(clone)
+        self._store_add_record(clone)
 
         new_id = self._record_id(clone)
         self.refresh_tree()
@@ -265,7 +278,7 @@ class RecordCrudPage(tb.Frame):
         if not ok:
             return
 
-        self._delete_record_by_id(rid)
+        self._store_delete_record(rid)
         self.refresh_tree()
 
         self.mark_dirty()

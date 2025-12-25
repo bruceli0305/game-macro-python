@@ -11,7 +11,8 @@ from core.event_types import EventType
 from core.models.app_state import AppState
 from core.profiles import ProfileContext, ProfileManager
 from core.repos.app_state_repo import AppStateRepo
-
+from core.app.services.app_services import AppServices
+from core.app.pick_orchestrator import PickOrchestrator
 from core.input.global_hotkeys import GlobalHotkeyService, HotkeyConfig
 
 # Pick service is optional but present in your codebase
@@ -91,7 +92,10 @@ class AppWindow(tb.Window):
 
         self._base_title = "Game Macro - Phase 1"
         self.title(self._base_title)
-
+        # application services (UnitOfWork + domain services)
+        self._services = AppServices(bus=self._bus, ctx=self._ctx)
+        # application-level pick handler
+        self._pick_orch = PickOrchestrator(bus=self._bus, services=self._services)
         # ---- pick ui state ----
         self._preview: PickPreviewWindow | None = None
         self._pick_active = False
@@ -163,6 +167,7 @@ class AppWindow(tb.Window):
         self._bus.subscribe(EventType.INFO, self._on_info)
         self._bus.subscribe(EventType.ERROR, self._on_error)
         self._bus.subscribe(EventType.STATUS, self._on_status)
+        self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
         # pick ui subscriptions
         self._bus.subscribe(EventType.PICK_MODE_ENTERED, self._on_pick_mode_entered)
@@ -171,6 +176,7 @@ class AppWindow(tb.Window):
         self._bus.subscribe(EventType.PICK_CANCELED, self._on_pick_canceled)
         self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed)
 
+        self._services.notify_dirty()
         # preview window click cancel -> bus cancel
         self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post(EventType.PICK_CANCEL_REQUEST))
 
@@ -215,9 +221,9 @@ class AppWindow(tb.Window):
 
     # ---------------- Pages ----------------
     def _build_pages(self) -> None:
-        self._pages["base"] = BaseSettingsPage(self._content, ctx=self._ctx, bus=self._bus)
-        self._pages["skills"] = SkillsPage(self._content, ctx=self._ctx, bus=self._bus)
-        self._pages["points"] = PointsPage(self._content, ctx=self._ctx, bus=self._bus)
+        self._pages["base"] = BaseSettingsPage(self._content, ctx=self._ctx, bus=self._bus, services=self._services)
+        self._pages["skills"] = SkillsPage(self._content, ctx=self._ctx, bus=self._bus, services=self._services)
+        self._pages["points"] = PointsPage(self._content, ctx=self._ctx, bus=self._bus, services=self._services)
         for p in self._pages.values():
             p.grid(row=0, column=0, sticky="nsew")
 
@@ -298,7 +304,7 @@ class AppWindow(tb.Window):
                 self._pm.delete_profile(cur)
                 self._ctx = self._pm.current or self._pm.open_last_or_fallback()
                 self._status.set_profile(self._ctx.profile_name)
-
+                self._services.set_context(self._ctx)
                 for key, page in self._pages.items():
                     if hasattr(page, "set_context"):
                         try:
@@ -326,7 +332,7 @@ class AppWindow(tb.Window):
 
         self._ctx = new_ctx
         self._status.set_profile(self._ctx.profile_name)
-
+        self._services.set_context(self._ctx)
         try:
             self.style.theme_use(self._ctx.base.ui.theme or "darkly")
         except Exception:
@@ -693,7 +699,7 @@ class AppWindow(tb.Window):
             max_events=200,
             on_error=lambda ev, e: self.set_status(f"ERROR: handler failed ({ev.type.value}): {e}", ttl_ms=5000),
         )
-        self._update_global_dirty_indicator()
+        # self._update_global_dirty_indicator()
         self.after(16, self._pump_events)
 
     def _on_theme_change(self, ev: Event) -> None:
@@ -772,3 +778,11 @@ class AppWindow(tb.Window):
             pass
 
         self.destroy()
+    def _on_dirty_state_changed(self, ev: Event) -> None:
+        dirty = bool(ev.payload.get("dirty", False))
+        title = self._base_title + (" *" if dirty else "")
+        try:
+            if self.title() != title:
+                self.title(title)
+        except Exception:
+            pass
