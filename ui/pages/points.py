@@ -415,3 +415,8 @@ class PointsPage(PickNotebookCrudPage):
         self.var_captured_at.set(now_iso_utc())
         self.mark_dirty()
         self._apply_form_to_current(auto_save=True)
+    def flush_to_model(self) -> None:
+        try:
+            self._apply_form_to_current(auto_save=False)
+        except Exception:
+            pass

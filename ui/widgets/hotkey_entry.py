@@ -49,7 +49,6 @@ _SPECIAL_NAME = {
 
 
 def _key_to_name(k) -> str | None:
-    # modifiers handled separately
     if isinstance(k, keyboard.KeyCode):
         if k.char:
             return k.char.lower()
@@ -60,7 +59,6 @@ def _key_to_name(k) -> str | None:
 
     # function keys
     try:
-        # e.g. keyboard.Key.f1
         name = getattr(k, "name", None)
         if isinstance(name, str) and name.startswith("f") and name[1:].isdigit():
             return name.lower()
@@ -84,6 +82,7 @@ class HotkeyEntry(tb.Frame):
     - '录制' starts a pynput keyboard.Listener
     - press modifiers + a key to finish
     - Esc cancels recording
+    - supports set_error() to show validation feedback
     """
 
     def __init__(
@@ -102,15 +101,47 @@ class HotkeyEntry(tb.Frame):
         self._mods: set[str] = set()
         self._timeout_after_id: str | None = None
 
-        self._entry = tb.Entry(self, textvariable=self._var, width=width, state="readonly")
+        # UI row
+        row = tb.Frame(self)
+        row.pack(fill=X, expand=True)
+
+        self._entry = tb.Entry(row, textvariable=self._var, width=width, state="readonly")
         self._entry.pack(side=LEFT, fill=X, expand=True)
 
-        self._btn = tb.Button(self, text="录制", command=self.start_record, width=6)
+        self._btn = tb.Button(row, text="录制", command=self.start_record, width=6)
         self._btn.pack(side=LEFT, padx=(8, 0))
+
+        # error row (hidden by empty text)
+        self._err_var = tk.StringVar(value="")
+        self._err_lbl = tb.Label(self, textvariable=self._err_var, bootstyle="danger")
+        self._err_lbl.pack(fill=X, pady=(4, 0))
+
+        self.set_error(None)
+
+    def set_error(self, msg: str | None) -> None:
+        """
+        Show/clear an error message and highlight the entry (best-effort).
+        """
+        m = (msg or "").strip()
+        self._err_var.set(m)
+
+        # highlight entry
+        try:
+            self._entry.configure(bootstyle=("danger" if m else ""))
+        except Exception:
+            pass
+
+        # if no error, keep label empty (still occupies a little height; acceptable)
+        # if you want fully collapse, you could pack_forget/pack, but it's more fragile.
+
+    def clear_error(self) -> None:
+        self.set_error(None)
 
     def start_record(self) -> None:
         if self._recording:
             return
+
+        self.clear_error()
 
         self._recording = True
         self._mods.clear()
@@ -119,7 +150,6 @@ class HotkeyEntry(tb.Frame):
         # timeout: 5s auto-cancel
         self._set_timeout(5000)
 
-        # start listener (background thread inside pynput)
         self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         try:
             self._listener.start()
@@ -153,7 +183,6 @@ class HotkeyEntry(tb.Frame):
             self._listener = None
 
     def _stop_recording_ui(self, *, cancel: bool) -> None:
-        # must run on Tk thread
         self._clear_timeout()
         self._stop_listener()
         self._recording = False
@@ -162,7 +191,6 @@ class HotkeyEntry(tb.Frame):
         # cancel=True 不改原值
 
     def _finish(self, hotkey: str) -> None:
-        # Tk thread update
         def _apply():
             self._var.set(hotkey)
             self._stop_recording_ui(cancel=False)
@@ -176,14 +204,14 @@ class HotkeyEntry(tb.Frame):
             if not self._recording:
                 return
 
-            # Esc cancels recording
             if k == keyboard.Key.esc:
                 self.after(0, lambda: self._stop_recording_ui(cancel=True))
                 return
 
-            # modifiers
             if k in _MOD_KEYS:
-                self._mods.add(_MOD_NAME.get(k, ""))
+                name = _MOD_NAME.get(k, "")
+                if name:
+                    self._mods.add(name)
                 return
 
             key_name = _key_to_name(k)
@@ -197,7 +225,6 @@ class HotkeyEntry(tb.Frame):
             self._finish(hotkey)
 
         except Exception:
-            # swallow all exceptions in listener callback
             pass
 
     def _on_release(self, k) -> None:

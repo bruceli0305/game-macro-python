@@ -5,11 +5,11 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from tkinter import messagebox
 
-from core.input.hotkey_strings import to_pynput_hotkey
 from core.event_bus import EventBus
 from core.event_types import EventType
 from core.models.common import clamp_int
 from core.profiles import ProfileContext
+from core.app.services.base_settings_service import BaseSettingsPatch
 from ui.widgets.hotkey_entry import HotkeyEntry
 
 
@@ -102,11 +102,102 @@ class BaseSettingsPage(tb.Frame):
     def is_dirty(self) -> bool:
         return bool(self._dirty)
 
+    # --- standardized flush (no validation) ---
+    def flush_to_model(self) -> None:
+        if self._building:
+            return
+        if self._services is None:
+            return
+
+        patch = self._collect_patch()
+        try:
+            # apply without saving (may raise validation error; ignore here)
+            self._services.base.apply_patch(patch)
+        except Exception:
+            # flush should not block leave-confirm; we keep model best-effort
+            pass
+
+    def _collect_patch(self) -> BaseSettingsPatch:
+        theme = (self.var_theme.get() or "").strip()
+        if theme == "---":
+            theme = "darkly"
+
+        return BaseSettingsPatch(
+            theme=theme or "darkly",
+            monitor_policy=_MONITOR_DISP_TO_VAL.get(self.var_monitor_policy_disp.get(), "primary"),
+
+            hotkey_enter_pick=(self.var_hotkey_enter_pick.get() or "").strip(),
+            hotkey_cancel_pick=(self.var_hotkey_cancel_pick.get() or "").strip(),
+
+            avoid_mode=_AVOID_DISP_TO_VAL.get(self.var_avoid_mode_disp.get(), "hide_main"),
+            avoid_delay_ms=clamp_int(int(self.var_avoid_delay.get()), 0, 5000),
+            preview_follow=bool(self.var_preview_follow.get()),
+            preview_offset_x=int(self.var_preview_offset_x.get()),
+            preview_offset_y=int(self.var_preview_offset_y.get()),
+            preview_anchor=_ANCHOR_DISP_TO_VAL.get(self.var_preview_anchor_disp.get(), "bottom_right"),
+
+            auto_save=bool(self.var_auto_save.get()),
+            backup_on_save=bool(self.var_backup.get()),
+        )
+
+    def _clear_hotkey_errors(self) -> None:
+        try:
+            if hasattr(self, "_hk_enter"):
+                self._hk_enter.clear_error()
+            if hasattr(self, "_hk_cancel"):
+                self._hk_cancel.clear_error()
+        except Exception:
+            pass
+
+    def _apply_hotkey_error(self, msg: str) -> None:
+        """
+        Parse service ValueError messages and highlight the correct field.
+        """
+        s = (msg or "").strip()
+        self._clear_hotkey_errors()
+
+        if s.startswith("enter_pick_mode:"):
+            try:
+                self._hk_enter.set_error(s.split(":", 1)[1].strip())
+            except Exception:
+                pass
+            return
+
+        if s.startswith("cancel_pick:"):
+            try:
+                self._hk_cancel.set_error(s.split(":", 1)[1].strip())
+            except Exception:
+                pass
+            return
+
+        if s.startswith("hotkeys:"):
+            # conflict: highlight both
+            detail = s.split(":", 1)[1].strip()
+            try:
+                self._hk_enter.set_error(detail)
+                self._hk_cancel.set_error(detail)
+            except Exception:
+                pass
+
+    def _validate_hotkeys_live(self) -> None:
+        """
+        Live validation (best-effort). Only runs when services injected.
+        """
+        if self._services is None:
+            return
+        try:
+            patch = self._collect_patch()
+            self._services.base.validate_patch(patch)
+            self._clear_hotkey_errors()
+        except Exception as e:
+            self._apply_hotkey_error(str(e))
+    # ---------------- dirty ----------------
     def _install_dirty_watchers(self) -> None:
         def on_any(*_args) -> None:
             if self._building:
                 return
             self._set_dirty(True)
+            self._validate_hotkeys_live()
 
         for v in [
             self.var_theme,
@@ -137,6 +228,7 @@ class BaseSettingsPage(tb.Frame):
                 self._services.notify_dirty()
             except Exception:
                 pass
+
     # ---------------- UI groups ----------------
     def _build_ui_group(self, master: tb.Frame) -> None:
         lf = tb.Labelframe(master, text="界面 / 截图 / 热键", padding=10)
@@ -158,11 +250,11 @@ class BaseSettingsPage(tb.Frame):
         ).grid(row=1, column=1, sticky="ew", pady=4)
 
         tb.Label(lf, text="热键：进入取色").grid(row=2, column=0, sticky="w", pady=4)
-        HotkeyEntry(lf, textvariable=self.var_hotkey_enter_pick).grid(row=2, column=1, sticky="ew", pady=4)
-
+        self._hk_enter = HotkeyEntry(lf, textvariable=self.var_hotkey_enter_pick)
+        self._hk_enter.grid(row=2, column=1, sticky="ew", pady=4)
         tb.Label(lf, text="热键：取消取色").grid(row=3, column=0, sticky="w", pady=4)
-        HotkeyEntry(lf, textvariable=self.var_hotkey_cancel_pick).grid(row=3, column=1, sticky="ew", pady=4)
-
+        self._hk_cancel = HotkeyEntry(lf, textvariable=self.var_hotkey_cancel_pick)
+        self._hk_cancel.grid(row=3, column=1, sticky="ew", pady=4)
     def _build_pick_group(self, master: tb.Frame) -> None:
         lf = tb.Labelframe(master, text="取色避让", padding=10)
         lf.grid(row=0, column=1, sticky="nsew")
@@ -242,72 +334,34 @@ class BaseSettingsPage(tb.Frame):
 
     # ---------------- actions ----------------
     def _on_reload(self) -> None:
+        if self._services is None:
+            # fallback legacy behavior
+            try:
+                self._ctx.base = self._ctx.base_repo.load_or_create()
+                self.set_context(self._ctx)
+                self._bus.post(EventType.INFO, msg="已重新加载 base.json")
+            except Exception as e:
+                self._bus.post(EventType.ERROR, msg=f"重新加载失败: {e}")
+            return
+
         try:
-            self._ctx.base = self._ctx.base_repo.load_or_create()
-            self.set_context(self._ctx)
-            self._bus.post(EventType.INFO, msg="已重新加载 base.json")
-            self._bus.post(EventType.CONFIG_SAVED, section="base", source="reload", saved=False)
-            if self._services is not None:
-                self._services.uow.clear_dirty("base")
-                self._services.uow.refresh_snapshot(parts={"base"})
-                self._services.notify_dirty()
+            self._services.base.reload_cmd()
+            self.set_context(self._services.ctx)
+            self._set_dirty(False)
         except Exception as e:
             self._bus.post(EventType.ERROR, msg=f"重新加载失败: {e}")
 
     def _on_save(self) -> None:
-        b = self._ctx.base
+        patch = self._collect_patch()
 
-        theme = self.var_theme.get().strip()
-        if theme == "---":
-            theme = "darkly"
-        b.ui.theme = theme or "darkly"
-
-        b.capture.monitor_policy = _MONITOR_DISP_TO_VAL.get(self.var_monitor_policy_disp.get(), "primary")
-
-        enter_raw = (self.var_hotkey_enter_pick.get() or "").strip()
-        cancel_raw = (self.var_hotkey_cancel_pick.get() or "").strip()
-
-        if not enter_raw or not cancel_raw:
-            self._bus.post(EventType.ERROR, msg="热键不能为空")
-            messagebox.showerror("保存失败", "热键不能为空", parent=self.winfo_toplevel())
+        if self._services is None:
+            messagebox.showerror("保存失败", "services 未注入", parent=self.winfo_toplevel())
             return
 
         try:
-            enter_pp = to_pynput_hotkey(enter_raw)
-            cancel_pp = to_pynput_hotkey(cancel_raw)
-        except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"热键格式错误: {e}")
-            messagebox.showerror("保存失败", f"热键格式错误：{e}", parent=self.winfo_toplevel())
-            return
-
-        if enter_pp == cancel_pp:
-            self._bus.post(EventType.ERROR, msg="热键冲突：进入取色 与 取消取色 不能相同")
-            messagebox.showerror("保存失败", "热键冲突：进入取色 与 取消取色 不能相同", parent=self.winfo_toplevel())
-            return
-
-        b.hotkeys.enter_pick_mode = enter_raw
-        b.hotkeys.cancel_pick = cancel_raw
-
-        av = b.pick.avoidance
-        av.mode = _AVOID_DISP_TO_VAL.get(self.var_avoid_mode_disp.get(), "hide_main")
-        av.delay_ms = clamp_int(int(self.var_avoid_delay.get()), 0, 5000)
-        av.preview_follow_cursor = bool(self.var_preview_follow.get())
-        av.preview_offset = (int(self.var_preview_offset_x.get()), int(self.var_preview_offset_y.get()))
-        av.preview_anchor = _ANCHOR_DISP_TO_VAL.get(self.var_preview_anchor_disp.get(), "bottom_right")
-
-        b.io.auto_save = bool(self.var_auto_save.get())
-        b.io.backup_on_save = bool(self.var_backup.get())
-
-        try:
-            if self._services is not None:
-                self._services.uow.commit(parts={"base"}, backup=b.io.backup_on_save)
-            else:
-                self._ctx.base_repo.save(b, backup=b.io.backup_on_save)
-
+            self._services.base.save_cmd(patch)
             self._set_dirty(False)
-            self._bus.post(EventType.INFO, msg="base.json 已保存")
-            self._bus.post(EventType.UI_THEME_CHANGE, theme=b.ui.theme)
-            self._bus.post(EventType.HOTKEYS_CHANGED)
-            self._bus.post(EventType.CONFIG_SAVED, section="base", source="manual_save", saved=True)
         except Exception as e:
+            self._apply_hotkey_error(str(e))
             self._bus.post(EventType.ERROR, msg=f"保存失败: {e}")
+            messagebox.showerror("保存失败", f"{e}", parent=self.winfo_toplevel())

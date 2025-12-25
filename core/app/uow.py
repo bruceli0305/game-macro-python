@@ -66,7 +66,20 @@ class ProfileUnitOfWork:
 
         self._snap = Snapshot(base=base, skills=skills, points=points, meta=meta)
 
-    def commit(self, *, parts: Optional[Set[Part]] = None, backup: Optional[bool] = None) -> None:
+    def commit(
+        self,
+        *,
+        parts: Optional[Set[Part]] = None,
+        backup: Optional[bool] = None,
+        touch_meta: bool = True,
+    ) -> None:
+        """
+        Commit changes to disk.
+
+        - If parts is None: commit all currently dirty parts.
+        - touch_meta=True: also save meta.json (updated_at advances).
+        - touch_meta=False: do not save meta.json (reduce write frequency for autosave).
+        """
         target: Set[Part] = set(self._dirty) if parts is None else set(parts)
         if not target:
             return
@@ -79,6 +92,7 @@ class ProfileUnitOfWork:
             except Exception:
                 backup = True
 
+        # stable order
         if "base" in target:
             ctx.base_repo.save(ctx.base, backup=backup)
             self._dirty.discard("base")
@@ -91,13 +105,18 @@ class ProfileUnitOfWork:
             ctx.points_repo.save(ctx.points, backup=backup)
             self._dirty.discard("points")
 
-        # always touch meta on any commit
-        ctx.meta_repo.save(ctx.meta, backup=backup)
-        self._dirty.discard("meta")
+        if touch_meta:
+            ctx.meta_repo.save(ctx.meta, backup=backup)
+            self._dirty.discard("meta")
 
+        # snapshot = in-memory “last committed state” for rollback
         self._snap = self._take_snapshot()
 
     def rollback(self) -> None:
+        """
+        Roll back in-memory objects to last snapshot (best-effort).
+        Does NOT touch disk.
+        """
         ctx = self._ctx
         snap = self._snap
 

@@ -74,7 +74,7 @@ class SkillsService:
 
     # ---------------- save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"skills"}, backup=backup)
+        self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
 
     # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, sid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:

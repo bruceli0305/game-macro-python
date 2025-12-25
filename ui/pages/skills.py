@@ -429,3 +429,8 @@ class SkillsPage(PickNotebookCrudPage):
                 self.var_monitor.set(mon)
         finally:
             self._building_form = False
+    def flush_to_model(self) -> None:
+        try:
+            self._apply_form_to_current(auto_save=False)
+        except Exception:
+            pass

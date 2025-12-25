@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.app.uow import ProfileUnitOfWork
+from core.app.services.base_settings_service import BaseSettingsService
 from core.app.services.skills_service import SkillsService
 from core.app.services.points_service import PointsService
 from core.event_bus import EventBus
@@ -13,7 +14,7 @@ class AppServices:
         self.bus = bus
         self.uow = ProfileUnitOfWork(ctx)
 
-        # inject bus + notify callback, so services can publish domain/app events
+        self.base = BaseSettingsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
         self.skills = SkillsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
         self.points = PointsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
 

@@ -84,7 +84,7 @@ class PointsService:
 
     # ---------------- save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"points"}, backup=backup)
+        self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
 
     # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:

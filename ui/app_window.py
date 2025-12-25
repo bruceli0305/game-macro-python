@@ -580,16 +580,25 @@ class AppWindow(tb.Window):
         return out
 
     def _flush_current_forms_best_effort(self) -> None:
-        try:
-            for _key, page in self._pages.items():
-                if hasattr(page, "_apply_form_to_current"):
-                    try:
-                        page._apply_form_to_current(auto_save=False)  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        """
+        Flush UI state -> in-memory model before saving/confirm-leave.
+        Priority:
+        1) page.flush_to_model()
+        2) page._apply_form_to_current(auto_save=False) (legacy)
+        """
+        for _key, page in self._pages.items():
+            if hasattr(page, "flush_to_model"):
+                try:
+                    page.flush_to_model()  # type: ignore[attr-defined]
+                    continue
+                except Exception:
+                    pass
 
+            if hasattr(page, "_apply_form_to_current"):
+                try:
+                    page._apply_form_to_current(auto_save=False)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
     def _confirm_leave_context(self, *, action_name: str) -> bool:
         self._flush_current_forms_best_effort()
 
