@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from typing import Set
+
 from core.app.uow import ProfileUnitOfWork
 from core.app.services.base_settings_service import BaseSettingsService
 from core.app.services.skills_service import SkillsService
 from core.app.services.points_service import PointsService
 from core.event_bus import EventBus
 from core.event_types import EventType
-from core.events.payloads import DirtyStateChangedPayload
+from core.events.payloads import DirtyStateChangedPayload, ErrorPayload
 from core.profiles import ProfileContext
 
 
@@ -19,12 +21,16 @@ class AppServices:
         self.skills = SkillsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
         self.points = PointsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
 
+        # repair once on startup context
+        self._repair_ids_and_persist()
+
     @property
     def ctx(self) -> ProfileContext:
         return self.uow.ctx
 
     def set_context(self, ctx: ProfileContext) -> None:
         self.uow.set_context(ctx)
+        self._repair_ids_and_persist()
         self.notify_dirty()
 
     def notify_dirty(self) -> None:
@@ -33,3 +39,58 @@ class AppServices:
             EventType.DIRTY_STATE_CHANGED,
             DirtyStateChangedPayload(dirty=bool(self.uow.is_dirty()), parts=parts),
         )
+
+    def _repair_ids_and_persist(self) -> None:
+        """
+        Repair missing/duplicate IDs in loaded data.
+        This used to be in repos; now it's an application-layer repair.
+
+        Policy:
+        - If changes detected: save immediately (touch_meta=False)
+        - Do NOT show dirty star for user; this is internal normalization.
+        """
+        ctx = self.ctx
+        changed_parts: Set[str] = set()
+
+        # ---- skills ----
+        seen: Set[str] = set()
+        for s in ctx.skills.skills:
+            if (not s.id) or (s.id in seen):
+                s.id = ctx.idgen.next_id()
+                changed_parts.add("skills")
+            seen.add(s.id)
+
+        # ---- points ----
+        seen_p: Set[str] = set()
+        for p in ctx.points.points:
+            if (not p.id) or (p.id in seen_p):
+                p.id = ctx.idgen.next_id()
+                changed_parts.add("points")
+            seen_p.add(p.id)
+
+        if not changed_parts:
+            return
+
+        # persist silently
+        try:
+            backup = bool(getattr(ctx.base.io, "backup_on_save", True))
+        except Exception:
+            backup = True
+
+        try:
+            # commit accepts parts even if not marked dirty
+            self.uow.commit(parts=set(changed_parts), backup=backup, touch_meta=False)
+            # ensure UoW dirty cleared
+            try:
+                for part in changed_parts:
+                    self.uow.clear_dirty(part)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        except Exception as e:
+            # if persist fails, mark dirty so user can save later
+            for part in changed_parts:
+                try:
+                    self.uow.mark_dirty(part)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            self.bus.post_payload(EventType.ERROR, ErrorPayload(msg="数据修复保存失败", detail=str(e)))

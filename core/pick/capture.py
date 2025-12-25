@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from typing import Tuple
 import threading
 
 import mss
@@ -34,39 +34,47 @@ class Rect:
 
 class ScreenCapture:
     """
-    - 每线程一个 mss.mss()（避免 Windows thread-local handle 问题）
-    - 支持 monitor_key 解析屏幕矩形（Rect）
-      key:
-        "all"      -> monitors[0] 虚拟屏幕
-        "primary"  -> monitors[1]（通常是主屏）
-        "monitor_1"-> monitors[1], "monitor_2"-> monitors[2] ...
-    - 提供绝对<->相对坐标转换（相对坐标以该 monitor 左上角为原点）
+    Screen capture helper (mss) with thread-local instance.
+
+    Key changes (lifecycle simplification):
+    - No global _instances tracking (no tid->mss map).
+    - One mss.mss() per thread via threading.local().
+    - close_current_thread(): close only this thread's instance (recommended if you create/destroy threads).
+    - close(): best-effort alias to close_current_thread() (kept for backwards compatibility).
     """
 
     def __init__(self) -> None:
         self._local = threading.local()
-        self._lock = threading.Lock()
-        self._instances: Dict[int, mss.mss] = {}
 
     def _get_sct(self) -> mss.mss:
-        tid = threading.get_ident()
         sct = getattr(self._local, "sct", None)
         if sct is None:
             sct = mss.mss()
             self._local.sct = sct
-            with self._lock:
-                self._instances[tid] = sct
         return sct
 
-    def close(self) -> None:
-        with self._lock:
-            items = list(self._instances.items())
-            self._instances.clear()
-        for _tid, sct in items:
+    def close_current_thread(self) -> None:
+        """
+        Close the mss instance bound to the CURRENT thread (if any).
+        Safe to call multiple times.
+        """
+        sct = getattr(self._local, "sct", None)
+        if sct is not None:
             try:
                 sct.close()
             except Exception:
                 pass
+            try:
+                delattr(self._local, "sct")
+            except Exception:
+                self._local.sct = None  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        """
+        Backward compatibility: closes only current thread instance.
+        Note: Without global tracking, we cannot close other threads' instances from here.
+        """
+        self.close_current_thread()
 
     @staticmethod
     def _clamp(v: int, lo: int, hi: int) -> int:
@@ -116,7 +124,6 @@ class ScreenCapture:
         x_abs = int(x_abs)
         y_abs = int(y_abs)
 
-        # scan physical monitors (1..n)
         for idx in range(1, len(monitors)):
             m = monitors[idx]
             rect = Rect(
@@ -154,9 +161,10 @@ class ScreenCapture:
         require_inside: bool = True,
     ) -> Tuple[int, int, int]:
         """
-        在指定 monitor_key 的屏幕矩形内，用绝对坐标采样。
-        - require_inside=True: 若点不在 rect 内则抛错
-        - require_inside=False: 自动 clamp 到 rect 内采样
+        Sample RGB at absolute screen coordinate, scoped to a monitor rect.
+
+        - require_inside=True: raise if point outside rect
+        - require_inside=False: clamp into rect
         """
         rect = self.get_monitor_rect(monitor_key)
         x_abs = int(x_abs)
@@ -165,7 +173,6 @@ class ScreenCapture:
         if require_inside and not rect.contains_abs(x_abs, y_abs):
             raise ValueError(f"cursor outside monitor: {monitor_key}")
 
-        # clamp inside rect
         x_abs = self._clamp(x_abs, rect.left, rect.right - 1)
         y_abs = self._clamp(y_abs, rect.top, rect.bottom - 1)
 

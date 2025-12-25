@@ -126,10 +126,6 @@ class ProfileManager:
         return ctx
 
     def copy_profile(self, src_name: str, dst_name: str) -> ProfileContext:
-        """
-        复制一个 profile 目录（包含多个 JSON）。
-        复制后会“重置 meta.profile_id/created_at/updated_at/profile_name”，确保是新的 profile。
-        """
         src = sanitize_profile_name(src_name)
         dst = sanitize_profile_name(dst_name)
 
@@ -139,32 +135,25 @@ class ProfileManager:
         if not src_dir.exists():
             raise FileNotFoundError(f"Source profile not found: {src}")
         if dst_dir.exists():
-            # 已存在就直接打开
             return self.open_profile(dst)
 
         shutil.copytree(src_dir, dst_dir)
 
-        # 强制刷新 meta（生成新 profile_id 等）
+        # refresh meta
         meta_repo = MetaRepo(dst_dir)
         meta = meta_repo.load_or_create(profile_name=dst, idgen=self._idgen)
         meta.profile_name = dst
-        # 这里把 profile_id 重置成新的（避免 copy 后 ID 相同）
         meta.profile_id = self._idgen.next_id()
-        # 复制应当当作“新 profile”，重置 created_at
         meta.created_at = now_iso_utc()
         meta.updated_at = now_iso_utc()
         meta_repo.save(meta, backup=False)
 
-        # 其他文件若缺失/损坏，load_or_create 会自动补齐
         ctx = self._load_profile_dir(profile_dir=dst_dir, profile_name=dst)
         self._set_last_profile(dst)
         self.current = ctx
         return ctx
 
     def delete_profile(self, name: str) -> None:
-        """
-        删除 profile 目录（危险操作）。如果删的是 last_profile，会自动切到 fallback 并更新 app_state。
-        """
         name = sanitize_profile_name(name)
         profile_dir = self._profiles_root / name
         if not profile_dir.exists():
@@ -173,7 +162,6 @@ class ProfileManager:
         shutil.rmtree(profile_dir, ignore_errors=False)
 
         if sanitize_profile_name(self._app_state.last_profile) == name:
-            # 删除 last_profile 后，切换到 fallback（或 Default）
             ctx = self.open_last_or_fallback()
             self.current = ctx
 
@@ -187,12 +175,10 @@ class ProfileManager:
         if not old_dir.exists():
             raise FileNotFoundError(f"Profile not found: {old_name}")
         if new_dir.exists():
-            # 目标已存在，直接打开目标
             return self.open_profile(new_name)
 
         old_dir.rename(new_dir)
 
-        # 更新 meta.profile_name
         meta_repo = MetaRepo(new_dir)
         meta = meta_repo.load_or_create(profile_name=new_name, idgen=self._idgen)
         meta.profile_name = new_name
@@ -215,8 +201,8 @@ class ProfileManager:
 
         meta = meta_repo.load_or_create(profile_name=profile_name, idgen=self._idgen)
         base = base_repo.load_or_create()
-        skills = skills_repo.load_or_create(idgen=self._idgen)
-        points = points_repo.load_or_create(idgen=self._idgen)
+        skills = skills_repo.load_or_create()   # <- no idgen
+        points = points_repo.load_or_create()   # <- no idgen
 
         return ProfileContext(
             profile_name=profile_name,
