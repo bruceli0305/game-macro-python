@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, simpledialog
 
 import ttkbootstrap as tb
-from ttkbootstrap.constants import LEFT, X, Y, VERTICAL
 
-from core.app.pick_orchestrator import PickOrchestrator
-from core.app.services.app_services import AppServices
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.input.global_hotkeys import GlobalHotkeyService, HotkeyConfig
 from core.models.app_state import AppState
 from core.profiles import ProfileContext, ProfileManager
 from core.repos.app_state_repo import AppStateRepo
 
-# Pick service is optional
+from core.app.services.app_services import AppServices
+from core.app.services.profile_service import ProfileService
+from core.app.pick_orchestrator import PickOrchestrator
+from core.input.global_hotkeys import HotkeyConfig
+# optional pick engine
 try:
     from core.pick.pick_service import PickService, PickConfig
     from core.pick.capture import SampleSpec
@@ -25,48 +24,22 @@ except Exception:
     SampleSpec = None  # type: ignore
 
 from ui.nav import NavFrame
-from ui.pages.base_settings import BaseSettingsPage
-from ui.pages.skills import SkillsPage
-from ui.pages.points import PointsPage
-from ui.pick_preview_window import PickPreviewWindow
 
-try:
-    from ttkbootstrap.toast import ToastNotification  # type: ignore
-except Exception:
-    ToastNotification = None
-
-
-class StatusBar(tb.Frame):
-    def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master, padding=(10, 6))
-        self._profile_var = tk.StringVar(value="profile: -")
-        self._page_var = tk.StringVar(value="page: -")
-        self._status_var = tk.StringVar(value="ready")
-
-        tb.Label(self, textvariable=self._profile_var).pack(side=LEFT)
-        tb.Separator(self, orient=VERTICAL).pack(side=LEFT, fill=Y, padx=10)
-        tb.Label(self, textvariable=self._page_var).pack(side=LEFT)
-        tb.Separator(self, orient=VERTICAL).pack(side=LEFT, fill=Y, padx=10)
-        tb.Label(self, textvariable=self._status_var, anchor="w").pack(side=LEFT, fill=X, expand=True)
-
-    def set_profile(self, name: str) -> None:
-        self._profile_var.set(f"profile: {name}")
-
-    def set_page(self, name: str) -> None:
-        self._page_var.set(f"page: {name}")
-
-    def set_status(self, text: str) -> None:
-        self._status_var.set(text)
+from ui.app.event_pump import EventPump
+from ui.app.pages_manager import PagesManager
+from ui.app.pick_ui import PickUiController
+from ui.app.profile_controller import ProfileController
+from ui.app.status import StatusBar, StatusController
+from ui.app.hotkeys_controller import HotkeysController
+from ui.app.unsaved_guard import UnsavedChangesGuard
+from ui.app.window_state import WindowStateController
 
 
 class AppWindow(tb.Window):
     """
-    - Profile management
-    - UoW-based unsaved changes confirm
-    - Pick UI closure:
-        * subscribe PICK_* events
-        * show PickPreviewWindow
-        * apply avoidance (hide/minimize/move_aside/none) and restore
+    Thin shell window:
+    - assemble controllers and pages
+    - minimal glue code only
     """
 
     def __init__(
@@ -87,27 +60,19 @@ class AppWindow(tb.Window):
         self._app_state_repo = app_state_repo
         self._app_state = app_state
 
-        self._status_after_id: str | None = None
-        self._toast_available = ToastNotification is not None
-
         self._base_title = "Game Macro - Phase 1"
         self.title(self._base_title)
 
-        # application services (UnitOfWork + domain services)
+        # ---- services / orchestrators ----
         self._services = AppServices(bus=self._bus, ctx=self._ctx)
-        # application-level pick handler
+        self._profile_service = ProfileService(pm=self._pm, services=self._services, bus=self._bus)
         self._pick_orch = PickOrchestrator(bus=self._bus, services=self._services)
 
-        # ---- pick ui state ----
-        self._preview: PickPreviewWindow | None = None
-        self._pick_active = False
-        self._prev_geo: str | None = None
-        self._prev_state: str | None = None
-        self._avoid_mode_applied: str | None = None
+        # ---- window state ----
+        self._win_state = WindowStateController(root=self, repo=self._app_state_repo, state=self._app_state)
+        self._win_state.apply_initial_geometry()
 
-        self._apply_initial_geometry()
-
-        # Layout
+        # ---- layout ----
         self.rowconfigure(0, weight=1)
         self.rowconfigure(1, weight=0)
         self.columnconfigure(0, weight=0)
@@ -115,7 +80,7 @@ class AppWindow(tb.Window):
 
         self._nav = NavFrame(
             self,
-            on_nav=self.show_page,
+            on_nav=self._on_nav,
             on_profile_select=self._on_profile_select,
             on_profile_action=self._on_profile_action,
         )
@@ -126,22 +91,14 @@ class AppWindow(tb.Window):
         self._content.rowconfigure(0, weight=1)
         self._content.columnconfigure(0, weight=1)
 
-        self._status = StatusBar(self)
-        self._status.grid(row=1, column=0, columnspan=2, sticky="ew")
-        self._status.set_profile(self._ctx.profile_name)
+        self._status_bar = StatusBar(self)
+        self._status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
-        self._page_title: dict[str, str] = {
-            "base": "基础配置",
-            "skills": "技能配置",
-            "points": "取色点位配置",
-        }
-        self._pages: dict[str, tb.Frame] = {}
-        self._build_pages()
+        # ---- controllers ----
+        self._status = StatusController(root=self, bar=self._status_bar, bus=self._bus)
 
-        self._refresh_profile_list(select=self._ctx.profile_name)
-
-        # hotkeys
-        self._hotkeys = GlobalHotkeyService(
+        # hotkeys controller: reload on HOTKEYS_CHANGED
+        self._hotkeys = HotkeysController(
             bus=self._bus,
             config_provider=lambda: HotkeyConfig(
                 enter_pick_mode=self._ctx.base.hotkeys.enter_pick_mode,
@@ -150,7 +107,31 @@ class AppWindow(tb.Window):
         )
         self._hotkeys.start()
 
-        # pick service (optional)
+        # pages
+        self._pages = PagesManager(master=self._content, ctx=self._ctx, bus=self._bus, services=self._services)
+
+        # pick ui controller (preview/avoidance only)
+        self._pick_ui = PickUiController(root=self, bus=self._bus, ctx_provider=lambda: self._ctx)
+
+        # unsaved guard (UoW-driven)
+        self._guard = UnsavedChangesGuard(
+            root=self,
+            services=self._services,
+            pages=self._pages,
+            backup_provider=lambda: bool(self._ctx.base.io.backup_on_save),
+        )
+
+        # profile controller (dialogs + calling profile service)
+        self._profile_ctrl = ProfileController(
+            root=self,
+            bus=self._bus,
+            profile_service=self._profile_service,
+            apply_ctx_to_ui=self._apply_ctx_to_ui,
+            refresh_profiles_ui=self._refresh_profiles_ui,
+            guard_confirm=lambda action_name: self._guard.confirm(action_name=action_name, ctx=self._ctx),
+        )
+
+        # ---- optional pick engine ----
         self._pick = None
         if PickService is not None and PickConfig is not None and SampleSpec is not None:
             self._pick = PickService(
@@ -163,34 +144,84 @@ class AppWindow(tb.Window):
                 capture_spec_provider=self._capture_spec_for_context,
             )
 
-        # ---- EventBus ----
-        self._bus.subscribe(EventType.UI_THEME_CHANGE, self._on_theme_change)
-        self._bus.subscribe(EventType.HOTKEYS_CHANGED, lambda _ev: self._hotkeys.start())
-        self._bus.subscribe(EventType.INFO, self._on_info)
-        self._bus.subscribe(EventType.ERROR, self._on_error)
-        self._bus.subscribe(EventType.STATUS, self._on_status)
+        # ---- bus glue ----
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
-        # pick ui subscriptions (UI only)
-        self._bus.subscribe(EventType.PICK_MODE_ENTERED, self._on_pick_mode_entered)
-        self._bus.subscribe(EventType.PICK_PREVIEW, self._on_pick_preview)
-        self._bus.subscribe(EventType.PICK_MODE_EXITED, self._on_pick_mode_exited)
-        self._bus.subscribe(EventType.PICK_CANCELED, self._on_pick_canceled)
-
-        # preview window click cancel -> bus cancel
+        # preview window click -> cancel pick
         self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post(EventType.PICK_CANCEL_REQUEST))
 
-        # initial dirty sync
+        # ---- event pump ----
+        self._pump = EventPump(
+            root=self,
+            bus=self._bus,
+            tick_ms=16,
+            on_handler_error=lambda ev, e: self._status.set_status(
+                f"ERROR: handler failed ({ev.type.value}): {e}", ttl_ms=5000
+            ),
+        )
+        self._pump.start()
+
+        # ---- initial UI state ----
+        self._status.set_profile(self._ctx.profile_name)
+        self._status.set_page("基础配置")
+        self._pages.show("base")
+        self._refresh_profiles_ui(self._ctx.profile_name)
         self._services.notify_dirty()
 
-        self.after(16, self._pump_events)
-
-        self.show_page("base")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ---------- pick sample mapping ----------
+    # ---------- callbacks from Nav ----------
+    def _on_nav(self, page_key: str) -> None:
+        if not self._pages.show(page_key):
+            self._status.set_status(f"ERROR: unknown page: {page_key}", ttl_ms=4000)
+            return
+        title = {"base": "基础配置", "skills": "技能配置", "points": "取色点位配置"}.get(page_key, page_key)
+        self._status.set_page(title)
+        self._status.set_status("ready", ttl_ms=800)
+
+    def _on_profile_select(self, name: str) -> None:
+        self._profile_ctrl.on_select(name, self._ctx)
+
+    def _on_profile_action(self, action: str) -> None:
+        self._profile_ctrl.on_action(action, self._ctx)
+
+    # ---------- apply new ProfileContext ----------
+    def _apply_ctx_to_ui(self, ctx: ProfileContext) -> None:
+        """
+        Called after ProfileService has already bound ctx into AppServices.
+        """
+        self._ctx = ctx
+
+        # status bar
+        self._status.set_profile(ctx.profile_name)
+
+        # apply theme immediately (so user feels the switch)
+        try:
+            self.style.theme_use(ctx.base.ui.theme or "darkly")
+        except Exception:
+            pass
+
+        # pages get new ctx
+        self._pages.set_context(ctx)
+
+        # hotkeys depend on ctx.base
+        try:
+            self._hotkeys.start()
+        except Exception:
+            pass
+
+        # refresh profile combobox
+        self._refresh_profiles_ui(ctx.profile_name)
+
+        # notify dirty
+        self._services.notify_dirty()
+
+    def _refresh_profiles_ui(self, select: str) -> None:
+        names = self._profile_service.list_profiles()
+        self._nav.set_profiles(names, select)
+
+    # ---------- pick capture spec mapping ----------
     def _capture_spec_for_context(self, ctx: dict) -> tuple["SampleSpec", str]:
-        # default: use base monitor policy
         mon = (self._ctx.base.capture.monitor_policy or "primary")
         mode = "single"
         radius = 0
@@ -219,495 +250,7 @@ class AppWindow(tb.Window):
 
         return SampleSpec(mode=mode, radius=radius), mon
 
-    # ---------------- Pages ----------------
-    def _build_pages(self) -> None:
-        self._pages["base"] = BaseSettingsPage(self._content, ctx=self._ctx, bus=self._bus, services=self._services)
-        self._pages["skills"] = SkillsPage(self._content, ctx=self._ctx, bus=self._bus, services=self._services)
-        self._pages["points"] = PointsPage(self._content, ctx=self._ctx, bus=self._bus, services=self._services)
-        for p in self._pages.values():
-            p.grid(row=0, column=0, sticky="nsew")
-
-    def show_page(self, key: str) -> None:
-        page = self._pages.get(key)
-        if page is None:
-            self.set_status(f"ERROR: unknown page: {key}", ttl_ms=4000)
-            return
-        page.tkraise()
-        self._status.set_page(self._page_title.get(key, key))
-        self.set_status("ready")
-
-    # ---------------- Profile switching ----------------
-    def _refresh_profile_list(self, *, select: str | None = None) -> None:
-        names = self._pm.list_profiles()
-        if not names:
-            names = ["Default"]
-        current = select or self._ctx.profile_name
-        self._nav.set_profiles(names, current)
-
-    def _on_profile_select(self, name: str) -> None:
-        if not self._confirm_leave_context(action_name="切换 Profile"):
-            self._refresh_profile_list(select=self._ctx.profile_name)
-            return
-        self._bus.post(EventType.PICK_CANCEL_REQUEST)
-        self._switch_profile(name)
-
-    def _on_profile_action(self, action: str) -> None:
-        if action in ("new", "copy", "rename", "delete"):
-            if not self._confirm_leave_context(action_name="Profile 操作"):
-                self._refresh_profile_list(select=self._ctx.profile_name)
-                return
-
-        cur = self._ctx.profile_name
-
-        if action == "new":
-            name = simpledialog.askstring("新建 Profile", "请输入 Profile 名称：", parent=self)
-            if not name:
-                return
-            try:
-                ctx = self._pm.create_profile(name)
-                self._switch_profile(ctx.profile_name)
-            except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"新建失败: {e}")
-            return
-
-        if action == "copy":
-            name = simpledialog.askstring("复制 Profile", f"复制 {cur} 到新名称：", parent=self)
-            if not name:
-                return
-            try:
-                ctx = self._pm.copy_profile(cur, name)
-                self._switch_profile(ctx.profile_name)
-            except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"复制失败: {e}")
-            return
-
-        if action == "rename":
-            name = simpledialog.askstring("重命名 Profile", f"{cur} 重命名为：", parent=self)
-            if not name:
-                return
-            try:
-                ctx = self._pm.rename_profile(cur, name)
-                self._switch_profile(ctx.profile_name)
-            except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"重命名失败: {e}")
-            return
-
-        if action == "delete":
-            if cur == "Default":
-                messagebox.showinfo("提示", "不建议删除 Default（可重命名/另建）。", parent=self)
-                return
-            ok = messagebox.askyesno(
-                "删除 Profile",
-                f"确认删除 profile：{cur} ？\n\n（将删除该目录下所有 JSON）",
-                parent=self,
-            )
-            if not ok:
-                return
-            try:
-                self._pm.delete_profile(cur)
-                self._ctx = self._pm.current or self._pm.open_last_or_fallback()
-                self._status.set_profile(self._ctx.profile_name)
-
-                self._services.set_context(self._ctx)
-
-                for key, page in self._pages.items():
-                    if hasattr(page, "set_context"):
-                        try:
-                            page.set_context(self._ctx)  # type: ignore[attr-defined]
-                        except Exception as e:
-                            self._bus.post(EventType.ERROR, msg=f"页面刷新失败({key}): {e}")
-
-                self._hotkeys.start()
-                self._refresh_profile_list(select=self._ctx.profile_name)
-                self._bus.post(EventType.INFO, msg=f"已删除 profile 并切换到 {self._ctx.profile_name}")
-            except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"删除失败: {e}")
-            return
-
-    def _switch_profile(self, name: str) -> None:
-        if name == self._ctx.profile_name:
-            return
-        try:
-            new_ctx = self._pm.open_profile(name)
-        except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"打开 profile 失败: {e}")
-            self._refresh_profile_list(select=self._ctx.profile_name)
-            return
-
-        self._ctx = new_ctx
-        self._status.set_profile(self._ctx.profile_name)
-        self._services.set_context(self._ctx)
-
-        try:
-            self.style.theme_use(self._ctx.base.ui.theme or "darkly")
-        except Exception:
-            pass
-
-        for key, page in self._pages.items():
-            if hasattr(page, "set_context"):
-                try:
-                    page.set_context(self._ctx)  # type: ignore[attr-defined]
-                except Exception as e:
-                    self._bus.post(EventType.ERROR, msg=f"页面刷新失败({key}): {e}")
-
-        self._hotkeys.start()
-        self._refresh_profile_list(select=self._ctx.profile_name)
-        self._bus.post(EventType.INFO, msg=f"已切换 profile: {self._ctx.profile_name}")
-
-    # ---------------- Pick UI closure ----------------
-    def _ensure_preview(self) -> None:
-        if self._preview is None:
-            try:
-                self._preview = PickPreviewWindow(self)
-            except Exception:
-                self._preview = None
-
-    def _apply_avoidance_on_enter(self) -> None:
-        av = self._ctx.base.pick.avoidance
-        mode = av.mode
-        self._avoid_mode_applied = mode
-
-        try:
-            self._prev_geo = self.geometry()
-        except Exception:
-            self._prev_geo = None
-        try:
-            self._prev_state = self.state()
-        except Exception:
-            self._prev_state = None
-
-        if mode == "hide_main":
-            try:
-                self.withdraw()
-            except Exception:
-                pass
-        elif mode == "minimize":
-            try:
-                self.iconify()
-            except Exception:
-                pass
-        elif mode == "move_aside":
-            try:
-                self.update_idletasks()
-                sw = int(self.winfo_screenwidth())
-                w = int(self.winfo_width())
-                self.geometry(f"+{max(0, sw - w - 10)}+10")
-            except Exception:
-                pass
-
-    def _restore_after_exit(self) -> None:
-        mode = self._avoid_mode_applied
-        self._avoid_mode_applied = None
-
-        try:
-            if mode in ("hide_main", "minimize"):
-                self.deiconify()
-        except Exception:
-            pass
-
-        if self._prev_geo:
-            try:
-                self.geometry(self._prev_geo)
-            except Exception:
-                pass
-
-        if self._prev_state:
-            try:
-                if self._prev_state in ("normal", "zoomed"):
-                    self.state(self._prev_state)
-            except Exception:
-                pass
-
-        try:
-            self.lift()
-            self.focus_force()
-        except Exception:
-            pass
-
-    def _on_pick_mode_entered(self, _ev: Event) -> None:
-        self._pick_active = True
-        self._apply_avoidance_on_enter()
-        self._ensure_preview()
-        if self._preview is not None:
-            try:
-                self._preview.hide()
-            except Exception:
-                pass
-        self._bus.post(EventType.STATUS, msg="取色模式已进入")
-
-    def _on_pick_preview(self, ev: Event) -> None:
-        try:
-            x = int(ev.payload.get("x", 0))
-            y = int(ev.payload.get("y", 0))
-            r = int(ev.payload.get("r", 0))
-            g = int(ev.payload.get("g", 0))
-            b = int(ev.payload.get("b", 0))
-            hx = str(ev.payload.get("hex", ""))
-        except Exception:
-            return
-
-        if hx:
-            mon = ev.payload.get("monitor", "")
-            abs_x = ev.payload.get("abs_x", None)
-            abs_y = ev.payload.get("abs_y", None)
-
-            if isinstance(abs_x, int) and isinstance(abs_y, int) and isinstance(mon, str) and mon:
-                self.set_status(f"{mon} rel=({x},{y}) abs=({abs_x},{abs_y}) {hx}", ttl_ms=1200)
-            elif isinstance(mon, str) and mon:
-                self.set_status(f"{mon} rel=({x},{y}) {hx}", ttl_ms=1200)
-            else:
-                self.set_status(f"rel=({x},{y}) {hx}", ttl_ms=1200)
-        else:
-            self.set_status(f"x={x} y={y}", ttl_ms=1200)
-
-        self._ensure_preview()
-        if self._preview is None:
-            return
-
-        av = self._ctx.base.pick.avoidance
-
-        try:
-            self._preview.update_preview(x=x, y=y, r=r, g=g, b=b)
-        except Exception:
-            pass
-
-        try:
-            self._preview.show()
-        except Exception:
-            pass
-
-        try:
-            px = int(self.winfo_pointerx())
-            py = int(self.winfo_pointery())
-        except Exception:
-            px, py = x, y
-
-        try:
-            ox, oy = int(av.preview_offset[0]), int(av.preview_offset[1])
-        except Exception:
-            ox, oy = 30, 30
-
-        try:
-            pw, ph = self._preview.size
-        except Exception:
-            pw, ph = (180, 74)
-
-        if not av.preview_follow_cursor:
-            nx, ny = 20, 20
-        else:
-            anchor = av.preview_anchor
-            if anchor == "bottom_right":
-                nx, ny = px + ox, py + oy
-            elif anchor == "bottom_left":
-                nx, ny = px - ox - pw, py + oy
-            elif anchor == "top_right":
-                nx, ny = px + ox, py - oy - ph
-            elif anchor == "top_left":
-                nx, ny = px - ox - pw, py - oy - ph
-            else:
-                nx, ny = px + ox, py + oy
-
-        L, T, R, B = self._get_virtual_screen_bounds()
-        nx = self._clamp(int(nx), L, R - pw)
-        ny = self._clamp(int(ny), T, B - ph)
-
-        try:
-            self._preview.move_to(nx, ny)
-        except Exception:
-            try:
-                self._preview.move_to(20, 20)
-            except Exception:
-                pass
-
-    def _on_pick_canceled(self, _ev: Event) -> None:
-        self._bus.post(EventType.INFO, msg="取色已取消")
-
-    def _on_pick_mode_exited(self, _ev: Event) -> None:
-        self._pick_active = False
-
-        if self._preview is not None:
-            try:
-                self._preview.destroy()
-            except Exception:
-                pass
-            self._preview = None
-
-        self._restore_after_exit()
-        self._bus.post(EventType.STATUS, msg="取色模式已退出")
-
-    def _get_virtual_screen_bounds(self) -> tuple[int, int, int, int]:
-        try:
-            import ctypes
-
-            user32 = ctypes.windll.user32
-            SM_XVIRTUALSCREEN = 76
-            SM_YVIRTUALSCREEN = 77
-            SM_CXVIRTUALSCREEN = 78
-            SM_CYVIRTUALSCREEN = 79
-            l = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
-            t = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
-            w = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
-            h = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
-            return l, t, l + w, t + h
-        except Exception:
-            return 0, 0, int(self.winfo_screenwidth()), int(self.winfo_screenheight())
-
-    @staticmethod
-    def _clamp(v: int, lo: int, hi: int) -> int:
-        if v < lo:
-            return lo
-        if v > hi:
-            return hi
-        return v
-
-    # ---------------- UoW leave confirm ----------------
-    def _uow_dirty_parts_display(self) -> list[str]:
-        try:
-            parts = self._services.uow.dirty_parts()
-        except Exception:
-            return []
-
-        mapping = {
-            "base": "基础配置",
-            "skills": "技能配置",
-            "points": "取色点位配置",
-            "meta": "Profile 元信息",
-        }
-        out: list[str] = []
-        for p in ["base", "skills", "points", "meta"]:
-            if p in parts:
-                out.append(mapping.get(p, p))
-        return out
-
-    def _flush_current_forms_best_effort(self) -> None:
-        """
-        Flush UI state -> in-memory model before saving/confirm-leave.
-        Priority:
-        1) page.flush_to_model()
-        2) page._apply_form_to_current(auto_save=False) (legacy)
-        """
-        for _key, page in self._pages.items():
-            if hasattr(page, "flush_to_model"):
-                try:
-                    page.flush_to_model()  # type: ignore[attr-defined]
-                    continue
-                except Exception:
-                    pass
-
-            if hasattr(page, "_apply_form_to_current"):
-                try:
-                    page._apply_form_to_current(auto_save=False)  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-    def _confirm_leave_context(self, *, action_name: str) -> bool:
-        self._flush_current_forms_best_effort()
-
-        dirty_names = self._uow_dirty_parts_display()
-        if not dirty_names:
-            return True
-
-        msg = (
-            f"{action_name} 前检测到未保存更改：\n"
-            + "\n".join([f" - {x}" for x in dirty_names])
-            + "\n\n选择：\n"
-              "【是】保存后继续\n"
-              "【否】不保存继续\n"
-              "【取消】返回"
-        )
-        res = messagebox.askyesnocancel("未保存更改", msg, parent=self)
-
-        if res is None:
-            return False
-
-        if res is False:
-            try:
-                self._services.uow.rollback()
-                self._services.notify_dirty()
-            except Exception:
-                pass
-
-            try:
-                for key, page in self._pages.items():
-                    if hasattr(page, "set_context"):
-                        try:
-                            page.set_context(self._ctx)  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            return True
-
-        # Yes -> save
-        try:
-            parts = self._services.uow.dirty_parts()
-            if parts:
-                self._services.uow.commit(parts=set(parts), backup=bool(self._ctx.base.io.backup_on_save))
-            self._services.notify_dirty()
-            return True
-        except Exception as e:
-            messagebox.showerror("保存失败", f"保存失败：{e}", parent=self)
-            return False
-
-    # ---------------- Status / Toast ----------------
-    def set_status(self, text: str, *, ttl_ms: int | None = None) -> None:
-        self._status.set_status(text)
-        if self._status_after_id is not None:
-            try:
-                self.after_cancel(self._status_after_id)
-            except Exception:
-                pass
-            self._status_after_id = None
-        if ttl_ms is not None and ttl_ms > 0:
-            self._status_after_id = self.after(ttl_ms, lambda: self._status.set_status("ready"))
-
-    def _toast(self, title: str, message: str, bootstyle: str) -> None:
-        if not self._toast_available:
-            return
-        try:
-            ToastNotification(  # type: ignore[misc]
-                title=title,
-                message=message,
-                duration=2500,
-                bootstyle=bootstyle,
-            ).show_toast()
-        except Exception:
-            pass
-
-    # ---------------- EventBus ----------------
-    def _pump_events(self) -> None:
-        self._bus.dispatch_pending(
-            max_events=200,
-            on_error=lambda ev, e: self.set_status(f"ERROR: handler failed ({ev.type.value}): {e}", ttl_ms=5000),
-        )
-        self.after(16, self._pump_events)
-
-    def _on_theme_change(self, ev: Event) -> None:
-        theme = ev.payload.get("theme")
-        if isinstance(theme, str) and theme:
-            try:
-                self.style.theme_use(theme)
-                self.set_status(f"INFO: theme -> {theme}", ttl_ms=2500)
-            except Exception as e:
-                self.set_status(f"ERROR: theme apply failed: {e}", ttl_ms=6000)
-                self._toast("ERROR", f"theme apply failed: {e}", "danger")
-
-    def _on_info(self, ev: Event) -> None:
-        msg = ev.payload.get("msg", "")
-        if isinstance(msg, str) and msg:
-            self.set_status(f"INFO: {msg}", ttl_ms=3000)
-            self._toast("INFO", msg, "success")
-
-    def _on_error(self, ev: Event) -> None:
-        msg = ev.payload.get("msg", "")
-        if isinstance(msg, str) and msg:
-            self.set_status(f"ERROR: {msg}", ttl_ms=6000)
-            self._toast("ERROR", msg, "danger")
-
-    def _on_status(self, ev: Event) -> None:
-        msg = ev.payload.get("msg", "")
-        if isinstance(msg, str) and msg:
-            self.set_status(msg, ttl_ms=2000)
-
+    # ---------- dirty title ----------
     def _on_dirty_state_changed(self, ev: Event) -> None:
         dirty = bool(ev.payload.get("dirty", False))
         title = self._base_title + (" *" if dirty else "")
@@ -717,22 +260,19 @@ class AppWindow(tb.Window):
         except Exception:
             pass
 
-    # ---------------- Window persist ----------------
-    def _apply_initial_geometry(self) -> None:
-        w = int(getattr(self._app_state.window, "width", 1100) or 1100)
-        h = int(getattr(self._app_state.window, "height", 720) or 720)
-        x = getattr(self._app_state.window, "x", None)
-        y = getattr(self._app_state.window, "y", None)
-        if isinstance(x, int) and isinstance(y, int):
-            self.geometry(f"{w}x{h}+{x}+{y}")
-        else:
-            self.geometry(f"{w}x{h}")
-
+    # ---------- close ----------
     def _on_close(self) -> None:
-        if not self._confirm_leave_context(action_name="退出程序"):
+        if not self._guard.confirm(action_name="退出程序", ctx=self._ctx):
             return
 
+        # cancel pick session
         self._bus.post(EventType.PICK_CANCEL_REQUEST)
+
+        # stop controllers/services
+        try:
+            self._pump.stop()
+        except Exception:
+            pass
 
         try:
             self._hotkeys.stop()
@@ -745,21 +285,12 @@ class AppWindow(tb.Window):
             except Exception:
                 pass
 
-        if self._preview is not None:
-            try:
-                self._preview.destroy()
-            except Exception:
-                pass
-            self._preview = None
-
         try:
-            self.update_idletasks()
-            self._app_state.window.width = int(self.winfo_width())
-            self._app_state.window.height = int(self.winfo_height())
-            self._app_state.window.x = int(self.winfo_x())
-            self._app_state.window.y = int(self.winfo_y())
-            self._app_state_repo.save(self._app_state)
+            self._pick_ui.close()
         except Exception:
             pass
+
+        # persist window geometry
+        self._win_state.persist_current_geometry()
 
         self.destroy()
