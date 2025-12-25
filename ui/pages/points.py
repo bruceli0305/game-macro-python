@@ -93,6 +93,7 @@ class PointsPage(PickNotebookCrudPage):
         if self._services is not None:
             try:
                 self._services.uow.mark_dirty("points")
+                self._services.notify_dirty()
             except Exception:
                 pass
 
@@ -101,6 +102,7 @@ class PointsPage(PickNotebookCrudPage):
         if self._services is not None:
             try:
                 self._services.uow.clear_dirty("points")
+                self._services.notify_dirty()
             except Exception:
                 pass
 
@@ -111,14 +113,14 @@ class PointsPage(PickNotebookCrudPage):
     def _save_to_disk(self) -> bool:
         try:
             if self._services is not None:
-                self._services.uow.commit(parts={"points"}, backup=self._ctx.base.io.backup_on_save)
+                self._services.points.save(backup=self._ctx.base.io.backup_on_save)
+                self._services.notify_dirty()
             else:
                 self._ctx.points_repo.save(self._ctx.points, backup=self._ctx.base.io.backup_on_save)
             return True
         except Exception as e:
             self._bus.post(EventType.ERROR, msg=f"保存 points.json 失败: {e}")
             return False
-
     def _make_new_record(self) -> Point:
         if self._services is not None:
             return self._services.points.create_point(name="新点位")
@@ -159,7 +161,7 @@ class PointsPage(PickNotebookCrudPage):
     def _store_add_record(self, record) -> None:
         if self._services is None:
             self._ctx.points.points.append(record)
-            
+
     def _record_title(self, record: Point) -> str:
         return record.name
 

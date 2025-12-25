@@ -28,22 +28,10 @@ class RecordCrudPage(tb.Frame):
     - dirty 管理 + auto_save
     - Treeview 行更新/全量刷新
 
-    子类必须实现 hooks：
-      - _records() -> list
-      - _save_to_disk() -> bool
-      - _make_new_record() -> record
-      - _clone_record(record) -> record
-      - _delete_record_by_id(record_id) -> None
-      - _record_id(record) -> str
-      - _record_title(record) -> str
-      - _record_row_values(record) -> tuple
-      - _load_into_form(record_id) -> None
-      - _apply_form_to_current(auto_save: bool) -> bool
-      - _clear_form() -> None
-
-    新增可选 hooks（用于把 CRUD 的实际存取交给 Service）：
-      - _store_add_record(record) -> None
-      - _store_delete_record(record_id) -> None
+    新增：CRUD 后发布 application-level 事件
+      - RECORD_UPDATED（新增/复制）
+      - RECORD_DELETED（删除）
+    子类若想参与事件发布：覆盖 _record_type_key()
     """
 
     def __init__(
@@ -99,7 +87,7 @@ class RecordCrudPage(tb.Frame):
 
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
-        # right panel header + body placeholder (子类去构建 Notebook)
+        # right panel
         right = tb.Frame(self)
         right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
@@ -148,6 +136,27 @@ class RecordCrudPage(tb.Frame):
             self._btn_save.configure(bootstyle="warning" if self._dirty_disk else "")
         except Exception:
             pass
+
+    # ---------- event hook ----------
+    def _record_type_key(self) -> str | None:
+        """
+        Return application-level record_type key for RECORD_UPDATED/DELETED.
+        For pick pages it should match pick_context_type: "skill_pixel" | "point".
+        Default: None (no event).
+        """
+        return None
+
+    def _post_record_updated(self, rid: str, *, source: str, saved: bool) -> None:
+        rt = self._record_type_key()
+        if not rt or not rid:
+            return
+        self._bus.post(EventType.RECORD_UPDATED, record_type=rt, id=rid, source=source, saved=bool(saved))
+
+    def _post_record_deleted(self, rid: str, *, source: str, saved: bool) -> None:
+        rt = self._record_type_key()
+        if not rt or not rid:
+            return
+        self._bus.post(EventType.RECORD_DELETED, record_type=rt, id=rid, source=source, saved=bool(saved))
 
     # ---------- tree helpers ----------
     def refresh_tree(self) -> None:
@@ -207,13 +216,13 @@ class RecordCrudPage(tb.Frame):
 
         self._load_into_form(rid)
 
-    # ---------- NEW store hooks ----------
+    # ---------- store hooks (for services) ----------
     def _store_add_record(self, record: Any) -> None:
-        """Default behavior: append to underlying list."""
+        """Default: append to list."""
         self._records().append(record)
 
     def _store_delete_record(self, rid: str) -> None:
-        """Default behavior: call subclass delete hook."""
+        """Default: use subclass delete hook."""
         self._delete_record_by_id(rid)
 
     # ---------- CRUD ----------
@@ -229,7 +238,9 @@ class RecordCrudPage(tb.Frame):
             self._select_id(rid)
 
         self.mark_dirty()
-        self._auto_save_if_needed()
+        saved = self._auto_save_if_needed()
+
+        self._post_record_updated(rid, source="crud_add", saved=saved)
         self._bus.post(EventType.INFO, msg=f"已新增{self._record_noun}: {rid[-6:] if rid else ''}")
 
     def _on_duplicate(self) -> None:
@@ -255,7 +266,9 @@ class RecordCrudPage(tb.Frame):
             self._select_id(new_id)
 
         self.mark_dirty()
-        self._auto_save_if_needed()
+        saved = self._auto_save_if_needed()
+
+        self._post_record_updated(new_id, source="crud_duplicate", saved=saved)
         self._bus.post(EventType.INFO, msg=f"已复制{self._record_noun}: {new_id[-6:] if new_id else ''}")
 
     def _on_delete(self) -> None:
@@ -282,7 +295,9 @@ class RecordCrudPage(tb.Frame):
         self.refresh_tree()
 
         self.mark_dirty()
-        self._auto_save_if_needed()
+        saved = self._auto_save_if_needed()
+
+        self._post_record_deleted(rid, source="crud_delete", saved=saved)
         self._bus.post(EventType.INFO, msg=f"已删除{self._record_noun}: {rid[-6:]}")
 
     def _on_save_clicked(self) -> None:
@@ -290,15 +305,21 @@ class RecordCrudPage(tb.Frame):
             return
         if self._save_to_disk():
             self.clear_dirty()
+            # 保存按钮属于显式保存：这里不发 RECORD_UPDATED，避免误触发“reload form”等行为
             self._bus.post(EventType.INFO, msg=f"{self._record_noun}已保存")
 
-    def _auto_save_if_needed(self) -> None:
+    def _auto_save_if_needed(self) -> bool:
+        """
+        Returns True if saved to disk (auto-save).
+        """
         try:
             if bool(self._ctx.base.io.auto_save):
                 if self._save_to_disk():
                     self.clear_dirty()
+                    return True
         except Exception:
             pass
+        return False
 
     # ---------- record lookup ----------
     def _find_record_by_id(self, rid: str) -> Any | None:

@@ -92,11 +92,12 @@ class SkillsPage(PickNotebookCrudPage):
         self.refresh_tree()
 
     # --- UoW dirty bridge ---
-    def mark_dirty(self) -> None:
-        super().mark_dirty()
+    def clear_dirty(self) -> None:
+        super().clear_dirty()
         if self._services is not None:
             try:
-                self._services.uow.mark_dirty("skills")
+                self._services.uow.clear_dirty("skills")
+                self._services.notify_dirty()
             except Exception:
                 pass
 
@@ -115,14 +116,14 @@ class SkillsPage(PickNotebookCrudPage):
     def _save_to_disk(self) -> bool:
         try:
             if self._services is not None:
-                self._services.uow.commit(parts={"skills"}, backup=self._ctx.base.io.backup_on_save)
+                self._services.skills.save(backup=self._ctx.base.io.backup_on_save)
+                self._services.notify_dirty()
             else:
                 self._ctx.skills_repo.save(self._ctx.skills, backup=self._ctx.base.io.backup_on_save)
             return True
         except Exception as e:
             self._bus.post(EventType.ERROR, msg=f"保存 skills.json 失败: {e}")
             return False
-
     def _make_new_record(self) -> Skill:
         if self._services is not None:
             return self._services.skills.create_skill(name="新技能")
@@ -161,7 +162,7 @@ class SkillsPage(PickNotebookCrudPage):
         # 如果走了 service，它已经 append 过了，这里不再 append
         if self._services is None:
             self._ctx.skills.skills.append(record)
-            
+
     def _record_row_values(self, s: Skill) -> tuple:
         sid = s.id or ""
         short = sid[-6:] if len(sid) >= 6 else sid

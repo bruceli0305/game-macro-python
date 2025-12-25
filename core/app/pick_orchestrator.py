@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
@@ -16,6 +16,7 @@ class PickOrchestrator:
     - update domain model via AppServices (skills/points)
     - optionally auto-save via UoW
     - notify UI via RECORD_UPDATED
+    - notify dirty state via DIRTY_STATE_CHANGED
     """
 
     def __init__(self, *, bus: EventBus, services: AppServices) -> None:
@@ -36,18 +37,21 @@ class PickOrchestrator:
             return
 
         # coordinates: prefer vx/vy (new), fallback to abs_x/abs_y
-        vx = payload.get("vx", payload.get("abs_x", 0))
-        vy = payload.get("vy", payload.get("abs_y", 0))
-
+        vx_raw = payload.get("vx", payload.get("abs_x", 0))
+        vy_raw = payload.get("vy", payload.get("abs_y", 0))
         try:
-            vx_i = int(vx)
-            vy_i = int(vy)
+            vx = int(vx_raw)
+            vy = int(vy_raw)
         except Exception:
-            vx_i, vy_i = 0, 0
+            vx, vy = 0, 0
 
         # monitor used (pick_service already resolved cross-monitor)
         mon = payload.get("monitor", "")
-        mon_s = str(mon) if isinstance(mon, str) else ""
+        monitor = mon if isinstance(mon, str) else ""
+        if not monitor:
+            # fallback: requested monitor if present
+            req = payload.get("monitor_requested", "")
+            monitor = req if isinstance(req, str) else ""
 
         # rgb
         try:
@@ -61,10 +65,10 @@ class PickOrchestrator:
         part: Optional[str] = None
 
         if typ == "skill_pixel":
-            applied = self._services.skills.apply_pick(rid, vx=vx_i, vy=vy_i, monitor=mon_s, r=r, g=g, b=b)
+            applied = self._services.skills.apply_pick(rid, vx=vx, vy=vy, monitor=monitor, r=r, g=g, b=b)
             part = "skills"
         elif typ == "point":
-            applied = self._services.points.apply_pick(rid, vx=vx_i, vy=vy_i, monitor=mon_s, r=r, g=g, b=b)
+            applied = self._services.points.apply_pick(rid, vx=vx, vy=vy, monitor=monitor, r=r, g=g, b=b)
             part = "points"
         else:
             return
@@ -72,6 +76,13 @@ class PickOrchestrator:
         if not applied:
             return
 
+        # dirty changed (applied)
+        try:
+            self._services.notify_dirty()
+        except Exception:
+            pass
+
+        # autosave?
         saved = False
         try:
             auto = bool(getattr(self._services.ctx.base.io, "auto_save", False))
@@ -85,6 +96,12 @@ class PickOrchestrator:
             except Exception as e:
                 self._bus.post(EventType.ERROR, msg=f"自动保存失败: {e}")
                 saved = False
+
+            # dirty may have changed again after commit
+            try:
+                self._services.notify_dirty()
+            except Exception:
+                pass
 
         # Notify UI to refresh list/form + dirty indicator decisions
         self._bus.post(
