@@ -1,4 +1,3 @@
-# File: ui/pages/points.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -10,7 +9,6 @@ from core.event_types import EventType
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
-from core.models.skill import ColorRGB
 from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
 from core.events.payloads import ErrorPayload
@@ -29,10 +27,12 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 class PointsPage(PickNotebookCrudPage):
     """
-    Step 4:
-    - dirty UI 由 UoW DIRTY_STATE_CHANGED 驱动（enable_uow_dirty_indicator）
-    - 表单变更 debounce -> services.points.apply_form_patch(auto_save=False)
-    - 页面不再 mark/clear uow dirty
+    Current state (after Step 10):
+    - CRUD: RecordCrudPage 只触发 services 命令，不本地增删行（事件消费端刷新）
+    - 表单编辑：debounce -> services.points.apply_form_patch(auto_save=False)
+      service 会发 RECORD_UPDATED(source="form")，UI 只刷新列表行，不 reload 表单
+    - dirty 展示：enable_uow_dirty_indicator("points") 跟随 UoW
+    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd
     """
 
     def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
@@ -60,7 +60,7 @@ class PointsPage(PickNotebookCrudPage):
         self._services = services
         self._cap = ScreenCapture()
 
-        # Step 4: 绑定 dirty UI 到 UoW 的 points part
+        # dirty UI from UoW
         self.enable_uow_dirty_indicator(part_key="points")
 
         # debounce apply
@@ -106,12 +106,10 @@ class PointsPage(PickNotebookCrudPage):
         super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
-        # Step 6: 切换 context 时，清掉 pending select & debounce，避免误选/误 apply
         try:
             self._cancel_pending_apply()
         except Exception:
             pass
-
         try:
             self._set_pending_select(None)  # type: ignore[attr-defined]
         except Exception:
@@ -127,31 +125,30 @@ class PointsPage(PickNotebookCrudPage):
 
     def _save_to_disk(self) -> bool:
         try:
-            self._services.points.save(backup=self._ctx.base.io.backup_on_save)
+            self._services.points.save_cmd(backup=self._ctx.base.io.backup_on_save)
             self._services.notify_dirty()
             return True
         except Exception as e:
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存 points.json 失败", detail=str(e)))
             return False
 
+    def _reload_from_disk(self) -> None:
+        self._services.points.reload_cmd()
+
     def _make_new_record(self) -> Point:
-        return self._services.points.create_point_cmd(name="新点位")
+        return self._services.points.create_cmd(name="新点位")
 
     def _clone_record(self, record: Point) -> Point:
-        clone = self._services.points.clone_point_cmd(record.id)
+        clone = self._services.points.clone_cmd(record.id)
         if clone is None:
-            raise RuntimeError("clone_point_cmd returned None")
+            raise RuntimeError("clone_cmd returned None")
         return clone
 
     def _delete_record_by_id(self, rid: str) -> None:
-        self._services.points.delete_point_cmd(rid)
+        self._services.points.delete_cmd(rid)
 
     def _record_id(self, record: Point) -> str:
         return record.id
-
-    def _store_add_record(self, record) -> None:
-        # services 已 append；NO-OP
-        return
 
     def _record_title(self, record: Point) -> str:
         return record.name
@@ -281,7 +278,6 @@ class PointsPage(PickNotebookCrudPage):
             self._schedule_apply()
 
     def _clear_form(self) -> None:
-        # Step 5: 清空前取消 debounce，避免旧定时器误 apply
         self._cancel_pending_apply()
 
         self.set_header_title("未选择")
@@ -304,7 +300,6 @@ class PointsPage(PickNotebookCrudPage):
             self._building_form = False
 
     def _load_into_form(self, rid: str) -> None:
-        # Step 5: 切换记录前取消 debounce，避免旧定时器用旧 rid 触发 apply
         self._cancel_pending_apply()
 
         p = self._find_point(rid)
@@ -381,6 +376,7 @@ class PointsPage(PickNotebookCrudPage):
             return False
 
         return True
+
     def _find_point(self, pid: str) -> Point | None:
         for p in self._ctx.points.points:
             if p.id == pid:

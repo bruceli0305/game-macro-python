@@ -32,6 +32,13 @@ class PointFormPatch:
 
 
 class PointsService:
+    """
+    Step 10 (part 2) result:
+    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd（旧 *point_cmd 已移除）
+    - 保存/重载统一：save_cmd/reload_cmd
+    - 表单 apply 成功后：发布 RECORD_UPDATED(source="form")，让 UI 只“吃事件”刷新
+    """
+
     def __init__(
         self,
         *,
@@ -101,7 +108,7 @@ class PointsService:
             except Exception:
                 saved = False
 
-        # Step 5: 变更后统一发事件，让 UI 刷新（不要由页面主动 update_tree_row）
+        # Step 5: 统一通过事件让 UI 刷新（source="form" 不 reload 表单）
         if self._bus is not None:
             self._bus.post_payload(
                 EventType.RECORD_UPDATED,
@@ -109,6 +116,8 @@ class PointsService:
             )
 
         return (True, saved)
+
+    # ---------- non-cmd helpers (in-memory changes) ----------
     def create_point(self, *, name: str = "新点位") -> Point:
         pid = self.ctx.idgen.next_id()
         p = Point(
@@ -148,9 +157,6 @@ class PointsService:
             return True
         return False
 
-    def save(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"points"}, backup=backup, touch_meta=True)
-
     def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
         p = self.find(pid)
         if p is None:
@@ -164,6 +170,7 @@ class PointsService:
         self.mark_dirty()
         return True
 
+    # ---------- autosave used by CRUD cmd ----------
     def _maybe_autosave(self) -> bool:
         try:
             auto = bool(getattr(self.ctx.base.io, "auto_save", False))
@@ -178,7 +185,8 @@ class PointsService:
         self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
         return True
 
-    def create_point_cmd(self, *, name: str = "新点位") -> Point:
+    # ---------- cmd API (UI should call these) ----------
+    def create_cmd(self, *, name: str = "新点位") -> Point:
         p = self.create_point(name=name)
         self._notify_dirty()
 
@@ -195,7 +203,7 @@ class PointsService:
             )
         return p
 
-    def clone_point_cmd(self, src_id: str) -> Optional[Point]:
+    def clone_cmd(self, src_id: str) -> Optional[Point]:
         clone = self.clone_point(src_id)
         if clone is None:
             return None
@@ -214,7 +222,7 @@ class PointsService:
             )
         return clone
 
-    def delete_point_cmd(self, pid: str) -> bool:
+    def delete_cmd(self, pid: str) -> bool:
         ok = self.delete_point(pid)
         if not ok:
             return False
@@ -232,3 +240,19 @@ class PointsService:
                 RecordDeletedPayload(record_type="point", id=pid, source="crud_delete", saved=bool(saved)),
             )
         return True
+
+    def save_cmd(self, *, backup: Optional[bool] = None) -> None:
+        self._uow.commit(parts={"points"}, backup=backup, touch_meta=True)
+        self._notify_dirty()
+
+    def reload_cmd(self) -> None:
+        self.ctx.points = self.ctx.points_repo.load_or_create()
+        try:
+            self._uow.clear_dirty("points")
+        except Exception:
+            pass
+        try:
+            self._uow.refresh_snapshot(parts={"points"})
+        except Exception:
+            pass
+        self._notify_dirty()

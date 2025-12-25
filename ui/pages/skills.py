@@ -1,4 +1,3 @@
-# File: ui/pages/skills.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -27,10 +26,12 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 class SkillsPage(PickNotebookCrudPage):
     """
-    Step 4:
-    - dirty UI 由 UoW DIRTY_STATE_CHANGED 驱动（enable_uow_dirty_indicator）
-    - 表单变更 debounce -> services.skills.apply_form_patch(auto_save=False)
-    - 页面不再 mark/clear uow dirty
+    Current state (after Step 10):
+    - CRUD: RecordCrudPage 只触发 services 命令，不本地增删行（事件消费端刷新）
+    - 表单编辑：debounce -> services.skills.apply_form_patch(auto_save=False)
+      service 会发 RECORD_UPDATED(source="form")，UI 只刷新列表行，不 reload 表单
+    - dirty 展示：enable_uow_dirty_indicator("skills") 跟随 UoW
+    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd
     """
 
     def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
@@ -60,7 +61,7 @@ class SkillsPage(PickNotebookCrudPage):
         self._services = services
         self._cap = ScreenCapture()
 
-        # Step 4: 绑定 dirty UI 到 UoW 的 skills part
+        # dirty UI from UoW
         self.enable_uow_dirty_indicator(part_key="skills")
 
         # debounce apply
@@ -110,14 +111,12 @@ class SkillsPage(PickNotebookCrudPage):
         super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
-        # Step 6: 切换 context 时，清掉 pending select & debounce，避免误选/误 apply
+        # Step 6/10: 切换 context 时清 debounce + pending select
         try:
             self._cancel_pending_apply()
         except Exception:
             pass
-
         try:
-            # RecordCrudPage 中的 Step 6 pending 选中机制
             self._set_pending_select(None)  # type: ignore[attr-defined]
         except Exception:
             pass
@@ -132,34 +131,33 @@ class SkillsPage(PickNotebookCrudPage):
 
     def _save_to_disk(self) -> bool:
         try:
-            self._services.skills.save(backup=self._ctx.base.io.backup_on_save)
+            self._services.skills.save_cmd(backup=self._ctx.base.io.backup_on_save)
             self._services.notify_dirty()
             return True
         except Exception as e:
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存 skills.json 失败", detail=str(e)))
             return False
 
+    def _reload_from_disk(self) -> None:
+        self._services.skills.reload_cmd()
+
     def _make_new_record(self) -> Skill:
-        return self._services.skills.create_skill_cmd(name="新技能")
+        return self._services.skills.create_cmd(name="新技能")
 
     def _clone_record(self, record: Skill) -> Skill:
-        clone = self._services.skills.clone_skill_cmd(record.id)
+        clone = self._services.skills.clone_cmd(record.id)
         if clone is None:
-            raise RuntimeError("clone_skill_cmd returned None")
+            raise RuntimeError("clone_cmd returned None")
         return clone
 
     def _delete_record_by_id(self, rid: str) -> None:
-        self._services.skills.delete_skill_cmd(rid)
+        self._services.skills.delete_cmd(rid)
 
     def _record_id(self, record: Skill) -> str:
         return record.id
 
     def _record_title(self, record: Skill) -> str:
         return record.name
-
-    def _store_add_record(self, record) -> None:
-        # services 已 append；NO-OP
-        return
 
     def _record_row_values(self, s: Skill) -> tuple:
         sid = s.id or ""
@@ -296,7 +294,6 @@ class SkillsPage(PickNotebookCrudPage):
             self._schedule_apply()
 
     def _clear_form(self) -> None:
-        # Step 5: 清空前取消 debounce，避免旧定时器误 apply
         self._cancel_pending_apply()
 
         self._var_title.set("未选择")
@@ -320,8 +317,8 @@ class SkillsPage(PickNotebookCrudPage):
             self._txt_note.edit_modified(False)
         finally:
             self._building_form = False
+
     def _load_into_form(self, rid: str) -> None:
-        # Step 5: 切换记录前取消 debounce，避免旧定时器用旧 rid 触发 apply
         self._cancel_pending_apply()
 
         s = self._find_skill(rid)
@@ -361,8 +358,8 @@ class SkillsPage(PickNotebookCrudPage):
             self._txt_note.edit_modified(False)
         finally:
             self._building_form = False
+
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
-        # Step 5: 页面不再主动刷新 tree，统一靠 RECORD_UPDATED 事件
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
 
@@ -398,13 +395,14 @@ class SkillsPage(PickNotebookCrudPage):
         )
 
         try:
-            # Step 4/5 的规则：表单编辑一律 auto_save=False（CRUD/pick 才可能自动保存）
+            # 表单编辑一律 auto_save=False（CRUD/pick 才可能自动保存）
             self._services.skills.apply_form_patch(sid, patch, auto_save=False)
         except Exception as e:
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
             return False
 
         return True
+
     def _find_skill(self, sid: str) -> Skill | None:
         for s in self._ctx.skills.skills:
             if s.id == sid:
