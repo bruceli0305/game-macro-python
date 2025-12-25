@@ -29,6 +29,9 @@ class EventBus:
     - publish(): payload must NOT be dict; validated against registry
     - post_payload(): the only public send API (besides publish)
     - NO post(**kwargs) builder (project is fully typed now)
+
+    Reliability (finalization):
+    - Handler isolation: one handler exception will NOT block other handlers for same event.
     """
 
     def __init__(self) -> None:
@@ -89,26 +92,49 @@ class EventBus:
                 break
 
             try:
-                self._dispatch_one(ev)
-            except BaseException as e:
-                if on_error is not None:
-                    on_error(ev, e)
+                self._dispatch_one(ev, on_error=on_error)
             finally:
-                self._q.task_done()
+                try:
+                    self._q.task_done()
+                except Exception:
+                    pass
 
             dispatched += 1
 
         return dispatched
 
-    def _dispatch_one(self, ev: Event) -> None:
+    def _dispatch_one(
+        self,
+        ev: Event,
+        *,
+        on_error: Optional[Callable[[Event, BaseException], None]] = None,
+    ) -> None:
+        """
+        Handler isolation: each handler is wrapped so one failure doesn't block others.
+        """
         with self._lock:
             specific = list(self._handlers.get(ev.type, []))
             wildcard = list(self._handlers.get(EventType.ANY, []))
 
         for h in specific:
-            h(ev)
+            try:
+                h(ev)
+            except BaseException as e:
+                if on_error is not None:
+                    try:
+                        on_error(ev, e)
+                    except Exception:
+                        pass
+
         for h in wildcard:
-            h(ev)
+            try:
+                h(ev)
+            except BaseException as e:
+                if on_error is not None:
+                    try:
+                        on_error(ev, e)
+                    except Exception:
+                        pass
 
     def pending_count_approx(self) -> int:
         try:

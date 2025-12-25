@@ -1,7 +1,7 @@
 # File: core/app/services/app_services.py
 from __future__ import annotations
 
-from typing import Set, Optional
+from typing import Set, Optional, Iterable
 
 from core.app.uow import ProfileUnitOfWork, Part
 from core.app.services.base_settings_service import BaseSettingsService
@@ -34,11 +34,8 @@ class AppServices:
         self._repair_ids_and_persist()
         self.notify_dirty()
 
-    # ---------- UoW state facade (Step 8) ----------
+    # ---------- UoW state facade ----------
     def dirty_parts(self) -> Set[Part]:
-        """
-        UI should use this instead of touching uow directly.
-        """
         try:
             return set(self.uow.dirty_parts())
         except Exception:
@@ -50,17 +47,44 @@ class AppServices:
         except Exception:
             return False
 
+    def commit_parts_cmd(
+        self,
+        *,
+        parts: Iterable[str],
+        backup: Optional[bool] = None,
+        touch_meta: bool = True,
+    ) -> bool:
+        """
+        Centralized commit entry for non-UI orchestrators.
+
+        parts: iterable of {"base","skills","points","meta"} (strings)
+        Returns True if commit performed, False if no valid parts.
+        """
+        valid = {"base", "skills", "points", "meta"}
+        target: Set[Part] = set()
+
+        for p in parts:
+            ps = (str(p) if p is not None else "").strip()
+            if not ps:
+                continue
+            if ps not in valid:
+                raise ValueError(f"Unknown part: {ps!r}")
+            target.add(ps)  # type: ignore[arg-type]
+
+        if not target:
+            return False
+
+        if backup is None:
+            try:
+                backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+            except Exception:
+                backup = True
+
+        self.uow.commit(parts=set(target), backup=bool(backup), touch_meta=bool(touch_meta))
+        self.notify_dirty()
+        return True
+
     def save_dirty_cmd(self, *, backup: Optional[bool] = None, touch_meta: bool = True) -> bool:
-        """
-        Save all currently dirty parts.
-
-        Returns:
-          True if a commit was performed (parts were dirty), False if nothing to do.
-
-        Policy:
-        - backup defaults to ctx.base.io.backup_on_save when available
-        - touch_meta True for user-initiated saves (UnsavedGuard "Yes")
-        """
         parts = self.dirty_parts()
         if not parts:
             return False
@@ -76,9 +100,6 @@ class AppServices:
         return True
 
     def rollback_cmd(self) -> None:
-        """
-        Roll back in-memory changes to last snapshot.
-        """
         self.uow.rollback()
         self.notify_dirty()
 
@@ -91,14 +112,6 @@ class AppServices:
         )
 
     def _repair_ids_and_persist(self) -> None:
-        """
-        Repair missing/duplicate IDs in loaded data.
-        This used to be in repos; now it's an application-layer repair.
-
-        Policy:
-        - If changes detected: save immediately (touch_meta=False)
-        - Do NOT show dirty star for user; this is internal normalization.
-        """
         ctx = self.ctx
         changed_parts: Set[str] = set()
 
@@ -121,7 +134,6 @@ class AppServices:
         if not changed_parts:
             return
 
-        # persist silently
         try:
             backup = bool(getattr(ctx.base.io, "backup_on_save", True))
         except Exception:
@@ -129,14 +141,12 @@ class AppServices:
 
         try:
             self.uow.commit(parts=set(changed_parts), backup=backup, touch_meta=False)
-            # ensure UoW dirty cleared
             try:
                 for part in changed_parts:
                     self.uow.clear_dirty(part)  # type: ignore[arg-type]
             except Exception:
                 pass
         except Exception as e:
-            # if persist fails, mark dirty so user can save later
             for part in changed_parts:
                 try:
                     self.uow.mark_dirty(part)  # type: ignore[arg-type]

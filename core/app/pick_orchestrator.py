@@ -60,11 +60,12 @@ class PickOrchestrator:
 
         if auto and part is not None:
             try:
-                self._services.uow.commit(
-                    parts={part},
-                    backup=bool(self._services.ctx.base.io.backup_on_save),
-                    touch_meta=False,
-                )
+                backup = bool(getattr(self._services.ctx.base.io, "backup_on_save", True))
+            except Exception:
+                backup = True
+
+            try:
+                self._services.commit_parts_cmd(parts={part}, backup=backup, touch_meta=False)
                 saved = True
             except Exception as e:
                 self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="自动保存失败", detail=str(e)))
