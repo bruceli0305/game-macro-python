@@ -150,7 +150,7 @@ class AppWindow(tb.Window):
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
         # preview window click -> cancel pick
-        self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post(EventType.PICK_CANCEL_REQUEST))
+        self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None))
 
         # ---- event pump ----
         self._pump = EventPump(
@@ -270,7 +270,7 @@ class AppWindow(tb.Window):
             return
 
         # cancel pick session
-        self._bus.post(EventType.PICK_CANCEL_REQUEST)
+        self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None)
 
         # stop controllers/services
         try:

@@ -29,5 +29,7 @@ class AppServices:
 
     def notify_dirty(self) -> None:
         parts = sorted(list(self.uow.dirty_parts()))
-        payload = DirtyStateChangedPayload(dirty=bool(self.uow.is_dirty()), parts=parts)
-        self.bus.post_payload(EventType.DIRTY_STATE_CHANGED, payload)
+        self.bus.post_payload(
+            EventType.DIRTY_STATE_CHANGED,
+            DirtyStateChangedPayload(dirty=bool(self.uow.is_dirty()), parts=parts),
+        )

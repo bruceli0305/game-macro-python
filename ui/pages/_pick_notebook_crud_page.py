@@ -7,7 +7,7 @@ import ttkbootstrap as tb
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload
+from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload, PickRequestPayload, PickContextRef
 from ui.pages._record_crud_page import RecordCrudPage
 from ui.widgets.scrollable_frame import ScrollableFrame
 
@@ -68,10 +68,18 @@ class PickNotebookCrudPage(RecordCrudPage):
 
     def request_pick_current(self) -> None:
         if not self.current_id:
-            self._bus.post(EventType.ERROR, msg=f"请先选择一个{self._record_noun}")
+            self._bus.post_payload(
+                EventType.ERROR,
+                ErrorPayload(msg=f"请先选择一个{self._record_noun}"),
+            )
             return
         self._apply_form_to_current(auto_save=False)
-        self._bus.post(EventType.PICK_REQUEST, context={"type": self._pick_context_type, "id": self.current_id})
+        self._bus.post_payload(
+            EventType.PICK_REQUEST,
+            PickRequestPayload(
+                context=PickContextRef(type=self._pick_context_type, id=self.current_id)
+            ),
+        )
 
     def _on_record_updated(self, ev: Event) -> None:
         p = ev.payload

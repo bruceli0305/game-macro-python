@@ -10,6 +10,8 @@ from tkinter import messagebox
 
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import InfoPayload, ErrorPayload, RecordUpdatedPayload, RecordDeletedPayload
+
 
 
 @dataclass
@@ -144,13 +146,19 @@ class RecordCrudPage(tb.Frame):
         rt = self._record_type_key()
         if not rt or not rid:
             return
-        self._bus.post(EventType.RECORD_UPDATED, record_type=rt, id=rid, source=source, saved=bool(saved))
+        self._bus.post_payload(
+            EventType.RECORD_UPDATED,
+            RecordUpdatedPayload(record_type=rt, id=rid, source=source, saved=bool(saved)),
+        )
 
     def _post_record_deleted(self, rid: str, *, source: str, saved: bool) -> None:
         rt = self._record_type_key()
         if not rt or not rid:
             return
-        self._bus.post(EventType.RECORD_DELETED, record_type=rt, id=rid, source=source, saved=bool(saved))
+        self._bus.post_payload(
+            EventType.RECORD_DELETED,
+            RecordDeletedPayload(record_type=rt, id=rid, source=source, saved=bool(saved)),
+        )
 
     # ---------- tree helpers ----------
     def refresh_tree(self) -> None:
@@ -273,12 +281,12 @@ class RecordCrudPage(tb.Frame):
         saved = self._auto_save_if_needed()
 
         self._post_record_updated(rid, source="crud_add", saved=saved)
-        self._bus.post(EventType.INFO, msg=f"已新增{self._record_noun}: {rid[-6:] if rid else ''}")
+        self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已新增{self._record_noun}: {rid[-6:] if rid else ''}"))
 
     def _on_duplicate(self) -> None:
         sel = self._tv.selection()
         if not sel:
-            self._bus.post(EventType.ERROR, msg=f"请先选择要复制的{self._record_noun}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"请先选择要复制的{self._record_noun}"))
             return
 
         self._apply_form_to_current(auto_save=True)
@@ -286,7 +294,7 @@ class RecordCrudPage(tb.Frame):
         rid = sel[0]
         src = self._find_record_by_id(rid)
         if src is None:
-            self._bus.post(EventType.ERROR, msg=f"源{self._record_noun}不存在")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"源{self._record_noun}不存在"))
             return
 
         clone = self._clone_record(src)
@@ -304,18 +312,18 @@ class RecordCrudPage(tb.Frame):
         saved = self._auto_save_if_needed()
 
         self._post_record_updated(new_id, source="crud_duplicate", saved=saved)
-        self._bus.post(EventType.INFO, msg=f"已复制{self._record_noun}: {new_id[-6:] if new_id else ''}")
+        self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已复制{self._record_noun}: {new_id[-6:] if new_id else ''}"))
 
     def _on_delete(self) -> None:
         sel = self._tv.selection()
         if not sel:
-            self._bus.post(EventType.ERROR, msg=f"请先选择要删除的{self._record_noun}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"请先选择要删除的{self._record_noun}"))
             return
 
         rid = sel[0]
         rec = self._find_record_by_id(rid)
         if rec is None:
-            self._bus.post(EventType.ERROR, msg=f"{self._record_noun}不存在")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"{self._record_noun}不存在"))
             return
 
         ok = messagebox.askyesno(
@@ -338,7 +346,7 @@ class RecordCrudPage(tb.Frame):
         saved = self._auto_save_if_needed()
 
         self._post_record_deleted(rid, source="crud_delete", saved=saved)
-        self._bus.post(EventType.INFO, msg=f"已删除{self._record_noun}: {rid[-6:]}")
+        self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已删除{self._record_noun}: {rid[-6:]}"))
 
     def _on_save_clicked(self) -> None:
         if not self._apply_form_to_current(auto_save=False):
@@ -350,7 +358,7 @@ class RecordCrudPage(tb.Frame):
             if isinstance(rid, str) and rid:
                 self._post_record_updated(rid, source="manual_save", saved=True)
 
-            self._bus.post(EventType.INFO, msg=f"{self._record_noun}已保存")
+            self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"{self._record_noun}已保存"))
 
     def _auto_save_if_needed(self) -> bool:
         try:

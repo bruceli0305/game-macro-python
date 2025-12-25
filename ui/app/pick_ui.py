@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import PickPreviewPayload, PickModeEnteredPayload, PickModeExitedPayload, PickCanceledPayload
+from core.events.payloads import PickPreviewPayload, PickModeEnteredPayload, PickModeExitedPayload, PickCanceledPayload, InfoPayload, StatusPayload
 from ui.pick_preview_window import PickPreviewWindow
 
 
@@ -150,19 +150,19 @@ class PickUiController:
                 self._preview.hide()
             except Exception:
                 pass
-        self._bus.post(EventType.STATUS, msg="取色模式已进入")
+        self._bus.post_payload(EventType.STATUS, StatusPayload(msg="取色模式已进入"))
 
     def _on_pick_canceled(self, ev: Event) -> None:
         if not isinstance(ev.payload, PickCanceledPayload):
             return
-        self._bus.post(EventType.INFO, msg="取色已取消")
+        self._bus.post_payload(EventType.INFO, InfoPayload(msg="取色已取消"))
 
     def _on_pick_mode_exited(self, ev: Event) -> None:
         if not isinstance(ev.payload, PickModeExitedPayload):
             return
         self._destroy_preview()
         self._restore_after_exit()
-        self._bus.post(EventType.STATUS, msg="取色模式已退出")
+        self._bus.post_payload(EventType.STATUS, StatusPayload(msg="取色模式已退出"))
 
     def _on_pick_preview(self, ev: Event) -> None:
         p = ev.payload

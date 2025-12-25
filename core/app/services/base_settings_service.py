@@ -6,7 +6,12 @@ from typing import Callable, Optional
 from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
-from core.events.payloads import ConfigSavedPayload
+from core.events.payloads import (
+    ConfigSavedPayload,
+    InfoPayload,
+    StatusPayload,
+    ThemeChangePayload,
+)
 from core.input.hotkey_strings import to_pynput_hotkey
 from core.models.base import BaseFile
 from core.models.common import clamp_int
@@ -116,7 +121,7 @@ class BaseSettingsService:
 
         if not changed and not base_dirty:
             if self._bus is not None:
-                self._bus.post(EventType.STATUS, msg="未检测到更改")
+                self._bus.post_payload(EventType.STATUS, StatusPayload(msg="未检测到更改"))
             return
 
         backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
@@ -124,13 +129,13 @@ class BaseSettingsService:
         self._notify_dirty()
 
         if self._bus is not None:
-            self._bus.post(EventType.UI_THEME_CHANGE, theme=self.ctx.base.ui.theme)
-            self._bus.post(EventType.HOTKEYS_CHANGED)
+            self._bus.post_payload(EventType.UI_THEME_CHANGE, ThemeChangePayload(theme=self.ctx.base.ui.theme))
+            self._bus.post_payload(EventType.HOTKEYS_CHANGED, None)
             self._bus.post_payload(
                 EventType.CONFIG_SAVED,
                 ConfigSavedPayload(section="base", source="manual_save", saved=True),
             )
-            self._bus.post(EventType.INFO, msg="base.json 已保存")
+            self._bus.post_payload(EventType.INFO, InfoPayload(msg="base.json 已保存"))
 
     def reload_cmd(self) -> None:
         self.ctx.base = self.ctx.base_repo.load_or_create()
@@ -144,6 +149,6 @@ class BaseSettingsService:
                 EventType.CONFIG_SAVED,
                 ConfigSavedPayload(section="base", source="reload", saved=False),
             )
-            self._bus.post(EventType.INFO, msg="已重新加载 base.json")
-            self._bus.post(EventType.UI_THEME_CHANGE, theme=self.ctx.base.ui.theme)
-            self._bus.post(EventType.HOTKEYS_CHANGED)
+            self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
+            self._bus.post_payload(EventType.UI_THEME_CHANGE, ThemeChangePayload(theme=self.ctx.base.ui.theme))
+            self._bus.post_payload(EventType.HOTKEYS_CHANGED, None)

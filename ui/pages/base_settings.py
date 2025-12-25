@@ -11,6 +11,7 @@ from core.models.common import clamp_int
 from core.profiles import ProfileContext
 from core.app.services.base_settings_service import BaseSettingsPatch
 from ui.widgets.hotkey_entry import HotkeyEntry
+from core.events.payloads import InfoPayload, ErrorPayload
 
 from core.models.base import BaseFile
 
@@ -340,9 +341,9 @@ class BaseSettingsPage(tb.Frame):
             try:
                 self._ctx.base = self._ctx.base_repo.load_or_create()
                 self.set_context(self._ctx)
-                self._bus.post(EventType.INFO, msg="已重新加载 base.json")
+                self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
             except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"重新加载失败: {e}")
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"重新加载失败", detail=str(e)))
             return
 
         try:
@@ -350,7 +351,7 @@ class BaseSettingsPage(tb.Frame):
             self.set_context(self._services.ctx)
             self._set_dirty(False)
         except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"重新加载失败: {e}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"重新加载失败", detail=str(e)))
 
     def _on_save(self) -> None:
         patch = self._collect_patch()
@@ -364,7 +365,7 @@ class BaseSettingsPage(tb.Frame):
             self._set_dirty(False)
         except Exception as e:
             self._apply_hotkey_error(str(e))
-            self._bus.post(EventType.ERROR, msg=f"保存失败: {e}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"保存失败", detail=str(e)))
             messagebox.showerror("保存失败", f"{e}", parent=self.winfo_toplevel())
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         # theme

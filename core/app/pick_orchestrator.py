@@ -4,15 +4,17 @@ from typing import Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import PickConfirmedPayload
+from core.events.payloads import (
+    PickConfirmedPayload,
+    RecordUpdatedPayload,
+    InfoPayload,
+    StatusPayload,
+    ErrorPayload,
+)
 from core.app.services.app_services import AppServices
 
 
 class PickOrchestrator:
-    """
-    Application-level handler for pick results (STRICT typed payload).
-    """
-
     def __init__(self, *, bus: EventBus, services: AppServices) -> None:
         self._bus = bus
         self._services = services
@@ -21,7 +23,6 @@ class PickOrchestrator:
     def _on_pick_confirmed(self, ev: Event) -> None:
         p = ev.payload
         if not isinstance(p, PickConfirmedPayload):
-            # strict: ignore unexpected payload
             return
 
         typ = p.context.type
@@ -66,7 +67,7 @@ class PickOrchestrator:
                 )
                 saved = True
             except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"自动保存失败: {e}")
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="自动保存失败", detail=str(e)))
                 saved = False
 
             try:
@@ -74,12 +75,13 @@ class PickOrchestrator:
             except Exception:
                 pass
 
-        # UI refresh event (EventBus.post will build typed payload via registry/builder)
-        self._bus.post(EventType.RECORD_UPDATED, record_type=typ, id=rid, source="pick", saved=bool(saved))
+        self._bus.post_payload(
+            EventType.RECORD_UPDATED,
+            RecordUpdatedPayload(record_type=typ, id=rid, source="pick", saved=bool(saved)),
+        )
 
-        # feedback
         if p.hex:
             if saved:
-                self._bus.post(EventType.INFO, msg=f"取色已应用并保存: {p.hex}")
+                self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"取色已应用并保存: {p.hex}"))
             else:
-                self._bus.post(EventType.STATUS, msg=f"取色已应用(未保存): {p.hex}")
+                self._bus.post_payload(EventType.STATUS, StatusPayload(msg=f"取色已应用(未保存): {p.hex}"))

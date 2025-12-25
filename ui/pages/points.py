@@ -12,6 +12,8 @@ from core.models.point import Point
 from core.models.skill import ColorRGB
 from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
+from core.events.payloads import ErrorPayload
+
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
 from ui.widgets.color_swatch import ColorSwatch
@@ -119,7 +121,7 @@ class PointsPage(PickNotebookCrudPage):
                 self._ctx.points_repo.save(self._ctx.points, backup=self._ctx.base.io.backup_on_save)
             return True
         except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"保存 points.json 失败: {e}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"保存 points.json 失败", detail=str(e)))
             return False
     def _make_new_record(self) -> Point:
         if self._services is not None:
@@ -354,7 +356,7 @@ class PointsPage(PickNotebookCrudPage):
             try:
                 changed, saved = self._services.points.apply_form_patch(pid, patch, auto_save=bool(auto_save))
             except Exception as e:
-                self._bus.post(EventType.ERROR, msg=f"应用表单失败: {e}")
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"应用表单失败", detail=str(e)))
                 return False
 
             if not changed:

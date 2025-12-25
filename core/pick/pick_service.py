@@ -7,13 +7,24 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from pynput import keyboard, mouse
 
-from core.event_bus import EventBus
+from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import PickContextRef, PickPreviewPayload, PickConfirmedPayload
+from core.events.payloads import (
+    PickContextRef,
+    PickRequestPayload,
+    PickModeEnteredPayload,
+    PickModeExitedPayload,
+    PickCanceledPayload,
+    PickPreviewPayload,
+    PickConfirmedPayload,
+    InfoPayload,
+    StatusPayload,
+    ErrorPayload,
+)
 from core.pick.capture import ScreenCapture, SampleSpec
 
 
-PickContext = Dict[str, Any]  # request context dict from UI: {"type": "...", "id": "..."}
+PickContext = Dict[str, Any]  # {"type":"skill_pixel"|"point", "id":"..."}
 
 
 @dataclass
@@ -24,6 +35,21 @@ class PickConfig:
 
 
 class PickService:
+    """
+    Strict typed events version.
+
+    Inputs:
+      - PICK_REQUEST payload must be PickRequestPayload (from EventBus builder or post_payload)
+      - PICK_START_LAST / PICK_CANCEL_REQUEST payload is None
+
+    Outputs:
+      - PICK_MODE_ENTERED -> PickModeEnteredPayload
+      - PICK_PREVIEW -> PickPreviewPayload
+      - PICK_CONFIRMED -> PickConfirmedPayload
+      - PICK_CANCELED -> PickCanceledPayload
+      - PICK_MODE_EXITED -> PickModeExitedPayload
+    """
+
     def __init__(
         self,
         *,
@@ -38,8 +64,8 @@ class PickService:
         self._cap = ScreenCapture()
 
         self._active = False
-        self._context: Optional[PickContext] = None
-        self._last_context: Optional[PickContext] = None
+        self._context_ref: Optional[PickContextRef] = None
+        self._last_context_ref: Optional[PickContextRef] = None
 
         self._mouse_listener: Optional[mouse.Listener] = None
         self._kbd_listener: Optional[keyboard.Listener] = None
@@ -58,46 +84,51 @@ class PickService:
         self.stop(reason="shutdown")
         self._cap.close()
 
-    def _on_pick_request(self, ev) -> None:
-        ctx = getattr(ev, "payload", None)
-        # payload from EventBus.post() is a dict with key "context"
-        if isinstance(ctx, dict):
-            ctx = ctx.get("context")
-        if not isinstance(ctx, dict) or not ctx.get("id") or not ctx.get("type"):
-            self._bus.post(EventType.ERROR, msg="PICK_REQUEST 缺少有效 context")
-            return
-        self.start(ctx)
+    def _ctx_dict(self, ref: PickContextRef) -> PickContext:
+        # keep old capture_spec_provider signature
+        return {"type": ref.type, "id": ref.id}
 
-    def _on_pick_start_last(self, _ev) -> None:
-        if self._last_context is None:
-            self._bus.post(EventType.INFO, msg="未设置取色目标：请在技能/点位页点击“从屏幕取色”")
+    def _on_pick_request(self, ev: Event) -> None:
+        p = ev.payload
+        if not isinstance(p, PickRequestPayload):
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST payload 类型错误"))
             return
-        self.start(self._last_context)
+        if not p.context.id or not p.context.type:
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST 缺少有效 context"))
+            return
+        self.start(p.context)
 
-    def _on_pick_cancel(self, _ev) -> None:
+    def _on_pick_start_last(self, _ev: Event) -> None:
+        if self._last_context_ref is None:
+            self._bus.post_payload(EventType.INFO, InfoPayload(msg="未设置取色目标：请在技能/点位页点击“从屏幕取色”"))
+            return
+        self.start(self._last_context_ref)
+
+    def _on_pick_cancel(self, _ev: Event) -> None:
         if self._active:
             self.cancel()
 
-    def start(self, context: PickContext) -> None:
+    def start(self, context: PickContextRef) -> None:
         if self._active:
             self.stop(reason="restart")
 
         self._active = True
-        self._context = dict(context)
-        self._last_context = dict(context)
+        self._context_ref = context
+        self._last_context_ref = context
 
         self._start_t = time.monotonic()
         self._stop_evt.clear()
         self._last_err_t = 0.0
         self._announced_preview = False
 
-        self._bus.post(EventType.PICK_MODE_ENTERED, context=self._context)
+        # typed enter event
+        self._bus.post_payload(EventType.PICK_MODE_ENTERED, PickModeEnteredPayload(context=context))
 
         try:
             self._mouse_listener = mouse.Listener(on_click=self._on_click)
             self._mouse_listener.start()
         except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"鼠标监听启动失败: {e}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"鼠标监听启动失败", detail=str(e)))
             self.stop(reason="mouse_listener_failed")
             return
 
@@ -105,28 +136,30 @@ class PickService:
             self._kbd_listener = keyboard.Listener(on_press=self._on_key_press)
             self._kbd_listener.start()
         except Exception as e:
-            self._bus.post(EventType.ERROR, msg=f"键盘监听启动失败: {e}")
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"键盘监听启动失败", detail=str(e)))
             self.stop(reason="kbd_listener_failed")
             return
 
         self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._preview_thread.start()
 
-        self._bus.post(EventType.STATUS, msg="取色模式：移动鼠标预览，左键确认，Esc/右键取消")
+        self._bus.post_payload(EventType.STATUS, StatusPayload(msg="取色模式：移动鼠标预览，左键确认，Esc/右键取消"))
 
     def cancel(self) -> None:
         if not self._active:
             return
-        self._bus.post(EventType.PICK_CANCELED, context=self._context or {})
+        ctx = self._context_ref
+        if ctx is not None:
+            self._bus.post_payload(EventType.PICK_CANCELED, PickCanceledPayload(context=ctx))
         self.stop(reason="canceled")
 
     def stop(self, *, reason: str) -> None:
         if not self._active:
             return
 
-        ctx = self._context or {}
+        ctx = self._context_ref
         self._active = False
-        self._context = None
+        self._context_ref = None
 
         self._stop_evt.set()
 
@@ -139,7 +172,11 @@ class PickService:
         self._mouse_listener = None
         self._kbd_listener = None
 
-        self._bus.post(EventType.PICK_MODE_EXITED, context=ctx, reason=reason)
+        if ctx is not None:
+            self._bus.post_payload(EventType.PICK_MODE_EXITED, PickModeExitedPayload(context=ctx, reason=reason))
+        else:
+            # should not happen, but keep registry happy
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"PICK_MODE_EXITED missing context; reason={reason}"))
 
     def _on_key_press(self, key) -> None:
         try:
@@ -165,14 +202,6 @@ class PickService:
         used = self._cap.find_monitor_key_for_abs(int(abs_x), int(abs_y), default=req)
         return used, False
 
-    def _ctx_ref(self) -> Optional[PickContextRef]:
-        ctx = self._context or {}
-        t = ctx.get("type")
-        i = ctx.get("id")
-        if isinstance(t, str) and isinstance(i, str) and i:
-            return PickContextRef(type=t, id=i)  # type: ignore[arg-type]
-        return None
-
     def _on_click(self, abs_x: int, abs_y: int, button, pressed: bool) -> None:
         try:
             if not self._active or not pressed:
@@ -185,14 +214,15 @@ class PickService:
             if button != mouse.Button.left:
                 return
 
-            ctx = self._context or {}
-            ctx_ref = self._ctx_ref()
+            ctx_ref = self._context_ref
             if ctx_ref is None:
-                self._bus.post(EventType.ERROR, msg="取色确认失败: context 无效")
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败: context 为空"))
                 return
 
-            sample, mon_req = self._capture_spec_provider(ctx)
-            mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
+            ctx_dict = self._ctx_dict(ctx_ref)
+            sample, mon_req = self._capture_spec_provider(ctx_dict)
+
+            mon_used, inside = self._resolve_monitor(int(abs_x), int(abs_y), mon_req)
 
             r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
 
@@ -223,7 +253,7 @@ class PickService:
             cfg = self._pick_config_provider()
             if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                 self._last_err_t = now
-                self._bus.post(EventType.ERROR, msg=f"取色确认失败: {e}")
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"取色确认失败", detail=str(e)))
 
     def _preview_loop(self) -> None:
         ctrl = mouse.Controller()
@@ -237,17 +267,17 @@ class PickService:
                 continue
 
             try:
-                abs_x, abs_y = ctrl.position
-                abs_x = int(abs_x)
-                abs_y = int(abs_y)
-
-                ctx = self._context or {}
-                ctx_ref = self._ctx_ref()
+                ctx_ref = self._context_ref
                 if ctx_ref is None:
                     time.sleep(0.02)
                     continue
 
-                sample, mon_req = self._capture_spec_provider(ctx)
+                abs_x, abs_y = ctrl.position
+                abs_x = int(abs_x)
+                abs_y = int(abs_y)
+
+                ctx_dict = self._ctx_dict(ctx_ref)
+                sample, mon_req = self._capture_spec_provider(ctx_dict)
                 mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
 
                 r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
@@ -256,7 +286,7 @@ class PickService:
 
                 if not self._announced_preview:
                     self._announced_preview = True
-                    self._bus.post(EventType.INFO, msg="取色预览已开始")
+                    self._bus.post_payload(EventType.INFO, InfoPayload(msg="取色预览已开始"))
 
                 payload = PickPreviewPayload(
                     context=ctx_ref,
@@ -279,6 +309,6 @@ class PickService:
             except Exception as e:
                 if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                     self._last_err_t = now
-                    self._bus.post(EventType.STATUS, msg=f"取色预览异常: {e}")
+                    self._bus.post_payload(EventType.STATUS, StatusPayload(msg=f"取色预览异常: {e}"))
 
             time.sleep(max(0.005, float(cfg.preview_throttle_ms) / 1000.0))
