@@ -123,7 +123,7 @@ class PointsPage(PickNotebookCrudPage):
             return False
     def _make_new_record(self) -> Point:
         if self._services is not None:
-            return self._services.points.create_point(name="新点位")
+            return self._services.points.create_point_cmd(name="新点位")
 
         pid = self._ctx.idgen.next_id()
         p = Point(
@@ -140,7 +140,7 @@ class PointsPage(PickNotebookCrudPage):
         return p
     def _clone_record(self, record: Point) -> Point:
         if self._services is not None:
-            clone = self._services.points.clone_point(record.id)
+            clone = self._services.points.clone_point_cmd(record.id)
             if clone is not None:
                 return clone
 
@@ -152,7 +152,7 @@ class PointsPage(PickNotebookCrudPage):
         return clone
     def _delete_record_by_id(self, rid: str) -> None:
         if self._services is not None:
-            self._services.points.delete_point(rid)
+            self._services.points.delete_point_cmd(rid)
             return
         self._ctx.points.points = [x for x in self._ctx.points.points if x.id != rid]
     def _record_id(self, record: Point) -> str:

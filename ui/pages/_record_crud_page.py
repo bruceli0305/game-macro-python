@@ -22,15 +22,14 @@ class ColumnDef:
 
 class RecordCrudPage(tb.Frame):
     """
-    公共封装（基类）：
-    - 左侧 Treeview CRUD（新增/复制/删除/保存）
-    - 选择切换时自动 apply 当前表单（auto_save 可选）
-    - dirty 管理 + auto_save
-    - Treeview 行更新/全量刷新
+    CRUD 基类（增量版）：
+    - 新增/复制：Treeview 直接 insert 新行（不再全量 refresh_tree）
+    - 删除：Treeview 直接 delete 行，并选择相邻行
+    - 仍保留 refresh_tree 作为兜底/外部调用接口
 
-    新增：CRUD 后发布 application-level 事件
-      - RECORD_UPDATED（新增/复制）
-      - RECORD_DELETED（删除）
+    事件：
+      - RECORD_UPDATED（新增/复制/自动保存后）
+      - RECORD_DELETED（删除/自动保存后）
     子类若想参与事件发布：覆盖 _record_type_key()
     """
 
@@ -139,11 +138,6 @@ class RecordCrudPage(tb.Frame):
 
     # ---------- event hook ----------
     def _record_type_key(self) -> str | None:
-        """
-        Return application-level record_type key for RECORD_UPDATED/DELETED.
-        For pick pages it should match pick_context_type: "skill_pixel" | "point".
-        Default: None (no event).
-        """
         return None
 
     def _post_record_updated(self, rid: str, *, source: str, saved: bool) -> None:
@@ -180,8 +174,32 @@ class RecordCrudPage(tb.Frame):
         try:
             if self._tv.exists(rid):
                 self._tv.item(rid, values=self._record_row_values(r))
+            else:
+                # row missing -> insert
+                self._tv.insert("", "end", iid=rid, values=self._record_row_values(r))
         except Exception:
             pass
+
+    def _insert_row_from_record(self, rid: str, record: Any) -> None:
+        if not rid:
+            return
+        try:
+            vals = self._record_row_values(record)
+            if self._tv.exists(rid):
+                self._tv.item(rid, values=vals)
+            else:
+                self._tv.insert("", "end", iid=rid, values=vals)
+        except Exception:
+            # fallback: full refresh
+            self.refresh_tree()
+
+    def _delete_row(self, rid: str) -> None:
+        try:
+            if self._tv.exists(rid):
+                self._tv.delete(rid)
+        except Exception:
+            # fallback
+            self.refresh_tree()
 
     def _select_first_if_any(self) -> None:
         items = self._tv.get_children()
@@ -201,6 +219,19 @@ class RecordCrudPage(tb.Frame):
             self._suppress_select = False
         self._load_into_form(rid)
 
+    def _select_after_delete(self) -> None:
+        """
+        After deleting current selection, pick a reasonable next selection.
+        """
+        items = self._tv.get_children()
+        if not items:
+            self._current_id = None
+            self._var_title.set("未选择")
+            self._clear_form()
+            return
+        # pick first item
+        self._select_id(items[0])
+
     def _on_select(self, _evt=None) -> None:
         if self._suppress_select:
             return
@@ -218,11 +249,9 @@ class RecordCrudPage(tb.Frame):
 
     # ---------- store hooks (for services) ----------
     def _store_add_record(self, record: Any) -> None:
-        """Default: append to list."""
         self._records().append(record)
 
     def _store_delete_record(self, rid: str) -> None:
-        """Default: use subclass delete hook."""
         self._delete_record_by_id(rid)
 
     # ---------- CRUD ----------
@@ -233,9 +262,12 @@ class RecordCrudPage(tb.Frame):
         self._store_add_record(rec)
         rid = self._record_id(rec)
 
-        self.refresh_tree()
+        # incremental insert + select
         if rid:
+            self._insert_row_from_record(rid, rec)
             self._select_id(rid)
+        else:
+            self.refresh_tree()
 
         self.mark_dirty()
         saved = self._auto_save_if_needed()
@@ -261,9 +293,12 @@ class RecordCrudPage(tb.Frame):
         self._store_add_record(clone)
 
         new_id = self._record_id(clone)
-        self.refresh_tree()
+
         if new_id:
+            self._insert_row_from_record(new_id, clone)
             self._select_id(new_id)
+        else:
+            self.refresh_tree()
 
         self.mark_dirty()
         saved = self._auto_save_if_needed()
@@ -292,7 +327,12 @@ class RecordCrudPage(tb.Frame):
             return
 
         self._store_delete_record(rid)
-        self.refresh_tree()
+
+        # incremental delete
+        is_current = (self._current_id == rid)
+        self._delete_row(rid)
+        if is_current:
+            self._select_after_delete()
 
         self.mark_dirty()
         saved = self._auto_save_if_needed()
@@ -305,13 +345,14 @@ class RecordCrudPage(tb.Frame):
             return
         if self._save_to_disk():
             self.clear_dirty()
-            # 保存按钮属于显式保存：这里不发 RECORD_UPDATED，避免误触发“reload form”等行为
+
+            rid = self.current_id
+            if isinstance(rid, str) and rid:
+                self._post_record_updated(rid, source="manual_save", saved=True)
+
             self._bus.post(EventType.INFO, msg=f"{self._record_noun}已保存")
 
     def _auto_save_if_needed(self) -> bool:
-        """
-        Returns True if saved to disk (auto-save).
-        """
         try:
             if bool(self._ctx.base.io.auto_save):
                 if self._save_to_disk():

@@ -1,16 +1,33 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from core.app.uow import ProfileUnitOfWork
+from core.event_bus import EventBus
+from core.event_types import EventType
 from core.io.json_store import now_iso_utc
 from core.models.point import Point
 from core.models.skill import ColorRGB
 
 
 class PointsService:
-    def __init__(self, uow: ProfileUnitOfWork) -> None:
+    """
+    Two layers of API:
+    - Pure mutation methods: create_point / clone_point / delete_point (no events)
+    - Command methods: create_point_cmd / clone_point_cmd / delete_point_cmd
+      (publish RECORD_UPDATED/RECORD_DELETED + optional auto-save + notify_dirty)
+    """
+
+    def __init__(
+        self,
+        *,
+        uow: ProfileUnitOfWork,
+        bus: Optional[EventBus] = None,
+        notify_dirty: Optional[Callable[[], None]] = None,
+    ) -> None:
         self._uow = uow
+        self._bus = bus
+        self._notify_dirty = notify_dirty or (lambda: None)
 
     @property
     def ctx(self):
@@ -25,7 +42,7 @@ class PointsService:
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("points")
 
-    # ---- CRUD ----
+    # ---------------- pure mutation CRUD (no events) ----------------
     def create_point(self, *, name: str = "新点位") -> Point:
         pid = self.ctx.idgen.next_id()
         p = Point(
@@ -65,10 +82,11 @@ class PointsService:
             return True
         return False
 
+    # ---------------- save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
         self._uow.commit(parts={"points"}, backup=backup)
 
-    # ---- pick apply ----
+    # ---------------- pick apply (no events; orchestrator publishes) ----------------
     def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
         p = self.find(pid)
         if p is None:
@@ -80,4 +98,65 @@ class PointsService:
         p.color = ColorRGB(r=int(r), g=int(g), b=int(b))
         p.captured_at = now_iso_utc()
         self.mark_dirty()
+        return True
+
+    # ---------------- command CRUD (events + autosave + notify) ----------------
+    def _maybe_autosave(self) -> bool:
+        try:
+            auto = bool(getattr(self.ctx.base.io, "auto_save", False))
+        except Exception:
+            auto = False
+        if not auto:
+            return False
+        try:
+            backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+        except Exception:
+            backup = True
+        self._uow.commit(parts={"points"}, backup=backup)
+        return True
+
+    def create_point_cmd(self, *, name: str = "新点位") -> Point:
+        p = self.create_point(name=name)
+        self._notify_dirty()
+
+        saved = False
+        try:
+            saved = self._maybe_autosave()
+        finally:
+            self._notify_dirty()
+
+        if self._bus is not None:
+            self._bus.post(EventType.RECORD_UPDATED, record_type="point", id=p.id, source="crud_add", saved=bool(saved))
+        return p
+
+    def clone_point_cmd(self, src_id: str) -> Optional[Point]:
+        clone = self.clone_point(src_id)
+        if clone is None:
+            return None
+
+        self._notify_dirty()
+        saved = False
+        try:
+            saved = self._maybe_autosave()
+        finally:
+            self._notify_dirty()
+
+        if self._bus is not None:
+            self._bus.post(EventType.RECORD_UPDATED, record_type="point", id=clone.id, source="crud_duplicate", saved=bool(saved))
+        return clone
+
+    def delete_point_cmd(self, pid: str) -> bool:
+        ok = self.delete_point(pid)
+        if not ok:
+            return False
+
+        self._notify_dirty()
+        saved = False
+        try:
+            saved = self._maybe_autosave()
+        finally:
+            self._notify_dirty()
+
+        if self._bus is not None:
+            self._bus.post(EventType.RECORD_DELETED, record_type="point", id=pid, source="crud_delete", saved=bool(saved))
         return True

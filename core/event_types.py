@@ -30,6 +30,9 @@ class EventType(str, Enum):
     RECORD_UPDATED = "RECORD_UPDATED"
     
     RECORD_DELETED = "RECORD_DELETED"  # payload: record_type, id, source, saved
+    
+    CONFIG_SAVED = "CONFIG_SAVED"  # payload: section(str), source(str), saved(bool)
+    
     # dirty state
     DIRTY_STATE_CHANGED = "DIRTY_STATE_CHANGED"  # payload: dirty(bool), parts(list[str])
 

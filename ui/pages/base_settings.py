@@ -246,6 +246,7 @@ class BaseSettingsPage(tb.Frame):
             self._ctx.base = self._ctx.base_repo.load_or_create()
             self.set_context(self._ctx)
             self._bus.post(EventType.INFO, msg="已重新加载 base.json")
+            self._bus.post(EventType.CONFIG_SAVED, section="base", source="reload", saved=False)
             if self._services is not None:
                 self._services.uow.clear_dirty("base")
                 self._services.uow.refresh_snapshot(parts={"base"})
@@ -307,5 +308,6 @@ class BaseSettingsPage(tb.Frame):
             self._bus.post(EventType.INFO, msg="base.json 已保存")
             self._bus.post(EventType.UI_THEME_CHANGE, theme=b.ui.theme)
             self._bus.post(EventType.HOTKEYS_CHANGED)
+            self._bus.post(EventType.CONFIG_SAVED, section="base", source="manual_save", saved=True)
         except Exception as e:
             self._bus.post(EventType.ERROR, msg=f"保存失败: {e}")

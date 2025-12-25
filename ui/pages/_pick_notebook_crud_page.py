@@ -18,8 +18,8 @@ SAMPLE_VALUE_TO_DISPLAY = {v: k for k, v in SAMPLE_DISPLAY_TO_VALUE.items()}
 class PickNotebookCrudPage(RecordCrudPage):
     """
     - request_pick_current 发 PICK_REQUEST
-    - UI 不再消费 PICK_CONFIRMED（业务更新由 PickOrchestrator 做）
-    - UI 消费 RECORD_UPDATED/RECORD_DELETED 来刷新
+    - UI 消费 RECORD_UPDATED/RECORD_DELETED 来刷新（增量）
+    - _record_type_key() 返回 None，避免基类重复发布 CRUD 事件（由 service cmd 发布）
     """
 
     def __init__(
@@ -62,9 +62,9 @@ class PickNotebookCrudPage(RecordCrudPage):
         self._bus.subscribe(EventType.RECORD_UPDATED, self._on_record_updated)
         self._bus.subscribe(EventType.RECORD_DELETED, self._on_record_deleted)
 
-    # provide record type for base CRUD event publishing
     def _record_type_key(self) -> str | None:
-        return self._pick_context_type
+        # CRUD 事件由 Application Service 的 *_cmd() 发布，基类不再重复发布
+        return None
 
     def request_pick_current(self) -> None:
         if not self.current_id:
@@ -83,13 +83,22 @@ class PickNotebookCrudPage(RecordCrudPage):
         if not isinstance(rid, str) or not rid:
             return
 
+        # ensure row exists and is up to date
         self.update_tree_row(rid)
 
+        # if current is same, reload form from model
         if self.current_id == rid:
             try:
                 self._load_into_form(rid)
             except Exception:
                 pass
+
+        # if it's a newly created record and nothing selected, select it
+        try:
+            if self.current_id is None and self._tv.exists(rid):
+                self._select_id(rid)
+        except Exception:
+            pass
 
         if saved:
             self.clear_dirty()
@@ -106,15 +115,23 @@ class PickNotebookCrudPage(RecordCrudPage):
         if not isinstance(rid, str) or not rid:
             return
 
-        # safest: refresh the whole tree (the deleted row is gone)
-        self.refresh_tree()
+        # incremental delete
+        is_current = (self.current_id == rid)
+        try:
+            if self._tv.exists(rid):
+                self._tv.delete(rid)
+        except Exception:
+            pass
+
+        if is_current:
+            self._select_first_if_any()
 
         if saved:
             self.clear_dirty()
         else:
             self.mark_dirty()
 
-    # legacy hooks retained (may still exist in subclasses; not used by pick flow now)
+    # legacy hooks retained (not used by pick flow now)
     def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
         raise NotImplementedError
 

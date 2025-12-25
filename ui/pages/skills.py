@@ -126,9 +126,8 @@ class SkillsPage(PickNotebookCrudPage):
             return False
     def _make_new_record(self) -> Skill:
         if self._services is not None:
-            return self._services.skills.create_skill(name="新技能")
-
-        # fallback（极少走到）
+            return self._services.skills.create_skill_cmd(name="新技能")
+        # fallback
         sid = self._ctx.idgen.next_id()
         s = Skill(id=sid, name="新技能", enabled=True)
         s.pixel.monitor = "primary"
@@ -137,10 +136,10 @@ class SkillsPage(PickNotebookCrudPage):
         return s
     def _clone_record(self, record: Skill) -> Skill:
         if self._services is not None:
-            clone = self._services.skills.clone_skill(record.id)
+            clone = self._services.skills.clone_skill_cmd(record.id)
             if clone is not None:
                 return clone
-
+        # fallback
         new_id = self._ctx.idgen.next_id()
         clone = Skill.from_dict(record.to_dict())
         clone.id = new_id
@@ -149,7 +148,7 @@ class SkillsPage(PickNotebookCrudPage):
 
     def _delete_record_by_id(self, rid: str) -> None:
         if self._services is not None:
-            self._services.skills.delete_skill(rid)
+            self._services.skills.delete_skill_cmd(rid)
             return
         self._ctx.skills.skills = [x for x in self._ctx.skills.skills if x.id != rid]
     def _record_id(self, record: Skill) -> str:
@@ -159,7 +158,7 @@ class SkillsPage(PickNotebookCrudPage):
         return record.name
 
     def _store_add_record(self, record) -> None:
-        # 如果走了 service，它已经 append 过了，这里不再 append
+        # cmd 模式 service 已经 append 过；这里不重复 append
         if self._services is None:
             self._ctx.skills.skills.append(record)
 

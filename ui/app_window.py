@@ -6,16 +6,16 @@ from tkinter import messagebox, simpledialog
 import ttkbootstrap as tb
 from ttkbootstrap.constants import LEFT, X, Y, VERTICAL
 
+from core.app.pick_orchestrator import PickOrchestrator
+from core.app.services.app_services import AppServices
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
+from core.input.global_hotkeys import GlobalHotkeyService, HotkeyConfig
 from core.models.app_state import AppState
 from core.profiles import ProfileContext, ProfileManager
 from core.repos.app_state_repo import AppStateRepo
-from core.app.services.app_services import AppServices
-from core.app.pick_orchestrator import PickOrchestrator
-from core.input.global_hotkeys import GlobalHotkeyService, HotkeyConfig
 
-# Pick service is optional but present in your codebase
+# Pick service is optional
 try:
     from core.pick.pick_service import PickService, PickConfig
     from core.pick.capture import SampleSpec
@@ -62,7 +62,7 @@ class StatusBar(tb.Frame):
 class AppWindow(tb.Window):
     """
     - Profile management
-    - Global unsaved changes confirm
+    - UoW-based unsaved changes confirm
     - Pick UI closure:
         * subscribe PICK_* events
         * show PickPreviewWindow
@@ -92,10 +92,12 @@ class AppWindow(tb.Window):
 
         self._base_title = "Game Macro - Phase 1"
         self.title(self._base_title)
+
         # application services (UnitOfWork + domain services)
         self._services = AppServices(bus=self._bus, ctx=self._ctx)
         # application-level pick handler
         self._pick_orch = PickOrchestrator(bus=self._bus, services=self._services)
+
         # ---- pick ui state ----
         self._preview: PickPreviewWindow | None = None
         self._pick_active = False
@@ -169,24 +171,22 @@ class AppWindow(tb.Window):
         self._bus.subscribe(EventType.STATUS, self._on_status)
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
-        # pick ui subscriptions
+        # pick ui subscriptions (UI only)
         self._bus.subscribe(EventType.PICK_MODE_ENTERED, self._on_pick_mode_entered)
         self._bus.subscribe(EventType.PICK_PREVIEW, self._on_pick_preview)
         self._bus.subscribe(EventType.PICK_MODE_EXITED, self._on_pick_mode_exited)
         self._bus.subscribe(EventType.PICK_CANCELED, self._on_pick_canceled)
-        self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed)
 
-        self._services.notify_dirty()
         # preview window click cancel -> bus cancel
         self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post(EventType.PICK_CANCEL_REQUEST))
+
+        # initial dirty sync
+        self._services.notify_dirty()
 
         self.after(16, self._pump_events)
 
         self.show_page("base")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Initial dirty indicator
-        self._update_global_dirty_indicator()
 
     # ---------- pick sample mapping ----------
     def _capture_spec_for_context(self, ctx: dict) -> tuple["SampleSpec", str]:
@@ -248,7 +248,6 @@ class AppWindow(tb.Window):
         if not self._confirm_leave_context(action_name="切换 Profile"):
             self._refresh_profile_list(select=self._ctx.profile_name)
             return
-        # cancel pick if active to avoid weird state
         self._bus.post(EventType.PICK_CANCEL_REQUEST)
         self._switch_profile(name)
 
@@ -297,14 +296,20 @@ class AppWindow(tb.Window):
             if cur == "Default":
                 messagebox.showinfo("提示", "不建议删除 Default（可重命名/另建）。", parent=self)
                 return
-            ok = messagebox.askyesno("删除 Profile", f"确认删除 profile：{cur} ？\n\n（将删除该目录下所有 JSON）", parent=self)
+            ok = messagebox.askyesno(
+                "删除 Profile",
+                f"确认删除 profile：{cur} ？\n\n（将删除该目录下所有 JSON）",
+                parent=self,
+            )
             if not ok:
                 return
             try:
                 self._pm.delete_profile(cur)
                 self._ctx = self._pm.current or self._pm.open_last_or_fallback()
                 self._status.set_profile(self._ctx.profile_name)
+
                 self._services.set_context(self._ctx)
+
                 for key, page in self._pages.items():
                     if hasattr(page, "set_context"):
                         try:
@@ -315,7 +320,6 @@ class AppWindow(tb.Window):
                 self._hotkeys.start()
                 self._refresh_profile_list(select=self._ctx.profile_name)
                 self._bus.post(EventType.INFO, msg=f"已删除 profile 并切换到 {self._ctx.profile_name}")
-                self._update_global_dirty_indicator()
             except Exception as e:
                 self._bus.post(EventType.ERROR, msg=f"删除失败: {e}")
             return
@@ -333,6 +337,7 @@ class AppWindow(tb.Window):
         self._ctx = new_ctx
         self._status.set_profile(self._ctx.profile_name)
         self._services.set_context(self._ctx)
+
         try:
             self.style.theme_use(self._ctx.base.ui.theme or "darkly")
         except Exception:
@@ -348,10 +353,8 @@ class AppWindow(tb.Window):
         self._hotkeys.start()
         self._refresh_profile_list(select=self._ctx.profile_name)
         self._bus.post(EventType.INFO, msg=f"已切换 profile: {self._ctx.profile_name}")
-        self._update_global_dirty_indicator()
 
     # ---------------- Pick UI closure ----------------
-
     def _ensure_preview(self) -> None:
         if self._preview is None:
             try:
@@ -364,7 +367,6 @@ class AppWindow(tb.Window):
         mode = av.mode
         self._avoid_mode_applied = mode
 
-        # store state
         try:
             self._prev_geo = self.geometry()
         except Exception:
@@ -385,7 +387,6 @@ class AppWindow(tb.Window):
             except Exception:
                 pass
         elif mode == "move_aside":
-            # move to top-right of primary screen
             try:
                 self.update_idletasks()
                 sw = int(self.winfo_screenwidth())
@@ -393,20 +394,17 @@ class AppWindow(tb.Window):
                 self.geometry(f"+{max(0, sw - w - 10)}+10")
             except Exception:
                 pass
-        # "none" -> do nothing
 
     def _restore_after_exit(self) -> None:
         mode = self._avoid_mode_applied
         self._avoid_mode_applied = None
 
-        # restore window state
         try:
             if mode in ("hide_main", "minimize"):
                 self.deiconify()
         except Exception:
             pass
 
-        # restore geometry/state if we have them
         if self._prev_geo:
             try:
                 self.geometry(self._prev_geo)
@@ -415,13 +413,11 @@ class AppWindow(tb.Window):
 
         if self._prev_state:
             try:
-                # state can be "normal"/"zoomed"/"iconic"/"withdrawn"
                 if self._prev_state in ("normal", "zoomed"):
                     self.state(self._prev_state)
             except Exception:
                 pass
 
-        # bring to front (best-effort)
         try:
             self.lift()
             self.focus_force()
@@ -440,7 +436,6 @@ class AppWindow(tb.Window):
         self._bus.post(EventType.STATUS, msg="取色模式已进入")
 
     def _on_pick_preview(self, ev: Event) -> None:
-        # status text (still use sampled x/y)
         try:
             x = int(ev.payload.get("x", 0))
             y = int(ev.payload.get("y", 0))
@@ -471,32 +466,27 @@ class AppWindow(tb.Window):
 
         av = self._ctx.base.pick.avoidance
 
-        # update content
         try:
             self._preview.update_preview(x=x, y=y, r=r, g=g, b=b)
         except Exception:
             pass
 
-        # show (and lift) every time to avoid being hidden behind
         try:
             self._preview.show()
         except Exception:
             pass
 
-        # Use Tk pointer coords for positioning (DPI-safe for tkinter window placement)
         try:
             px = int(self.winfo_pointerx())
             py = int(self.winfo_pointery())
         except Exception:
             px, py = x, y
 
-        # Compute desired position
         try:
             ox, oy = int(av.preview_offset[0]), int(av.preview_offset[1])
         except Exception:
             ox, oy = 30, 30
 
-        # Preview window size
         try:
             pw, ph = self._preview.size
         except Exception:
@@ -517,7 +507,6 @@ class AppWindow(tb.Window):
             else:
                 nx, ny = px + ox, py + oy
 
-        # Clamp to virtual screen bounds so it can't disappear off-screen
         L, T, R, B = self._get_virtual_screen_bounds()
         nx = self._clamp(int(nx), L, R - pw)
         ny = self._clamp(int(ny), T, B - ph)
@@ -525,16 +514,10 @@ class AppWindow(tb.Window):
         try:
             self._preview.move_to(nx, ny)
         except Exception:
-            # fallback: safe fixed position
             try:
                 self._preview.move_to(20, 20)
             except Exception:
                 pass
-
-    def _on_pick_confirmed(self, ev: Event) -> None:
-        hx = ev.payload.get("hex", "")
-        if isinstance(hx, str) and hx:
-            self._bus.post(EventType.INFO, msg=f"取色确认: {hx}")
 
     def _on_pick_canceled(self, _ev: Event) -> None:
         self._bus.post(EventType.INFO, msg="取色已取消")
@@ -542,7 +525,6 @@ class AppWindow(tb.Window):
     def _on_pick_mode_exited(self, _ev: Event) -> None:
         self._pick_active = False
 
-        # close preview
         if self._preview is not None:
             try:
                 self._preview.destroy()
@@ -554,13 +536,9 @@ class AppWindow(tb.Window):
         self._bus.post(EventType.STATUS, msg="取色模式已退出")
 
     def _get_virtual_screen_bounds(self) -> tuple[int, int, int, int]:
-        """
-        Return (L, T, R, B) bounds in screen coordinates.
-        On Windows, use virtual screen metrics to support multi-monitor (including negative coords).
-        Fallback to Tk screen size.
-        """
         try:
             import ctypes
+
             user32 = ctypes.windll.user32
             SM_XVIRTUALSCREEN = 76
             SM_YVIRTUALSCREEN = 77
@@ -572,7 +550,6 @@ class AppWindow(tb.Window):
             h = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
             return l, t, l + w, t + h
         except Exception:
-            # fallback: primary screen only
             return 0, 0, int(self.winfo_screenwidth()), int(self.winfo_screenheight())
 
     @staticmethod
@@ -583,64 +560,46 @@ class AppWindow(tb.Window):
             return hi
         return v
 
-    # ---------------- Global dirty handling ----------------
+    # ---------------- UoW leave confirm ----------------
+    def _uow_dirty_parts_display(self) -> list[str]:
+        try:
+            parts = self._services.uow.dirty_parts()
+        except Exception:
+            return []
 
-    def _iter_pages(self):
-        for k, p in self._pages.items():
-            yield k, p
+        mapping = {
+            "base": "基础配置",
+            "skills": "技能配置",
+            "points": "取色点位配置",
+            "meta": "Profile 元信息",
+        }
+        out: list[str] = []
+        for p in ["base", "skills", "points", "meta"]:
+            if p in parts:
+                out.append(mapping.get(p, p))
+        return out
 
-    def _page_is_dirty(self, page: tb.Frame) -> bool:
-        if hasattr(page, "is_dirty"):
-            try:
-                return bool(page.is_dirty())  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        for attr in ("_dirty_disk", "_dirty"):
-            if hasattr(page, attr):
-                try:
-                    return bool(getattr(page, attr))
-                except Exception:
-                    pass
-        return False
-
-    def _dirty_pages(self) -> list[str]:
-        names: list[str] = []
-        for key, page in self._iter_pages():
-            if self._page_is_dirty(page):
-                names.append(self._page_title.get(key, key))
-        return names
-
-    def _save_page(self, page: tb.Frame) -> bool:
-        if hasattr(page, "save_changes"):
-            try:
-                return bool(page.save_changes())  # type: ignore[attr-defined]
-            except Exception:
-                return False
-        if hasattr(page, "_on_save"):
-            try:
-                page._on_save()  # type: ignore[attr-defined]
-                return not self._page_is_dirty(page)
-            except Exception:
-                return False
-        return True
-
-    def _save_all_dirty(self) -> bool:
-        ok = True
-        for _key, page in self._iter_pages():
-            if self._page_is_dirty(page):
-                if not self._save_page(page):
-                    ok = False
-        self._update_global_dirty_indicator()
-        return ok
+    def _flush_current_forms_best_effort(self) -> None:
+        try:
+            for _key, page in self._pages.items():
+                if hasattr(page, "_apply_form_to_current"):
+                    try:
+                        page._apply_form_to_current(auto_save=False)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _confirm_leave_context(self, *, action_name: str) -> bool:
-        dirty = self._dirty_pages()
-        if not dirty:
+        self._flush_current_forms_best_effort()
+
+        dirty_names = self._uow_dirty_parts_display()
+        if not dirty_names:
             return True
 
         msg = (
             f"{action_name} 前检测到未保存更改：\n"
-            + "\n".join([f" - {x}" for x in dirty])
+            + "\n".join([f" - {x}" for x in dirty_names])
             + "\n\n选择：\n"
               "【是】保存后继续\n"
               "【否】不保存继续\n"
@@ -650,24 +609,37 @@ class AppWindow(tb.Window):
 
         if res is None:
             return False
-        if res is False:
-            return True
-        if not self._save_all_dirty():
-            messagebox.showerror("保存失败", "部分页面保存失败，已取消操作。", parent=self)
-            return False
-        return True
 
-    def _update_global_dirty_indicator(self) -> None:
-        dirty = bool(self._dirty_pages())
-        title = self._base_title + (" *" if dirty else "")
+        if res is False:
+            try:
+                self._services.uow.rollback()
+                self._services.notify_dirty()
+            except Exception:
+                pass
+
+            try:
+                for key, page in self._pages.items():
+                    if hasattr(page, "set_context"):
+                        try:
+                            page.set_context(self._ctx)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return True
+
+        # Yes -> save
         try:
-            if self.title() != title:
-                self.title(title)
-        except Exception:
-            pass
+            parts = self._services.uow.dirty_parts()
+            if parts:
+                self._services.uow.commit(parts=set(parts), backup=bool(self._ctx.base.io.backup_on_save))
+            self._services.notify_dirty()
+            return True
+        except Exception as e:
+            messagebox.showerror("保存失败", f"保存失败：{e}", parent=self)
+            return False
 
     # ---------------- Status / Toast ----------------
-
     def set_status(self, text: str, *, ttl_ms: int | None = None) -> None:
         self._status.set_status(text)
         if self._status_after_id is not None:
@@ -693,13 +665,11 @@ class AppWindow(tb.Window):
             pass
 
     # ---------------- EventBus ----------------
-
     def _pump_events(self) -> None:
         self._bus.dispatch_pending(
             max_events=200,
             on_error=lambda ev, e: self.set_status(f"ERROR: handler failed ({ev.type.value}): {e}", ttl_ms=5000),
         )
-        # self._update_global_dirty_indicator()
         self.after(16, self._pump_events)
 
     def _on_theme_change(self, ev: Event) -> None:
@@ -729,8 +699,16 @@ class AppWindow(tb.Window):
         if isinstance(msg, str) and msg:
             self.set_status(msg, ttl_ms=2000)
 
-    # ---------------- Window persist ----------------
+    def _on_dirty_state_changed(self, ev: Event) -> None:
+        dirty = bool(ev.payload.get("dirty", False))
+        title = self._base_title + (" *" if dirty else "")
+        try:
+            if self.title() != title:
+                self.title(title)
+        except Exception:
+            pass
 
+    # ---------------- Window persist ----------------
     def _apply_initial_geometry(self) -> None:
         w = int(getattr(self._app_state.window, "width", 1100) or 1100)
         h = int(getattr(self._app_state.window, "height", 720) or 720)
@@ -745,7 +723,6 @@ class AppWindow(tb.Window):
         if not self._confirm_leave_context(action_name="退出程序"):
             return
 
-        # cancel pick session
         self._bus.post(EventType.PICK_CANCEL_REQUEST)
 
         try:
@@ -759,7 +736,6 @@ class AppWindow(tb.Window):
             except Exception:
                 pass
 
-        # destroy preview if any
         if self._preview is not None:
             try:
                 self._preview.destroy()
@@ -778,11 +754,3 @@ class AppWindow(tb.Window):
             pass
 
         self.destroy()
-    def _on_dirty_state_changed(self, ev: Event) -> None:
-        dirty = bool(ev.payload.get("dirty", False))
-        title = self._base_title + (" *" if dirty else "")
-        try:
-            if self.title() != title:
-                self.title(title)
-        except Exception:
-            pass

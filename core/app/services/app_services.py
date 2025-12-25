@@ -13,8 +13,9 @@ class AppServices:
         self.bus = bus
         self.uow = ProfileUnitOfWork(ctx)
 
-        self.skills = SkillsService(uow=self.uow)
-        self.points = PointsService(uow=self.uow)
+        # inject bus + notify callback, so services can publish domain/app events
+        self.skills = SkillsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
+        self.points = PointsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
 
     @property
     def ctx(self) -> ProfileContext:
