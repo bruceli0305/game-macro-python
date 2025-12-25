@@ -229,14 +229,18 @@ class AppWindow(tb.Window):
         self._nav.set_profiles(names, select)
 
     # ---------- pick capture spec mapping ----------
-    def _capture_spec_for_context(self, ctx: dict) -> tuple["SampleSpec", str]:
+    def _capture_spec_for_context(self, ctx_ref) -> tuple["SampleSpec", str]:
+        """
+        Step 7:
+        PickService.capture_spec_provider 入参改为 PickContextRef（不再使用 dict）。
+        """
         mon = (self._ctx.base.capture.monitor_policy or "primary")
         mode = "single"
         radius = 0
 
         try:
-            typ = ctx.get("type")
-            oid = ctx.get("id")
+            typ = getattr(ctx_ref, "type", None)
+            oid = getattr(ctx_ref, "id", None)
 
             if typ == "skill_pixel" and isinstance(oid, str):
                 for s in self._ctx.skills.skills:
@@ -257,7 +261,6 @@ class AppWindow(tb.Window):
             pass
 
         return SampleSpec(mode=mode, radius=radius), mon
-
     # ---------- dirty title ----------
     def _on_dirty_state_changed(self, ev: Event) -> None:
         p = ev.payload

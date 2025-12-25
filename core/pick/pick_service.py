@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from pynput import keyboard, mouse
 
@@ -22,9 +22,6 @@ from core.events.payloads import (
 from core.pick.capture import ScreenCapture, SampleSpec
 
 
-PickContext = Dict[str, Any]  # {"type":"skill_pixel"|"point", "id":"..."}
-
-
 @dataclass
 class PickConfig:
     delay_ms: int = 120
@@ -34,11 +31,10 @@ class PickConfig:
 
 class PickService:
     """
-    Strict typed events version + per-thread ScreenCapture lifecycle cleanup.
+    Strict typed events + per-thread ScreenCapture lifecycle cleanup.
 
-    Notes on ScreenCapture:
-    - ScreenCapture uses thread-local mss instance.
-    - We must close it inside each thread that uses it (preview thread + mouse listener thread).
+    Step 7 change:
+    - capture_spec_provider 入参从 dict 改为 PickContextRef（彻底去掉 pick 链路 dict 传递）
     """
 
     def __init__(
@@ -46,7 +42,7 @@ class PickService:
         *,
         bus: EventBus,
         pick_config_provider: Callable[[], PickConfig],
-        capture_spec_provider: Callable[[PickContext], Tuple[SampleSpec, str]],
+        capture_spec_provider: Callable[[PickContextRef], Tuple[SampleSpec, str]],
     ) -> None:
         self._bus = bus
         self._pick_config_provider = pick_config_provider
@@ -72,16 +68,11 @@ class PickService:
         self._bus.subscribe(EventType.PICK_CANCEL_REQUEST, self._on_pick_cancel)
 
     def close(self) -> None:
-        # stop session
         self.stop(reason="shutdown")
-        # close only current thread instance (best-effort)
         try:
             self._cap.close()
         except Exception:
             pass
-
-    def _ctx_dict(self, ref: PickContextRef) -> PickContext:
-        return {"type": ref.type, "id": ref.id}
 
     def _on_pick_request(self, ev: Event) -> None:
         p = ev.payload
@@ -201,7 +192,7 @@ class PickService:
 
     def _on_click(self, abs_x: int, abs_y: int, button, pressed: bool) -> None:
         """
-        NOTE: This callback runs in pynput mouse listener thread.
+        NOTE: runs in pynput mouse listener thread.
         We close ScreenCapture for this thread in finally.
         """
         try:
@@ -221,13 +212,10 @@ class PickService:
                 self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败: context 为空"))
                 return
 
-            ctx_dict = self._ctx_dict(ctx_ref)
-            sample, mon_req = self._capture_spec_provider(ctx_dict)
-
+            sample, mon_req = self._capture_spec_provider(ctx_ref)
             mon_used, inside = self._resolve_monitor(int(abs_x), int(abs_y), mon_req)
 
             r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
-
             rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon_used)
             hx = f"#{r:02X}{g:02X}{b:02X}"
 
@@ -258,7 +246,6 @@ class PickService:
                 from core.events.payloads import ErrorPayload
                 self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败", detail=str(e)))
         finally:
-            # close mss instance used by THIS listener thread
             try:
                 self._cap.close_current_thread()
             except Exception:
@@ -289,8 +276,7 @@ class PickService:
                     abs_x = int(abs_x)
                     abs_y = int(abs_y)
 
-                    ctx_dict = self._ctx_dict(ctx_ref)
-                    sample, mon_req = self._capture_spec_provider(ctx_dict)
+                    sample, mon_req = self._capture_spec_provider(ctx_ref)
                     mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
 
                     r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
@@ -328,7 +314,6 @@ class PickService:
 
                 time.sleep(max(0.005, float(cfg.preview_throttle_ms) / 1000.0))
         finally:
-            # close mss instance used by THIS preview thread
             try:
                 self._cap.close_current_thread()
             except Exception:

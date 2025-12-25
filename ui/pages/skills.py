@@ -110,6 +110,18 @@ class SkillsPage(PickNotebookCrudPage):
         super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
+        # Step 6: 切换 context 时，清掉 pending select & debounce，避免误选/误 apply
+        try:
+            self._cancel_pending_apply()
+        except Exception:
+            pass
+
+        try:
+            # RecordCrudPage 中的 Step 6 pending 选中机制
+            self._set_pending_select(None)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
         self._ctx = ctx
         self._current_id = None
         self.refresh_tree()

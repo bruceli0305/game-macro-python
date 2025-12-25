@@ -1,8 +1,9 @@
+# File: core/app/services/app_services.py
 from __future__ import annotations
 
-from typing import Set
+from typing import Set, Optional
 
-from core.app.uow import ProfileUnitOfWork
+from core.app.uow import ProfileUnitOfWork, Part
 from core.app.services.base_settings_service import BaseSettingsService
 from core.app.services.skills_service import SkillsService
 from core.app.services.points_service import PointsService
@@ -33,6 +34,55 @@ class AppServices:
         self._repair_ids_and_persist()
         self.notify_dirty()
 
+    # ---------- UoW state facade (Step 8) ----------
+    def dirty_parts(self) -> Set[Part]:
+        """
+        UI should use this instead of touching uow directly.
+        """
+        try:
+            return set(self.uow.dirty_parts())
+        except Exception:
+            return set()
+
+    def is_dirty(self) -> bool:
+        try:
+            return bool(self.uow.is_dirty())
+        except Exception:
+            return False
+
+    def save_dirty_cmd(self, *, backup: Optional[bool] = None, touch_meta: bool = True) -> bool:
+        """
+        Save all currently dirty parts.
+
+        Returns:
+          True if a commit was performed (parts were dirty), False if nothing to do.
+
+        Policy:
+        - backup defaults to ctx.base.io.backup_on_save when available
+        - touch_meta True for user-initiated saves (UnsavedGuard "Yes")
+        """
+        parts = self.dirty_parts()
+        if not parts:
+            return False
+
+        if backup is None:
+            try:
+                backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+            except Exception:
+                backup = True
+
+        self.uow.commit(parts=set(parts), backup=bool(backup), touch_meta=bool(touch_meta))
+        self.notify_dirty()
+        return True
+
+    def rollback_cmd(self) -> None:
+        """
+        Roll back in-memory changes to last snapshot.
+        """
+        self.uow.rollback()
+        self.notify_dirty()
+
+    # ---------- dirty broadcast ----------
     def notify_dirty(self) -> None:
         parts = sorted(list(self.uow.dirty_parts()))
         self.bus.post_payload(
@@ -78,7 +128,6 @@ class AppServices:
             backup = True
 
         try:
-            # commit accepts parts even if not marked dirty
             self.uow.commit(parts=set(changed_parts), backup=backup, touch_meta=False)
             # ensure UoW dirty cleared
             try:
