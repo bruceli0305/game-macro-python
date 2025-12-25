@@ -1,3 +1,4 @@
+# File: ui/pages/skills.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -7,10 +8,11 @@ from ttkbootstrap.constants import *
 from core.event_bus import EventBus
 from core.event_types import EventType
 from core.models.common import clamp_int
-from core.models.skill import Skill, ColorRGB
+from core.models.skill import Skill
 from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
 from core.events.payloads import ErrorPayload
+
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
 from ui.widgets.color_swatch import ColorSwatch
@@ -24,7 +26,17 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 
 class SkillsPage(PickNotebookCrudPage):
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services=None) -> None:
+    """
+    Step 4:
+    - dirty UI 由 UoW DIRTY_STATE_CHANGED 驱动（enable_uow_dirty_indicator）
+    - 表单变更 debounce -> services.skills.apply_form_patch(auto_save=False)
+    - 页面不再 mark/clear uow dirty
+    """
+
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
+        if services is None:
+            raise RuntimeError("SkillsPage requires services (cannot be None)")
+
         super().__init__(
             master,
             ctx=ctx,
@@ -48,6 +60,12 @@ class SkillsPage(PickNotebookCrudPage):
         self._services = services
         self._cap = ScreenCapture()
 
+        # Step 4: 绑定 dirty UI 到 UoW 的 skills part
+        self.enable_uow_dirty_indicator(part_key="skills")
+
+        # debounce apply
+        self._apply_after_id: str | None = None
+
         tab_basic = self.tabs["基本"]
         tab_pixel = self.tabs["像素"]
         tab_note = self.tabs["备注"]
@@ -60,7 +78,7 @@ class SkillsPage(PickNotebookCrudPage):
         self.var_readbar = tk.IntVar(value=0)
 
         self.var_monitor = tk.StringVar(value="primary")
-        # UI 使用 rel 坐标（可读性）
+        # UI 使用 rel 坐标
         self.var_x = tk.IntVar(value=0)
         self.var_y = tk.IntVar(value=0)
 
@@ -81,6 +99,11 @@ class SkillsPage(PickNotebookCrudPage):
 
     def destroy(self) -> None:
         try:
+            if self._apply_after_id is not None:
+                self.after_cancel(self._apply_after_id)
+        except Exception:
+            pass
+        try:
             self._cap.close()
         except Exception:
             pass
@@ -89,26 +112,7 @@ class SkillsPage(PickNotebookCrudPage):
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
         self._current_id = None
-        self.clear_dirty()
         self.refresh_tree()
-
-    # --- UoW dirty bridge ---
-    def clear_dirty(self) -> None:
-        super().clear_dirty()
-        if self._services is not None:
-            try:
-                self._services.uow.clear_dirty("skills")
-                self._services.notify_dirty()
-            except Exception:
-                pass
-
-    def clear_dirty(self) -> None:
-        super().clear_dirty()
-        if self._services is not None:
-            try:
-                self._services.uow.clear_dirty("skills")
-            except Exception:
-                pass
 
     # ----- RecordCrudPage hooks -----
     def _records(self) -> list:
@@ -116,42 +120,25 @@ class SkillsPage(PickNotebookCrudPage):
 
     def _save_to_disk(self) -> bool:
         try:
-            if self._services is not None:
-                self._services.skills.save(backup=self._ctx.base.io.backup_on_save)
-                self._services.notify_dirty()
-            else:
-                self._ctx.skills_repo.save(self._ctx.skills, backup=self._ctx.base.io.backup_on_save)
+            self._services.skills.save(backup=self._ctx.base.io.backup_on_save)
+            self._services.notify_dirty()
             return True
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"保存 skills.json 失败", detail=str(e)))
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存 skills.json 失败", detail=str(e)))
             return False
+
     def _make_new_record(self) -> Skill:
-        if self._services is not None:
-            return self._services.skills.create_skill_cmd(name="新技能")
-        # fallback
-        sid = self._ctx.idgen.next_id()
-        s = Skill(id=sid, name="新技能", enabled=True)
-        s.pixel.monitor = "primary"
-        s.pixel.vx = 0
-        s.pixel.vy = 0
-        return s
+        return self._services.skills.create_skill_cmd(name="新技能")
+
     def _clone_record(self, record: Skill) -> Skill:
-        if self._services is not None:
-            clone = self._services.skills.clone_skill_cmd(record.id)
-            if clone is not None:
-                return clone
-        # fallback
-        new_id = self._ctx.idgen.next_id()
-        clone = Skill.from_dict(record.to_dict())
-        clone.id = new_id
-        clone.name = f"{record.name} (副本)"
+        clone = self._services.skills.clone_skill_cmd(record.id)
+        if clone is None:
+            raise RuntimeError("clone_skill_cmd returned None")
         return clone
 
     def _delete_record_by_id(self, rid: str) -> None:
-        if self._services is not None:
-            self._services.skills.delete_skill_cmd(rid)
-            return
-        self._ctx.skills.skills = [x for x in self._ctx.skills.skills if x.id != rid]
+        self._services.skills.delete_skill_cmd(rid)
+
     def _record_id(self, record: Skill) -> str:
         return record.id
 
@@ -159,9 +146,8 @@ class SkillsPage(PickNotebookCrudPage):
         return record.name
 
     def _store_add_record(self, record) -> None:
-        # cmd 模式 service 已经 append 过；这里不重复 append
-        if self._services is None:
-            self._ctx.skills.skills.append(record)
+        # services 已 append；NO-OP
+        return
 
     def _record_row_values(self, s: Skill) -> tuple:
         sid = s.id or ""
@@ -184,6 +170,19 @@ class SkillsPage(PickNotebookCrudPage):
             str(s.pixel.tolerance),
             str(s.cast.readbar_ms),
         )
+
+    # ----- debounce apply helpers -----
+    def _cancel_pending_apply(self) -> None:
+        if self._apply_after_id is not None:
+            try:
+                self.after_cancel(self._apply_after_id)
+            except Exception:
+                pass
+            self._apply_after_id = None
+
+    def _schedule_apply(self) -> None:
+        self._cancel_pending_apply()
+        self._apply_after_id = self.after(200, lambda: self._apply_form_to_current(auto_save=False))
 
     # ----- form -----
     def _build_tab_basic(self, parent: tk.Misc) -> None:
@@ -209,8 +208,12 @@ class SkillsPage(PickNotebookCrudPage):
             parent.columnconfigure(c, weight=1)
 
         tb.Label(parent, text="屏幕").grid(row=0, column=0, sticky="w", pady=4)
-        tb.Combobox(parent, textvariable=self.var_monitor, values=["primary", "all", "monitor_1", "monitor_2"],
-                    state="readonly").grid(row=0, column=1, sticky="ew", pady=4)
+        tb.Combobox(
+            parent,
+            textvariable=self.var_monitor,
+            values=["primary", "all", "monitor_1", "monitor_2"],
+            state="readonly",
+        ).grid(row=0, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="X(rel)").grid(row=0, column=2, sticky="w", pady=4)
         tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(row=0, column=3, sticky="ew", pady=4)
@@ -231,8 +234,12 @@ class SkillsPage(PickNotebookCrudPage):
         tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_tol).grid(row=3, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="采样模式").grid(row=4, column=0, sticky="w", pady=4)
-        tb.Combobox(parent, textvariable=self.var_sample_mode, values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),
-                    state="readonly").grid(row=4, column=1, sticky="ew", pady=4)
+        tb.Combobox(
+            parent,
+            textvariable=self.var_sample_mode,
+            values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),
+            state="readonly",
+        ).grid(row=4, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="半径").grid(row=4, column=2, sticky="w", pady=4)
         tb.Spinbox(parent, from_=0, to=50, increment=1, textvariable=self.var_sample_radius).grid(
@@ -254,11 +261,11 @@ class SkillsPage(PickNotebookCrudPage):
         def on_any(*_args) -> None:
             if getattr(self, "_building_form", False):
                 return
-            self.mark_dirty()
             try:
                 self._swatch.set_rgb(self.var_r.get(), self.var_g.get(), self.var_b.get())
             except Exception:
                 pass
+            self._schedule_apply()
 
         for v in [
             self.var_name, self.var_enabled, self.var_trigger_key, self.var_readbar,
@@ -273,8 +280,8 @@ class SkillsPage(PickNotebookCrudPage):
             self._txt_note.edit_modified(False)
             return
         if self._txt_note.edit_modified():
-            self.mark_dirty()
             self._txt_note.edit_modified(False)
+            self._schedule_apply()
 
     def _clear_form(self) -> None:
         self._var_title.set("未选择")
@@ -339,12 +346,14 @@ class SkillsPage(PickNotebookCrudPage):
             self._building_form = False
 
     def _apply_form_to_current(self, *, auto_save: bool) -> bool:
+        # Step 4: 所有表单 apply 都视为内存更新（auto_save 应为 False）
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
 
+        self._cancel_pending_apply()
+
         sid = self._current_id
 
-        # UI -> vx/vy
         mon = (self.var_monitor.get() or "primary").strip() or "primary"
         rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
         rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
@@ -372,75 +381,22 @@ class SkillsPage(PickNotebookCrudPage):
             note=self._txt_note.get("1.0", "end").rstrip("\n"),
         )
 
-        if self._services is not None:
-            try:
-                changed, saved = self._services.skills.apply_form_patch(sid, patch, auto_save=bool(auto_save))
-            except Exception as e:
-                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"应用表单失败", detail=str(e)))
-                return False
+        try:
+            changed, _saved = self._services.skills.apply_form_patch(sid, patch, auto_save=False)
+        except Exception as e:
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
+            return False
 
-            if not changed:
-                # IMPORTANT: no change -> do not mark dirty
-                return True
-
+        if changed:
             self.update_tree_row(sid)
-            if saved:
-                self.clear_dirty()
-            else:
-                self.mark_dirty()
-            return True
-
         return True
-        
+
     def _find_skill(self, sid: str) -> Skill | None:
         for s in self._ctx.skills.skills:
             if s.id == sid:
                 return s
         return None
 
-    # ----- pick hook from PickNotebookCrudPage -----
-    def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
-        s = self._find_skill(rid)
-        if s is None:
-            return False
-
-        if "vx" in payload and "vy" in payload:
-            vx = int(payload.get("vx", 0))
-            vy = int(payload.get("vy", 0))
-        else:
-            vx = int(payload.get("abs_x", 0))
-            vy = int(payload.get("abs_y", 0))
-
-        r = clamp_int(int(payload.get("r", 0)), 0, 255)
-        g = clamp_int(int(payload.get("g", 0)), 0, 255)
-        b = clamp_int(int(payload.get("b", 0)), 0, 255)
-
-        s.pixel.vx, s.pixel.vy = vx, vy
-        mon = payload.get("monitor")
-        if isinstance(mon, str) and mon:
-            s.pixel.monitor = mon
-        s.pixel.color = ColorRGB(r=r, g=g, b=b)
-        return True
-
-    def _sync_form_after_pick(self, rid: str, payload: dict) -> None:
-        self._building_form = True
-        try:
-            self.var_x.set(int(payload.get("x", 0)))
-            self.var_y.set(int(payload.get("y", 0)))
-
-            r = clamp_int(int(payload.get("r", 0)), 0, 255)
-            g = clamp_int(int(payload.get("g", 0)), 0, 255)
-            b = clamp_int(int(payload.get("b", 0)), 0, 255)
-            self.var_r.set(r)
-            self.var_g.set(g)
-            self.var_b.set(b)
-            self._swatch.set_rgb(r, g, b)
-
-            mon = payload.get("monitor")
-            if isinstance(mon, str) and mon:
-                self.var_monitor.set(mon)
-        finally:
-            self._building_form = False
     def flush_to_model(self) -> None:
         try:
             self._apply_form_to_current(auto_save=False)

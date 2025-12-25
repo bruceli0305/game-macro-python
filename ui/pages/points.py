@@ -1,3 +1,4 @@
+# File: ui/pages/points.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -27,7 +28,17 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 
 class PointsPage(PickNotebookCrudPage):
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services=None) -> None:
+    """
+    Step 4:
+    - dirty UI 由 UoW DIRTY_STATE_CHANGED 驱动（enable_uow_dirty_indicator）
+    - 表单变更 debounce -> services.points.apply_form_patch(auto_save=False)
+    - 页面不再 mark/clear uow dirty
+    """
+
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
+        if services is None:
+            raise RuntimeError("PointsPage requires services (cannot be None)")
+
         super().__init__(
             master,
             ctx=ctx,
@@ -48,6 +59,12 @@ class PointsPage(PickNotebookCrudPage):
 
         self._services = services
         self._cap = ScreenCapture()
+
+        # Step 4: 绑定 dirty UI 到 UoW 的 points part
+        self.enable_uow_dirty_indicator(part_key="points")
+
+        # debounce apply
+        self._apply_after_id: str | None = None
 
         tab_basic = self.tabs["基本"]
         tab_color = self.tabs["颜色&采样"]
@@ -78,6 +95,11 @@ class PointsPage(PickNotebookCrudPage):
 
     def destroy(self) -> None:
         try:
+            if self._apply_after_id is not None:
+                self.after_cancel(self._apply_after_id)
+        except Exception:
+            pass
+        try:
             self._cap.close()
         except Exception:
             pass
@@ -86,27 +108,7 @@ class PointsPage(PickNotebookCrudPage):
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
         self._current_id = None
-        self.clear_dirty()
         self.refresh_tree()
-
-    # --- UoW dirty bridge ---
-    def mark_dirty(self) -> None:
-        super().mark_dirty()
-        if self._services is not None:
-            try:
-                self._services.uow.mark_dirty("points")
-                self._services.notify_dirty()
-            except Exception:
-                pass
-
-    def clear_dirty(self) -> None:
-        super().clear_dirty()
-        if self._services is not None:
-            try:
-                self._services.uow.clear_dirty("points")
-                self._services.notify_dirty()
-            except Exception:
-                pass
 
     # ----- RecordCrudPage hooks -----
     def _records(self) -> list:
@@ -114,55 +116,31 @@ class PointsPage(PickNotebookCrudPage):
 
     def _save_to_disk(self) -> bool:
         try:
-            if self._services is not None:
-                self._services.points.save(backup=self._ctx.base.io.backup_on_save)
-                self._services.notify_dirty()
-            else:
-                self._ctx.points_repo.save(self._ctx.points, backup=self._ctx.base.io.backup_on_save)
+            self._services.points.save(backup=self._ctx.base.io.backup_on_save)
+            self._services.notify_dirty()
             return True
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"保存 points.json 失败", detail=str(e)))
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存 points.json 失败", detail=str(e)))
             return False
+
     def _make_new_record(self) -> Point:
-        if self._services is not None:
-            return self._services.points.create_point_cmd(name="新点位")
+        return self._services.points.create_point_cmd(name="新点位")
 
-        pid = self._ctx.idgen.next_id()
-        p = Point(
-            id=pid,
-            name="新点位",
-            monitor="primary",
-            vx=0,
-            vy=0,
-            color=ColorRGB(0, 0, 0),
-            captured_at=now_iso_utc(),
-        )
-        p.sample.mode = "single"
-        p.sample.radius = 0
-        return p
     def _clone_record(self, record: Point) -> Point:
-        if self._services is not None:
-            clone = self._services.points.clone_point_cmd(record.id)
-            if clone is not None:
-                return clone
-
-        new_id = self._ctx.idgen.next_id()
-        clone = Point.from_dict(record.to_dict())
-        clone.id = new_id
-        clone.name = f"{record.name} (副本)"
-        clone.captured_at = now_iso_utc()
+        clone = self._services.points.clone_point_cmd(record.id)
+        if clone is None:
+            raise RuntimeError("clone_point_cmd returned None")
         return clone
+
     def _delete_record_by_id(self, rid: str) -> None:
-        if self._services is not None:
-            self._services.points.delete_point_cmd(rid)
-            return
-        self._ctx.points.points = [x for x in self._ctx.points.points if x.id != rid]
+        self._services.points.delete_point_cmd(rid)
+
     def _record_id(self, record: Point) -> str:
         return record.id
 
     def _store_add_record(self, record) -> None:
-        if self._services is None:
-            self._ctx.points.points.append(record)
+        # services 已 append；NO-OP
+        return
 
     def _record_title(self, record: Point) -> str:
         return record.name
@@ -180,6 +158,19 @@ class PointsPage(PickNotebookCrudPage):
         hx = rgb_to_hex(p.color.r, p.color.g, p.color.b)
         return (p.name, short, p.monitor, pos, hx, p.captured_at)
 
+    # ----- debounce apply helpers -----
+    def _cancel_pending_apply(self) -> None:
+        if self._apply_after_id is not None:
+            try:
+                self.after_cancel(self._apply_after_id)
+            except Exception:
+                pass
+            self._apply_after_id = None
+
+    def _schedule_apply(self) -> None:
+        self._cancel_pending_apply()
+        self._apply_after_id = self.after(200, lambda: self._apply_form_to_current(auto_save=False))
+
     # ----- form -----
     def _build_tab_basic(self, parent: tk.Misc) -> None:
         parent.columnconfigure(1, weight=1)
@@ -191,14 +182,22 @@ class PointsPage(PickNotebookCrudPage):
         tb.Entry(parent, textvariable=self.var_name).grid(row=1, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="屏幕").grid(row=2, column=0, sticky="w", pady=4)
-        tb.Combobox(parent, textvariable=self.var_monitor, values=["primary", "all", "monitor_1", "monitor_2"],
-                    state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
+        tb.Combobox(
+            parent,
+            textvariable=self.var_monitor,
+            values=["primary", "all", "monitor_1", "monitor_2"],
+            state="readonly",
+        ).grid(row=2, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="X(rel)").grid(row=3, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(row=3, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(
+            row=3, column=1, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="Y(rel)").grid(row=4, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(row=4, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(
+            row=4, column=1, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="captured_at").grid(row=5, column=0, sticky="w", pady=4)
         tb.Entry(parent, textvariable=self.var_captured_at).grid(row=5, column=1, sticky="ew", pady=4)
@@ -218,8 +217,12 @@ class PointsPage(PickNotebookCrudPage):
         tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(row=1, column=5, sticky="ew", pady=4)
 
         tb.Label(parent, text="采样模式").grid(row=2, column=0, sticky="w", pady=4)
-        tb.Combobox(parent, textvariable=self.var_sample_mode, values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),
-                    state="readonly").grid(row=2, column=1, sticky="ew", pady=4)
+        tb.Combobox(
+            parent,
+            textvariable=self.var_sample_mode,
+            values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),
+            state="readonly",
+        ).grid(row=2, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="半径").grid(row=2, column=2, sticky="w", pady=4)
         tb.Spinbox(parent, from_=0, to=50, increment=1, textvariable=self.var_sample_radius).grid(
@@ -245,11 +248,11 @@ class PointsPage(PickNotebookCrudPage):
         def on_any(*_args) -> None:
             if getattr(self, "_building_form", False):
                 return
-            self.mark_dirty()
             try:
                 self._swatch.set_rgb(self.var_r.get(), self.var_g.get(), self.var_b.get())
             except Exception:
                 pass
+            self._schedule_apply()
 
         for v in [
             self.var_name, self.var_monitor, self.var_x, self.var_y,
@@ -263,8 +266,8 @@ class PointsPage(PickNotebookCrudPage):
             self._txt_note.edit_modified(False)
             return
         if self._txt_note.edit_modified():
-            self.mark_dirty()
             self._txt_note.edit_modified(False)
+            self._schedule_apply()
 
     def _clear_form(self) -> None:
         self.set_header_title("未选择")
@@ -326,6 +329,8 @@ class PointsPage(PickNotebookCrudPage):
         if getattr(self, "_building_form", False) or not self._current_id:
             return True
 
+        self._cancel_pending_apply()
+
         pid = self._current_id
 
         mon = (self.var_monitor.get() or "primary").strip() or "primary"
@@ -352,82 +357,26 @@ class PointsPage(PickNotebookCrudPage):
             note=self._txt_note.get("1.0", "end").rstrip("\n"),
         )
 
-        if self._services is not None:
-            try:
-                changed, saved = self._services.points.apply_form_patch(pid, patch, auto_save=bool(auto_save))
-            except Exception as e:
-                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"应用表单失败", detail=str(e)))
-                return False
+        try:
+            changed, _saved = self._services.points.apply_form_patch(pid, patch, auto_save=False)
+        except Exception as e:
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
+            return False
 
-            if not changed:
-                return True
-
+        if changed:
             self.update_tree_row(pid)
-            if saved:
-                self.clear_dirty()
-            else:
-                self.mark_dirty()
-            return True
-
         return True
-        
+
     def _find_point(self, pid: str) -> Point | None:
         for p in self._ctx.points.points:
             if p.id == pid:
                 return p
         return None
 
-    # ----- pick hook -----
-    def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
-        p = self._find_point(rid)
-        if p is None:
-            return False
-
-        if "vx" in payload and "vy" in payload:
-            vx = int(payload.get("vx", 0))
-            vy = int(payload.get("vy", 0))
-        else:
-            vx = int(payload.get("abs_x", 0))
-            vy = int(payload.get("abs_y", 0))
-
-        r = clamp_int(int(payload.get("r", 0)), 0, 255)
-        g = clamp_int(int(payload.get("g", 0)), 0, 255)
-        b = clamp_int(int(payload.get("b", 0)), 0, 255)
-
-        p.vx, p.vy = vx, vy
-        mon = payload.get("monitor")
-        if isinstance(mon, str) and mon:
-            p.monitor = mon
-        p.color = ColorRGB(r=r, g=g, b=b)
-        p.captured_at = now_iso_utc()
-        return True
-
-    def _sync_form_after_pick(self, rid: str, payload: dict) -> None:
-        self._building_form = True
-        try:
-            self.var_x.set(int(payload.get("x", 0)))
-            self.var_y.set(int(payload.get("y", 0)))
-
-            r = clamp_int(int(payload.get("r", 0)), 0, 255)
-            g = clamp_int(int(payload.get("g", 0)), 0, 255)
-            b = clamp_int(int(payload.get("b", 0)), 0, 255)
-            self.var_r.set(r)
-            self.var_g.set(g)
-            self.var_b.set(b)
-            self._swatch.set_rgb(r, g, b)
-
-            self.var_captured_at.set(now_iso_utc())
-
-            mon = payload.get("monitor")
-            if isinstance(mon, str) and mon:
-                self.var_monitor.set(mon)
-        finally:
-            self._building_form = False
-
     def _touch_time(self) -> None:
         self.var_captured_at.set(now_iso_utc())
-        self.mark_dirty()
-        self._apply_form_to_current(auto_save=True)
+        self._schedule_apply()
+
     def flush_to_model(self) -> None:
         try:
             self._apply_form_to_current(auto_save=False)

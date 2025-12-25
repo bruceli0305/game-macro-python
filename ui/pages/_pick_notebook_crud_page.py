@@ -1,3 +1,4 @@
+# File: ui/pages/_pick_notebook_crud_page.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -7,7 +8,13 @@ import ttkbootstrap as tb
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload, PickRequestPayload, PickContextRef
+from core.events.payloads import (
+    RecordUpdatedPayload,
+    RecordDeletedPayload,
+    PickRequestPayload,
+    PickContextRef,
+    ErrorPayload,
+)
 from ui.pages._record_crud_page import RecordCrudPage
 from ui.widgets.scrollable_frame import ScrollableFrame
 
@@ -20,7 +27,7 @@ class PickNotebookCrudPage(RecordCrudPage):
     """
     - request_pick_current 发 PICK_REQUEST
     - UI 消费 RECORD_UPDATED/RECORD_DELETED 来刷新（严格 typed）
-    - _record_type_key() 返回 None：CRUD 事件由 services cmd 发布
+    - dirty 展示由 UoW DIRTY_STATE_CHANGED 驱动（本类不再 mark/clear dirty）
     """
 
     def __init__(
@@ -73,7 +80,10 @@ class PickNotebookCrudPage(RecordCrudPage):
                 ErrorPayload(msg=f"请先选择一个{self._record_noun}"),
             )
             return
+
+        # flush current form -> model (no auto-save)
         self._apply_form_to_current(auto_save=False)
+
         self._bus.post_payload(
             EventType.PICK_REQUEST,
             PickRequestPayload(
@@ -100,10 +110,7 @@ class PickNotebookCrudPage(RecordCrudPage):
             except Exception:
                 pass
 
-        if p.saved:
-            self.clear_dirty()
-        else:
-            self.mark_dirty()
+        # Step 4: dirty 不在这里处理（UoW 统一）
 
     def _on_record_deleted(self, ev: Event) -> None:
         p = ev.payload
@@ -127,7 +134,4 @@ class PickNotebookCrudPage(RecordCrudPage):
         if is_current:
             self._select_first_if_any()
 
-        if p.saved:
-            self.clear_dirty()
-        else:
-            self.mark_dirty()
+        # Step 4: dirty 不在这里处理（UoW 统一）

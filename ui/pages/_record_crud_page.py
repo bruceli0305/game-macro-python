@@ -1,3 +1,4 @@
+# File: ui/pages/_record_crud_page.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -5,13 +6,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import ttkbootstrap as tb
-from ttkbootstrap.constants import LEFT, X
+from ttkbootstrap.constants import LEFT
 from tkinter import messagebox
 
-from core.event_bus import EventBus
+from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import InfoPayload, ErrorPayload, RecordUpdatedPayload, RecordDeletedPayload
-
+from core.events.payloads import InfoPayload, ErrorPayload, RecordUpdatedPayload, RecordDeletedPayload, DirtyStateChangedPayload
 
 
 @dataclass
@@ -24,15 +24,10 @@ class ColumnDef:
 
 class RecordCrudPage(tb.Frame):
     """
-    CRUD 基类（增量版）：
-    - 新增/复制：Treeview 直接 insert 新行（不再全量 refresh_tree）
-    - 删除：Treeview 直接 delete 行，并选择相邻行
-    - 仍保留 refresh_tree 作为兜底/外部调用接口
-
-    事件：
-      - RECORD_UPDATED（新增/复制/自动保存后）
-      - RECORD_DELETED（删除/自动保存后）
-    子类若想参与事件发布：覆盖 _record_type_key()
+    Step 4 change (核心)：
+    - 页面不再自行维护“dirty 真相”
+    - dirty UI（未保存* + 保存按钮高亮）只作为“展示层”，由 UoW 的 DIRTY_STATE_CHANGED 驱动
+    - 所有数据变更应由 services 标记 UoW dirty（页面不再 mark/clear uow）
     """
 
     def __init__(
@@ -54,7 +49,10 @@ class RecordCrudPage(tb.Frame):
 
         self._current_id: str | None = None
         self._suppress_select = False
-        self._dirty_disk = False
+
+        # dirty UI state (VIEW ONLY, derived from UoW)
+        self._dirty_ui = False
+        self._uow_part_key: str | None = None
 
         # layout
         self.columnconfigure(0, weight=0)
@@ -111,10 +109,48 @@ class RecordCrudPage(tb.Frame):
 
         self._update_dirty_ui()
 
-    # ---------- public ----------
-    def is_dirty(self) -> bool:
-        return bool(self._dirty_disk)
+    # ---------- dirty UI (VIEW ONLY) ----------
+    def enable_uow_dirty_indicator(self, *, part_key: str) -> None:
+        """
+        Bind this page's dirty UI to UoW dirty parts via DIRTY_STATE_CHANGED.
+        part_key: "skills" | "points" | "base" ...
+        """
+        self._uow_part_key = str(part_key)
+        self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
+    def _on_dirty_state_changed(self, ev: Event) -> None:
+        p = ev.payload
+        if not isinstance(p, DirtyStateChangedPayload):
+            return
+        key = self._uow_part_key
+        if not key:
+            return
+        parts = set(p.parts or [])
+        self._set_dirty_ui(key in parts)
+
+    def _set_dirty_ui(self, flag: bool) -> None:
+        self._dirty_ui = bool(flag)
+        self._update_dirty_ui()
+
+    def is_dirty(self) -> bool:
+        # 展示层 dirty（从 UoW 来）
+        return bool(self._dirty_ui)
+
+    def _update_dirty_ui(self) -> None:
+        self._var_dirty.set("未保存*" if self._dirty_ui else "")
+        try:
+            self._btn_save.configure(bootstyle="warning" if self._dirty_ui else "")
+        except Exception:
+            pass
+
+    # 兼容旧调用：保留但仅影响 UI（不再触碰 UoW）
+    def mark_dirty(self) -> None:
+        self._set_dirty_ui(True)
+
+    def clear_dirty(self) -> None:
+        self._set_dirty_ui(False)
+
+    # ---------- public ----------
     @property
     def current_id(self) -> str | None:
         return self._current_id
@@ -122,23 +158,7 @@ class RecordCrudPage(tb.Frame):
     def set_header_title(self, text: str) -> None:
         self._var_title.set(text)
 
-    # ---------- dirty ----------
-    def mark_dirty(self) -> None:
-        self._dirty_disk = True
-        self._update_dirty_ui()
-
-    def clear_dirty(self) -> None:
-        self._dirty_disk = False
-        self._update_dirty_ui()
-
-    def _update_dirty_ui(self) -> None:
-        self._var_dirty.set("未保存*" if self._dirty_disk else "")
-        try:
-            self._btn_save.configure(bootstyle="warning" if self._dirty_disk else "")
-        except Exception:
-            pass
-
-    # ---------- event hook ----------
+    # ---------- event hook (保留，但 PickNotebookCrudPage 会返回 None) ----------
     def _record_type_key(self) -> str | None:
         return None
 
@@ -183,7 +203,6 @@ class RecordCrudPage(tb.Frame):
             if self._tv.exists(rid):
                 self._tv.item(rid, values=self._record_row_values(r))
             else:
-                # row missing -> insert
                 self._tv.insert("", "end", iid=rid, values=self._record_row_values(r))
         except Exception:
             pass
@@ -198,7 +217,6 @@ class RecordCrudPage(tb.Frame):
             else:
                 self._tv.insert("", "end", iid=rid, values=vals)
         except Exception:
-            # fallback: full refresh
             self.refresh_tree()
 
     def _delete_row(self, rid: str) -> None:
@@ -206,7 +224,6 @@ class RecordCrudPage(tb.Frame):
             if self._tv.exists(rid):
                 self._tv.delete(rid)
         except Exception:
-            # fallback
             self.refresh_tree()
 
     def _select_first_if_any(self) -> None:
@@ -228,16 +245,12 @@ class RecordCrudPage(tb.Frame):
         self._load_into_form(rid)
 
     def _select_after_delete(self) -> None:
-        """
-        After deleting current selection, pick a reasonable next selection.
-        """
         items = self._tv.get_children()
         if not items:
             self._current_id = None
             self._var_title.set("未选择")
             self._clear_form()
             return
-        # pick first item
         self._select_id(items[0])
 
     def _on_select(self, _evt=None) -> None:
@@ -250,8 +263,9 @@ class RecordCrudPage(tb.Frame):
         if self._current_id == rid:
             return
 
+        # Step 3/4: 离开旧记录只 flush 到内存（由 services 标记 dirty）
         if self._current_id is not None:
-            self._apply_form_to_current(auto_save=True)
+            self._apply_form_to_current(auto_save=False)
 
         self._load_into_form(rid)
 
@@ -264,23 +278,18 @@ class RecordCrudPage(tb.Frame):
 
     # ---------- CRUD ----------
     def _on_add(self) -> None:
-        self._apply_form_to_current(auto_save=True)
+        self._apply_form_to_current(auto_save=False)
 
         rec = self._make_new_record()
         self._store_add_record(rec)
         rid = self._record_id(rec)
 
-        # incremental insert + select
         if rid:
             self._insert_row_from_record(rid, rec)
             self._select_id(rid)
         else:
             self.refresh_tree()
 
-        self.mark_dirty()
-        saved = self._auto_save_if_needed()
-
-        self._post_record_updated(rid, source="crud_add", saved=saved)
         self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已新增{self._record_noun}: {rid[-6:] if rid else ''}"))
 
     def _on_duplicate(self) -> None:
@@ -289,7 +298,7 @@ class RecordCrudPage(tb.Frame):
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"请先选择要复制的{self._record_noun}"))
             return
 
-        self._apply_form_to_current(auto_save=True)
+        self._apply_form_to_current(auto_save=False)
 
         rid = sel[0]
         src = self._find_record_by_id(rid)
@@ -299,7 +308,6 @@ class RecordCrudPage(tb.Frame):
 
         clone = self._clone_record(src)
         self._store_add_record(clone)
-
         new_id = self._record_id(clone)
 
         if new_id:
@@ -308,10 +316,6 @@ class RecordCrudPage(tb.Frame):
         else:
             self.refresh_tree()
 
-        self.mark_dirty()
-        saved = self._auto_save_if_needed()
-
-        self._post_record_updated(new_id, source="crud_duplicate", saved=saved)
         self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已复制{self._record_noun}: {new_id[-6:] if new_id else ''}"))
 
     def _on_delete(self) -> None:
@@ -336,39 +340,22 @@ class RecordCrudPage(tb.Frame):
 
         self._store_delete_record(rid)
 
-        # incremental delete
         is_current = (self._current_id == rid)
         self._delete_row(rid)
         if is_current:
             self._select_after_delete()
 
-        self.mark_dirty()
-        saved = self._auto_save_if_needed()
-
-        self._post_record_deleted(rid, source="crud_delete", saved=saved)
         self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已删除{self._record_noun}: {rid[-6:]}"))
 
     def _on_save_clicked(self) -> None:
         if not self._apply_form_to_current(auto_save=False):
             return
         if self._save_to_disk():
-            self.clear_dirty()
-
+            # Step 4: dirty UI 不在这里手动 clear；等待 UoW 的 DIRTY_STATE_CHANGED
             rid = self.current_id
             if isinstance(rid, str) and rid:
                 self._post_record_updated(rid, source="manual_save", saved=True)
-
             self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"{self._record_noun}已保存"))
-
-    def _auto_save_if_needed(self) -> bool:
-        try:
-            if bool(self._ctx.base.io.auto_save):
-                if self._save_to_disk():
-                    self.clear_dirty()
-                    return True
-        except Exception:
-            pass
-        return False
 
     # ---------- record lookup ----------
     def _find_record_by_id(self, rid: str) -> Any | None:

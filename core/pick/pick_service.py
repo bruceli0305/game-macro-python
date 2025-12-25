@@ -1,3 +1,4 @@
+# File: core/pick/pick_service.py
 from __future__ import annotations
 
 import threading
@@ -85,8 +86,6 @@ class PickService:
     def _on_pick_request(self, ev: Event) -> None:
         p = ev.payload
         if not isinstance(p, PickRequestPayload):
-            self._bus.post_payload(EventType.ERROR, None)  # will be rejected by registry if ERROR expects payload
-            # Use typed ERROR instead:
             from core.events.payloads import ErrorPayload
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST payload 类型错误"))
             return

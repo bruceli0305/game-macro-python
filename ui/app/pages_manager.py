@@ -1,3 +1,4 @@
+# File: ui/app/pages_manager.py
 from __future__ import annotations
 
 import logging
@@ -19,12 +20,16 @@ log = logging.getLogger(__name__)
 
 class PagesManager:
     def __init__(self, *, master: tk.Misc, ctx: ProfileContext, bus: EventBus, services: AppServices) -> None:
+        if services is None:
+            raise RuntimeError("PagesManager requires AppServices (services cannot be None)")
+
         self._master = master
         self._ctx = ctx
         self._bus = bus
         self._services = services
         self.pages: Dict[str, tb.Frame] = {}
 
+        # Step 2: pages now REQUIRE services
         self.pages["base"] = BaseSettingsPage(master, ctx=ctx, bus=bus, services=services)
         self.pages["skills"] = SkillsPage(master, ctx=ctx, bus=bus, services=services)
         self.pages["points"] = PointsPage(master, ctx=ctx, bus=bus, services=services)
@@ -51,18 +56,12 @@ class PagesManager:
     def flush_all(self) -> None:
         """
         Flush UI -> model before saves/switch.
-        Priority: flush_to_model() then legacy _apply_form_to_current()
+        Priority: flush_to_model()
+        (Legacy _apply_form_to_current fallback is intentionally removed in Step 2.)
         """
         for k, p in self.pages.items():
             if hasattr(p, "flush_to_model"):
                 try:
                     p.flush_to_model()  # type: ignore[attr-defined]
-                    continue
                 except Exception:
                     log.exception("PagesManager.flush_to_model failed on page=%s", k)
-
-            if hasattr(p, "_apply_form_to_current"):
-                try:
-                    p._apply_form_to_current(auto_save=False)  # type: ignore[attr-defined]
-                except Exception:
-                    log.exception("PagesManager._apply_form_to_current flush failed on page=%s", k)

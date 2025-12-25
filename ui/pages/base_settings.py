@@ -1,3 +1,4 @@
+# File: ui/pages/base_settings.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -5,15 +6,15 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from tkinter import messagebox
 
-from core.event_bus import EventBus
+from core.event_bus import EventBus, Event
 from core.event_types import EventType
 from core.models.common import clamp_int
 from core.profiles import ProfileContext
 from core.app.services.base_settings_service import BaseSettingsPatch
-from ui.widgets.hotkey_entry import HotkeyEntry
-from core.events.payloads import InfoPayload, ErrorPayload
+from core.events.payloads import InfoPayload, ErrorPayload, DirtyStateChangedPayload
 
-from core.models.base import BaseFile
+from ui.widgets.hotkey_entry import HotkeyEntry
+
 
 _DARK_THEMES = ["darkly", "superhero", "cyborg", "solar", "vapor"]
 _LIGHT_THEMES = ["flatly", "litera", "cosmo", "journal", "minty", "lumen", "pulse", "sandstone", "simplex", "yeti"]
@@ -44,14 +45,29 @@ _ANCHOR_VAL_TO_DISP = {v: k for k, v in _ANCHOR_DISP_TO_VAL.items()}
 
 
 class BaseSettingsPage(tb.Frame):
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services=None) -> None:
+    """
+    Step 4:
+    - dirty 展示只跟随 UoW（DIRTY_STATE_CHANGED）
+    - 变更时 debounce 调 service.apply_patch，让 service 标记 dirty
+    - 页面不再直接 mark/clear uow dirty
+    """
+
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
         super().__init__(master)
+        if services is None:
+            raise RuntimeError("BaseSettingsPage requires services (cannot be None)")
+
         self._ctx = ctx
         self._bus = bus
         self._services = services
 
         self._building = False
-        self._dirty = False
+
+        # dirty UI state (VIEW ONLY)
+        self._dirty_ui = False
+
+        # debounce apply
+        self._apply_after_id: str | None = None
 
         self.columnconfigure(0, weight=1)
 
@@ -99,24 +115,32 @@ class BaseSettingsPage(tb.Frame):
         tb.Button(btns, text="重新加载(放弃未保存)", command=self._on_reload).pack(side=RIGHT, padx=(0, 8))
 
         self._install_dirty_watchers()
-        self._set_dirty(False)
+
+        # Step 4: dirty UI 来自 UoW
+        self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
+        self._set_dirty_ui(False)
+
+    def _set_dirty_ui(self, flag: bool) -> None:
+        self._dirty_ui = bool(flag)
+        self._var_dirty.set("未保存*" if self._dirty_ui else "")
 
     def is_dirty(self) -> bool:
-        return bool(self._dirty)
+        return bool(self._dirty_ui)
 
-    # --- standardized flush (no validation) ---
+    def _on_dirty_state_changed(self, ev: Event) -> None:
+        p = ev.payload
+        if not isinstance(p, DirtyStateChangedPayload):
+            return
+        parts = set(p.parts or [])
+        self._set_dirty_ui("base" in parts)
+
+    # --- standardized flush (best-effort) ---
     def flush_to_model(self) -> None:
         if self._building:
             return
-        if self._services is None:
-            return
-
-        patch = self._collect_patch()
         try:
-            # apply without saving (may raise validation error; ignore here)
-            self._services.base.apply_patch(patch)
+            self._apply_now()
         except Exception:
-            # flush should not block leave-confirm; we keep model best-effort
             pass
 
     def _collect_patch(self) -> BaseSettingsPatch:
@@ -152,9 +176,6 @@ class BaseSettingsPage(tb.Frame):
             pass
 
     def _apply_hotkey_error(self, msg: str) -> None:
-        """
-        Parse service ValueError messages and highlight the correct field.
-        """
         s = (msg or "").strip()
         self._clear_hotkey_errors()
 
@@ -173,7 +194,6 @@ class BaseSettingsPage(tb.Frame):
             return
 
         if s.startswith("hotkeys:"):
-            # conflict: highlight both
             detail = s.split(":", 1)[1].strip()
             try:
                 self._hk_enter.set_error(detail)
@@ -182,24 +202,41 @@ class BaseSettingsPage(tb.Frame):
                 pass
 
     def _validate_hotkeys_live(self) -> None:
-        """
-        Live validation (best-effort). Only runs when services injected.
-        """
-        if self._services is None:
-            return
         try:
             patch = self._collect_patch()
             self._services.base.validate_patch(patch)
             self._clear_hotkey_errors()
         except Exception as e:
             self._apply_hotkey_error(str(e))
-    # ---------------- dirty ----------------
+
+    def _schedule_apply(self) -> None:
+        if self._apply_after_id is not None:
+            try:
+                self.after_cancel(self._apply_after_id)
+            except Exception:
+                pass
+            self._apply_after_id = None
+        self._apply_after_id = self.after(200, self._apply_now)
+
+    def _apply_now(self) -> None:
+        self._apply_after_id = None
+        if self._building:
+            return
+        patch = self._collect_patch()
+        try:
+            # apply_patch 内部会 mark UoW dirty + notify_dirty（如果有变化）
+            self._services.base.apply_patch(patch)
+        except Exception:
+            # 输入中间态可能不合法（热键），不阻断 UI
+            return
+
+    # ---------------- watchers ----------------
     def _install_dirty_watchers(self) -> None:
         def on_any(*_args) -> None:
             if self._building:
                 return
-            self._set_dirty(True)
             self._validate_hotkeys_live()
+            self._schedule_apply()
 
         for v in [
             self.var_theme,
@@ -216,20 +253,6 @@ class BaseSettingsPage(tb.Frame):
             self.var_backup,
         ]:
             v.trace_add("write", on_any)
-
-    def _set_dirty(self, flag: bool) -> None:
-        self._dirty = bool(flag)
-        self._var_dirty.set("未保存*" if self._dirty else "")
-
-        if self._services is not None:
-            try:
-                if self._dirty:
-                    self._services.uow.mark_dirty("base")
-                else:
-                    self._services.uow.clear_dirty("base")
-                self._services.notify_dirty()
-            except Exception:
-                pass
 
     # ---------------- UI groups ----------------
     def _build_ui_group(self, master: tb.Frame) -> None:
@@ -254,9 +277,11 @@ class BaseSettingsPage(tb.Frame):
         tb.Label(lf, text="热键：进入取色").grid(row=2, column=0, sticky="w", pady=4)
         self._hk_enter = HotkeyEntry(lf, textvariable=self.var_hotkey_enter_pick)
         self._hk_enter.grid(row=2, column=1, sticky="ew", pady=4)
+
         tb.Label(lf, text="热键：取消取色").grid(row=3, column=0, sticky="w", pady=4)
         self._hk_cancel = HotkeyEntry(lf, textvariable=self.var_hotkey_cancel_pick)
         self._hk_cancel.grid(row=3, column=1, sticky="ew", pady=4)
+
     def _build_pick_group(self, master: tb.Frame) -> None:
         lf = tb.Labelframe(master, text="取色避让", padding=10)
         lf.grid(row=0, column=1, sticky="nsew")
@@ -332,63 +357,24 @@ class BaseSettingsPage(tb.Frame):
             self.var_backup.set(bool(b.io.backup_on_save))
         finally:
             self._building = False
-        self._set_dirty(False)
+        self._validate_hotkeys_live()
+        # dirty UI 会被 DIRTY_STATE_CHANGED 同步，无需手动设置
 
     # ---------------- actions ----------------
     def _on_reload(self) -> None:
-        if self._services is None:
-            # fallback legacy behavior
-            try:
-                self._ctx.base = self._ctx.base_repo.load_or_create()
-                self.set_context(self._ctx)
-                self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
-            except Exception as e:
-                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"重新加载失败", detail=str(e)))
-            return
-
         try:
             self._services.base.reload_cmd()
             self.set_context(self._services.ctx)
-            self._set_dirty(False)
+            self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"重新加载失败", detail=str(e)))
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="重新加载失败", detail=str(e)))
 
     def _on_save(self) -> None:
         patch = self._collect_patch()
-
-        if self._services is None:
-            messagebox.showerror("保存失败", "services 未注入", parent=self.winfo_toplevel())
-            return
-
         try:
             self._services.base.save_cmd(patch)
-            self._set_dirty(False)
+            self._bus.post_payload(EventType.INFO, InfoPayload(msg="base.json 已保存"))
         except Exception as e:
             self._apply_hotkey_error(str(e))
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"保存失败", detail=str(e)))
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存失败", detail=str(e)))
             messagebox.showerror("保存失败", f"{e}", parent=self.winfo_toplevel())
-    def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
-        # theme
-        theme = (patch.theme or "").strip()
-        if theme == "---" or not theme:
-            theme = "darkly"
-        b.ui.theme = theme
-
-        # capture
-        b.capture.monitor_policy = (patch.monitor_policy or "primary").strip() or "primary"
-
-        # hotkeys（已在 validate_patch 校验）
-        b.hotkeys.enter_pick_mode = (patch.hotkey_enter_pick or "").strip()
-        b.hotkeys.cancel_pick = (patch.hotkey_cancel_pick or "").strip()
-
-        # avoidance
-        av = b.pick.avoidance
-        av.mode = (patch.avoid_mode or "hide_main").strip() or "hide_main"
-        av.delay_ms = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
-        av.preview_follow_cursor = bool(patch.preview_follow)
-        av.preview_offset = (int(patch.preview_offset_x), int(patch.preview_offset_y))
-        av.preview_anchor = (patch.preview_anchor or "bottom_right").strip() or "bottom_right"
-
-        # io
-        b.io.auto_save = bool(patch.auto_save)
-        b.io.backup_on_save = bool(patch.backup_on_save)
