@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 from core.app.services.app_services import AppServices
 from core.event_bus import EventBus
 from core.event_types import EventType
+from core.events.payloads import ProfileChangedPayload, ProfileListChangedPayload
 from core.profiles import ProfileContext, ProfileManager
 
 
@@ -19,10 +20,9 @@ class ProfileService:
     """
     Application service for profile operations.
 
-    Responsibilities:
-    - delegate filesystem operations to ProfileManager
-    - bind result context into AppServices (uow/services)
-    - publish PROFILE_* events for UI/others
+    - delegates filesystem ops to ProfileManager
+    - binds result context into AppServices (uow/services)
+    - publishes STRICT typed PROFILE_* events via post_payload
     """
 
     def __init__(self, *, pm: ProfileManager, services: AppServices, bus: EventBus) -> None:
@@ -38,12 +38,23 @@ class ProfileService:
 
     def _publish_list_changed(self, *, current: str) -> None:
         names = self.list_profiles()
-        self._bus.post(EventType.PROFILE_LIST_CHANGED, names=names, current=current)
+        self._bus.post_payload(
+            EventType.PROFILE_LIST_CHANGED,
+            ProfileListChangedPayload(names=names, current=current),
+        )
+
+    def _publish_changed(self, *, name: str) -> None:
+        self._bus.post_payload(
+            EventType.PROFILE_CHANGED,
+            ProfileChangedPayload(name=name),
+        )
 
     def _bind_ctx(self, ctx: ProfileContext) -> None:
         # bind into AppServices/UoW
         self._services.set_context(ctx)
-        self._bus.post(EventType.PROFILE_CHANGED, name=ctx.profile_name)
+
+        # publish typed events
+        self._publish_changed(name=ctx.profile_name)
         self._publish_list_changed(current=ctx.profile_name)
 
     # -------- open/switch --------
@@ -52,7 +63,7 @@ class ProfileService:
         self._bind_ctx(ctx)
         return ProfileResult(ctx=ctx, names=self.list_profiles())
 
-    # -------- CRUD-ish ops --------
+    # -------- create/copy/rename/delete --------
     def create_and_bind(self, name: str) -> ProfileResult:
         ctx = self._pm.create_profile(name)
         self._bind_ctx(ctx)
@@ -73,7 +84,6 @@ class ProfileService:
         Delete a profile, then bind to fallback profile (pm decides last/fallback).
         """
         self._pm.delete_profile(name)
-        # ProfileManager.delete_profile may set pm.current; otherwise fallback
         ctx = self._pm.current or self._pm.open_last_or_fallback()
         self._bind_ctx(ctx)
         return ProfileResult(ctx=ctx, names=self.list_profiles())
