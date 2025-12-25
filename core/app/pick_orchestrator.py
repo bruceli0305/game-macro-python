@@ -4,25 +4,24 @@ from typing import Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.utils import pick_confirmed_from_payload
+from core.events.payloads import PickConfirmedPayload
 from core.app.services.app_services import AppServices
 
 
 class PickOrchestrator:
     """
-    Application-level handler for pick results.
-    Now consumes typed PickConfirmedPayload (still accepts dict for compatibility).
+    Application-level handler for pick results (STRICT typed payload).
     """
 
     def __init__(self, *, bus: EventBus, services: AppServices) -> None:
         self._bus = bus
         self._services = services
-
         self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed)
 
     def _on_pick_confirmed(self, ev: Event) -> None:
-        p = pick_confirmed_from_payload(ev.payload)
-        if p is None:
+        p = ev.payload
+        if not isinstance(p, PickConfirmedPayload):
+            # strict: ignore unexpected payload
             return
 
         typ = p.context.type
@@ -75,14 +74,8 @@ class PickOrchestrator:
             except Exception:
                 pass
 
-        # UI refresh
-        self._bus.post(
-            EventType.RECORD_UPDATED,
-            record_type=typ,
-            id=rid,
-            source="pick",
-            saved=bool(saved),
-        )
+        # UI refresh event (EventBus.post will build typed payload via registry/builder)
+        self._bus.post(EventType.RECORD_UPDATED, record_type=typ, id=rid, source="pick", saved=bool(saved))
 
         # feedback
         if p.hex:

@@ -15,7 +15,7 @@ from core.app.services.profile_service import ProfileService
 from core.app.pick_orchestrator import PickOrchestrator
 from core.input.global_hotkeys import HotkeyConfig
 
-from core.events.utils import dirty_state_from_payload
+from core.events.payloads import DirtyStateChangedPayload
 # optional pick engine
 try:
     from core.pick.pick_service import PickService, PickConfig
@@ -254,8 +254,10 @@ class AppWindow(tb.Window):
 
     # ---------- dirty title ----------
     def _on_dirty_state_changed(self, ev: Event) -> None:
-        dirty, _parts = dirty_state_from_payload(ev.payload)
-        title = self._base_title + (" *" if dirty else "")
+        p = ev.payload
+        if not isinstance(p, DirtyStateChangedPayload):
+            return
+        title = self._base_title + (" *" if p.dirty else "")
         try:
             if self.title() != title:
                 self.title(title)

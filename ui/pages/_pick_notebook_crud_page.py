@@ -7,8 +7,7 @@ import ttkbootstrap as tb
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.utils import record_updated_from_payload, record_deleted_from_payload
-
+from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload
 from ui.pages._record_crud_page import RecordCrudPage
 from ui.widgets.scrollable_frame import ScrollableFrame
 
@@ -20,8 +19,8 @@ SAMPLE_VALUE_TO_DISPLAY = {v: k for k, v in SAMPLE_DISPLAY_TO_VALUE.items()}
 class PickNotebookCrudPage(RecordCrudPage):
     """
     - request_pick_current 发 PICK_REQUEST
-    - UI 消费 RECORD_UPDATED/RECORD_DELETED 来刷新（增量）
-    - _record_type_key() 返回 None，避免基类重复发布 CRUD 事件（由 service cmd 发布）
+    - UI 消费 RECORD_UPDATED/RECORD_DELETED 来刷新（严格 typed）
+    - _record_type_key() 返回 None：CRUD 事件由 services cmd 发布
     """
 
     def __init__(
@@ -65,7 +64,6 @@ class PickNotebookCrudPage(RecordCrudPage):
         self._bus.subscribe(EventType.RECORD_DELETED, self._on_record_deleted)
 
     def _record_type_key(self) -> str | None:
-        # CRUD 事件由 Application Service 的 *_cmd() 发布，基类不再重复发布
         return None
 
     def request_pick_current(self) -> None:
@@ -76,11 +74,12 @@ class PickNotebookCrudPage(RecordCrudPage):
         self._bus.post(EventType.PICK_REQUEST, context={"type": self._pick_context_type, "id": self.current_id})
 
     def _on_record_updated(self, ev: Event) -> None:
-        p = record_updated_from_payload(ev.payload)
-        if p is None:
+        p = ev.payload
+        if not isinstance(p, RecordUpdatedPayload):
             return
         if p.record_type != self._pick_context_type:
             return
+
         rid = p.id
         if not rid:
             return
@@ -98,18 +97,19 @@ class PickNotebookCrudPage(RecordCrudPage):
         else:
             self.mark_dirty()
 
-
     def _on_record_deleted(self, ev: Event) -> None:
-        p = record_deleted_from_payload(ev.payload)
-        if p is None:
+        p = ev.payload
+        if not isinstance(p, RecordDeletedPayload):
             return
         if p.record_type != self._pick_context_type:
             return
+
         rid = p.id
         if not rid:
             return
 
         is_current = (self.current_id == rid)
+
         try:
             if self._tv.exists(rid):
                 self._tv.delete(rid)
@@ -123,9 +123,3 @@ class PickNotebookCrudPage(RecordCrudPage):
             self.clear_dirty()
         else:
             self.mark_dirty()
-    # legacy hooks retained (not used by pick flow now)
-    def _apply_pick_payload_to_model(self, rid: str, payload: dict) -> bool:
-        raise NotImplementedError
-
-    def _sync_form_after_pick(self, rid: str, payload: dict) -> None:
-        return

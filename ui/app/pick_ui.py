@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.utils import pick_preview_from_payload
+from core.events.payloads import PickPreviewPayload, PickModeEnteredPayload, PickModeExitedPayload, PickCanceledPayload
 from ui.pick_preview_window import PickPreviewWindow
 
 
@@ -14,6 +14,7 @@ class PickUiController:
     Handles only the UI/UX part of pick mode:
     - avoidance (hide/minimize/move_aside/none)
     - preview window show/move/update
+    STRICT typed event payloads.
     """
 
     def __init__(self, *, root: tk.Misc, bus: EventBus, ctx_provider: Callable[[], object]) -> None:
@@ -22,7 +23,6 @@ class PickUiController:
         self._ctx_provider = ctx_provider
 
         self._preview: Optional[PickPreviewWindow] = None
-        self._pick_active = False
         self._prev_geo: str | None = None
         self._prev_state: str | None = None
         self._avoid_mode_applied: str | None = None
@@ -140,8 +140,9 @@ class PickUiController:
             return hi
         return v
 
-    def _on_pick_mode_entered(self, _ev: Event) -> None:
-        self._pick_active = True
+    def _on_pick_mode_entered(self, ev: Event) -> None:
+        if not isinstance(ev.payload, PickModeEnteredPayload):
+            return
         self._apply_avoidance_on_enter()
         self._ensure_preview()
         if self._preview is not None:
@@ -151,18 +152,21 @@ class PickUiController:
                 pass
         self._bus.post(EventType.STATUS, msg="取色模式已进入")
 
-    def _on_pick_canceled(self, _ev: Event) -> None:
+    def _on_pick_canceled(self, ev: Event) -> None:
+        if not isinstance(ev.payload, PickCanceledPayload):
+            return
         self._bus.post(EventType.INFO, msg="取色已取消")
 
-    def _on_pick_mode_exited(self, _ev: Event) -> None:
-        self._pick_active = False
+    def _on_pick_mode_exited(self, ev: Event) -> None:
+        if not isinstance(ev.payload, PickModeExitedPayload):
+            return
         self._destroy_preview()
         self._restore_after_exit()
         self._bus.post(EventType.STATUS, msg="取色模式已退出")
 
     def _on_pick_preview(self, ev: Event) -> None:
-        p = pick_preview_from_payload(ev.payload)
-        if p is None:
+        p = ev.payload
+        if not isinstance(p, PickPreviewPayload):
             return
 
         self._ensure_preview()

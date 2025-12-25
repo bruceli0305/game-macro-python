@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 
 # -------- common UI messages --------
@@ -61,6 +61,19 @@ class ConfigSavedPayload:
     section: ConfigSection
     source: str = ""
     saved: bool = False
+
+
+# -------- profile payloads (NEW) --------
+
+@dataclass(frozen=True)
+class ProfileChangedPayload:
+    name: str
+
+
+@dataclass(frozen=True)
+class ProfileListChangedPayload:
+    names: List[str]
+    current: str
 
 
 # -------- pick payloads --------

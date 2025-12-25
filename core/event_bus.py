@@ -13,7 +13,7 @@ from core.event_types import EventType, as_event_type
 @dataclass(frozen=True)
 class Event:
     type: EventType
-    payload: Any = None  # MUST NOT be dict
+    payload: Any = None
     ts: float = field(default_factory=time.time)
     thread_id: int = field(default_factory=lambda: threading.get_ident())
 
@@ -23,13 +23,11 @@ Handler = Callable[[Event], None]
 
 class EventBus:
     """
-    Strict typed-payload EventBus.
+    Strict typed-payload EventBus with registry validation.
 
-    Rules:
-    - Event.payload must NOT be a dict (runtime enforced).
-    - post(event_type, **kwargs) is allowed, BUT it immediately converts kwargs
-      into a typed payload dataclass for known event types.
-    - post_payload(event_type, payload) accepts typed payload only.
+    - publish() rejects dict payload and validates payload type against registry
+    - post_payload() only accepts typed payload
+    - post(**kwargs) is allowed ONLY as a convenience builder for known EventTypes
     """
 
     def __init__(self) -> None:
@@ -43,6 +41,11 @@ class EventBus:
             raise TypeError("publish() expects an Event")
         if isinstance(event.payload, dict):
             raise TypeError(f"dict payload is not allowed for {event.type.value}")
+
+        # registry validation
+        from core.events.registry import validate_payload
+        validate_payload(event.type, event.payload)
+
         self._q.put(event)
 
     def post_payload(self, event_type: EventType | str, payload: Any = None) -> None:
@@ -53,22 +56,12 @@ class EventBus:
 
     def post(self, event_type: EventType | str, **kwargs: Any) -> None:
         """
-        Allowed for convenience, but DOES NOT enqueue dict payload.
-        It converts kwargs -> typed payload for known event types, otherwise:
-        - if kwargs is empty: payload=None
-        - else: error
+        Convenience builder. Converts kwargs to typed payload for supported event types.
+        For no-payload events: call post(EventType.X) with no kwargs.
         """
         et = as_event_type(event_type)
 
-        # lazy imports avoid cycles
-        from core.events.payloads import (
-            InfoPayload, StatusPayload, ErrorPayload, ThemeChangePayload,
-            DirtyStateChangedPayload,
-            RecordUpdatedPayload, RecordDeletedPayload,
-            ConfigSavedPayload,
-            PickContextRef, PickRequestPayload,
-            PickModeEnteredPayload, PickCanceledPayload, PickModeExitedPayload,
-        )
+        from core.events import payloads as P
 
         def require(name: str) -> Any:
             if name not in kwargs:
@@ -78,13 +71,22 @@ class EventBus:
         def as_str(v: Any) -> str:
             return v if isinstance(v, str) else str(v)
 
+        # ----- no-payload events -----
+        if et in (EventType.HOTKEYS_CHANGED, EventType.PICK_START_LAST, EventType.PICK_CANCEL_REQUEST):
+            if kwargs:
+                raise TypeError(f"{et.value} does not accept kwargs payload")
+            self.post_payload(et, None)
+            return
+
         # ----- common -----
         if et is EventType.INFO:
-            self.post_payload(et, InfoPayload(msg=as_str(require("msg"))))
+            self.post_payload(et, P.InfoPayload(msg=as_str(require("msg"))))
             return
+
         if et is EventType.STATUS:
-            self.post_payload(et, StatusPayload(msg=as_str(require("msg"))))
+            self.post_payload(et, P.StatusPayload(msg=as_str(require("msg"))))
             return
+
         if et is EventType.ERROR:
             msg = as_str(require("msg"))
             detail = as_str(kwargs.get("detail", "") or "")
@@ -95,10 +97,11 @@ class EventBus:
                     detail = f"{type(exc).__name__}: {exc}"
                 except Exception:
                     detail = str(exc)
-            self.post_payload(et, ErrorPayload(msg=msg, detail=detail, code=code))
+            self.post_payload(et, P.ErrorPayload(msg=msg, detail=detail, code=code))
             return
+
         if et is EventType.UI_THEME_CHANGE:
-            self.post_payload(et, ThemeChangePayload(theme=as_str(require("theme"))))
+            self.post_payload(et, P.ThemeChangePayload(theme=as_str(require("theme"))))
             return
 
         # ----- dirty -----
@@ -106,16 +109,16 @@ class EventBus:
             dirty = bool(require("dirty"))
             parts_raw = require("parts")
             if not isinstance(parts_raw, list):
-                raise TypeError("DIRTY_STATE_CHANGED.parts must be a list[str]")
+                raise TypeError("DIRTY_STATE_CHANGED.parts must be list[str]")
             parts = [as_str(x) for x in parts_raw]
-            self.post_payload(et, DirtyStateChangedPayload(dirty=dirty, parts=parts))
+            self.post_payload(et, P.DirtyStateChangedPayload(dirty=dirty, parts=parts))
             return
 
         # ----- record events -----
         if et is EventType.RECORD_UPDATED:
             self.post_payload(
                 et,
-                RecordUpdatedPayload(
+                P.RecordUpdatedPayload(
                     record_type=as_str(require("record_type")),  # type: ignore[arg-type]
                     id=as_str(require("id")),
                     source=as_str(kwargs.get("source", "") or ""),
@@ -127,7 +130,7 @@ class EventBus:
         if et is EventType.RECORD_DELETED:
             self.post_payload(
                 et,
-                RecordDeletedPayload(
+                P.RecordDeletedPayload(
                     record_type=as_str(require("record_type")),  # type: ignore[arg-type]
                     id=as_str(require("id")),
                     source=as_str(kwargs.get("source", "") or ""),
@@ -139,7 +142,7 @@ class EventBus:
         if et is EventType.CONFIG_SAVED:
             self.post_payload(
                 et,
-                ConfigSavedPayload(
+                P.ConfigSavedPayload(
                     section=as_str(require("section")),  # type: ignore[arg-type]
                     source=as_str(kwargs.get("source", "") or ""),
                     saved=bool(kwargs.get("saved", False)),
@@ -147,44 +150,53 @@ class EventBus:
             )
             return
 
-        # ----- pick request/mode (typed; allow dict ctx input but we convert here) -----
-        def ctx_ref_from_any(v: Any) -> PickContextRef:
-            if isinstance(v, PickContextRef):
+        # ----- profile events -----
+        if et is EventType.PROFILE_CHANGED:
+            self.post_payload(et, P.ProfileChangedPayload(name=as_str(require("name"))))
+            return
+
+        if et is EventType.PROFILE_LIST_CHANGED:
+            names_raw = require("names")
+            if not isinstance(names_raw, list):
+                raise TypeError("PROFILE_LIST_CHANGED.names must be list[str]")
+            names = [as_str(x) for x in names_raw]
+            current = as_str(require("current"))
+            self.post_payload(et, P.ProfileListChangedPayload(names=names, current=current))
+            return
+
+        # ----- pick request/mode events -----
+        def ctx_ref_from_any(v: Any) -> P.PickContextRef:
+            if isinstance(v, P.PickContextRef):
                 return v
             if isinstance(v, dict):
                 t = v.get("type", "")
                 i = v.get("id", "")
                 if isinstance(t, str) and isinstance(i, str) and i:
-                    return PickContextRef(type=t, id=i)  # type: ignore[arg-type]
+                    return P.PickContextRef(type=t, id=i)  # type: ignore[arg-type]
             raise TypeError(f"{et.value} requires context as PickContextRef or dict{{type,id}}")
 
         if et is EventType.PICK_REQUEST:
             ctx = ctx_ref_from_any(require("context"))
-            self.post_payload(et, PickRequestPayload(context=ctx))
+            self.post_payload(et, P.PickRequestPayload(context=ctx))
             return
 
         if et is EventType.PICK_MODE_ENTERED:
             ctx = ctx_ref_from_any(require("context"))
-            self.post_payload(et, PickModeEnteredPayload(context=ctx))
+            self.post_payload(et, P.PickModeEnteredPayload(context=ctx))
             return
 
         if et is EventType.PICK_CANCELED:
             ctx = ctx_ref_from_any(require("context"))
-            self.post_payload(et, PickCanceledPayload(context=ctx))
+            self.post_payload(et, P.PickCanceledPayload(context=ctx))
             return
 
         if et is EventType.PICK_MODE_EXITED:
             ctx = ctx_ref_from_any(require("context"))
             reason = as_str(kwargs.get("reason", "") or "")
-            self.post_payload(et, PickModeExitedPayload(context=ctx, reason=reason))
+            self.post_payload(et, P.PickModeExitedPayload(context=ctx, reason=reason))
             return
 
-        # ----- no-payload events -----
-        if not kwargs:
-            self.post_payload(et, None)
-            return
-
-        raise TypeError(f"{et.value} does not support kwargs payload; use post_payload() with a typed payload")
+        raise TypeError(f"{et.value} does not support kwargs builder; use post_payload() with a typed payload")
 
     # ---------- subscribe side ----------
     def subscribe(self, event_type: EventType | str, handler: Handler) -> None:
