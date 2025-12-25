@@ -1,3 +1,4 @@
+# File: ui/app/pick_ui.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -5,7 +6,14 @@ from typing import Callable, Optional
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import PickPreviewPayload, PickModeEnteredPayload, PickModeExitedPayload, PickCanceledPayload, InfoPayload, StatusPayload
+from core.events.payloads import (
+    PickPreviewPayload,
+    PickModeEnteredPayload,
+    PickModeExitedPayload,
+    PickCanceledPayload,
+    InfoPayload,
+    StatusPayload,
+)
 from ui.pick_preview_window import PickPreviewWindow
 
 
@@ -15,6 +23,9 @@ class PickUiController:
     - avoidance (hide/minimize/move_aside/none)
     - preview window show/move/update
     STRICT typed event payloads.
+
+    Hard cleanup:
+    - 进入取色时不再发 STATUS 文案（避免与 PickService.start() 重复提示）
     """
 
     def __init__(self, *, root: tk.Misc, bus: EventBus, ctx_provider: Callable[[], object]) -> None:
@@ -143,6 +154,8 @@ class PickUiController:
     def _on_pick_mode_entered(self, ev: Event) -> None:
         if not isinstance(ev.payload, PickModeEnteredPayload):
             return
+
+        # UI only: apply avoidance + prep preview window
         self._apply_avoidance_on_enter()
         self._ensure_preview()
         if self._preview is not None:
@@ -150,7 +163,9 @@ class PickUiController:
                 self._preview.hide()
             except Exception:
                 pass
-        self._bus.post_payload(EventType.STATUS, StatusPayload(msg="取色模式已进入"))
+
+        # Hard cleanup: do NOT post STATUS here.
+        # PickService.start() already posts the canonical instruction message.
 
     def _on_pick_canceled(self, ev: Event) -> None:
         if not isinstance(ev.payload, PickCanceledPayload):

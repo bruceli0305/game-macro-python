@@ -1,3 +1,4 @@
+# File: ui/pages/points.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -33,6 +34,9 @@ class PointsPage(PickNotebookCrudPage):
       service 会发 RECORD_UPDATED(source="form")，UI 只刷新列表行，不 reload 表单
     - dirty 展示：enable_uow_dirty_indicator("points") 跟随 UoW
     - cmd 命名统一：create_cmd/clone_cmd/delete_cmd
+
+    Step 9:
+    - Point 增加 tolerance，UI 增加容差输入，并在列表显示
     """
 
     def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
@@ -51,6 +55,7 @@ class PointsPage(PickNotebookCrudPage):
                 ColumnDef("monitor", "屏幕", 80, "center"),
                 ColumnDef("pos", "坐标", 90, "center"),
                 ColumnDef("hex", "颜色", 80, "center"),
+                ColumnDef("tol", "容差", 60, "center"),
                 ColumnDef("captured_at", "采集时间", 160, "w"),
             ],
             pick_context_type="point",
@@ -81,6 +86,9 @@ class PointsPage(PickNotebookCrudPage):
         self.var_r = tk.IntVar(value=0)
         self.var_g = tk.IntVar(value=0)
         self.var_b = tk.IntVar(value=0)
+
+        # Step 9: tolerance
+        self.var_tol = tk.IntVar(value=0)
 
         self.var_captured_at = tk.StringVar(value="")
         self.var_sample_mode = tk.StringVar(value="单像素")
@@ -164,7 +172,8 @@ class PointsPage(PickNotebookCrudPage):
 
         pos = f"({rx},{ry})"
         hx = rgb_to_hex(p.color.r, p.color.g, p.color.b)
-        return (p.name, short, p.monitor, pos, hx, p.captured_at)
+        tol = str(int(getattr(p, "tolerance", 0) or 0))
+        return (p.name, short, p.monitor, pos, hx, tol, p.captured_at)
 
     # ----- debounce apply helpers -----
     def _cancel_pending_apply(self) -> None:
@@ -218,26 +227,37 @@ class PointsPage(PickNotebookCrudPage):
         self._swatch.grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
 
         tb.Label(parent, text="R").grid(row=1, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(row=1, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(
+            row=1, column=1, sticky="ew", pady=4
+        )
         tb.Label(parent, text="G").grid(row=1, column=2, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(row=1, column=3, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(
+            row=1, column=3, sticky="ew", pady=4
+        )
         tb.Label(parent, text="B").grid(row=1, column=4, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(row=1, column=5, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(
+            row=1, column=5, sticky="ew", pady=4
+        )
 
-        tb.Label(parent, text="采样模式").grid(row=2, column=0, sticky="w", pady=4)
+        tb.Label(parent, text="容差").grid(row=2, column=0, sticky="w", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_tol).grid(
+            row=2, column=1, sticky="ew", pady=4
+        )
+
+        tb.Label(parent, text="采样模式").grid(row=2, column=2, sticky="w", pady=4)
         tb.Combobox(
             parent,
             textvariable=self.var_sample_mode,
             values=list(SAMPLE_DISPLAY_TO_VALUE.keys()),
             state="readonly",
-        ).grid(row=2, column=1, sticky="ew", pady=4)
+        ).grid(row=2, column=3, sticky="ew", pady=4)
 
-        tb.Label(parent, text="半径").grid(row=2, column=2, sticky="w", pady=4)
+        tb.Label(parent, text="半径").grid(row=2, column=4, sticky="w", pady=4)
         tb.Spinbox(parent, from_=0, to=50, increment=1, textvariable=self.var_sample_radius).grid(
-            row=2, column=3, sticky="ew", pady=4
+            row=2, column=5, sticky="ew", pady=4
         )
 
-        tb.Button(parent, text="从屏幕取色（左键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
+        tb.Button(parent, text="从屏幕取色（按确认热键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
             row=3, column=0, columnspan=6, sticky="ew", pady=(12, 0)
         )
 
@@ -265,6 +285,7 @@ class PointsPage(PickNotebookCrudPage):
         for v in [
             self.var_name, self.var_monitor, self.var_x, self.var_y,
             self.var_r, self.var_g, self.var_b,
+            self.var_tol,
             self.var_captured_at, self.var_sample_mode, self.var_sample_radius,
         ]:
             v.trace_add("write", on_any)
@@ -291,6 +312,7 @@ class PointsPage(PickNotebookCrudPage):
             self.var_r.set(0)
             self.var_g.set(0)
             self.var_b.set(0)
+            self.var_tol.set(0)
             self.var_captured_at.set("")
             self.var_sample_mode.set("单像素")
             self.var_sample_radius.set(0)
@@ -326,6 +348,8 @@ class PointsPage(PickNotebookCrudPage):
             self.var_g.set(int(p.color.g))
             self.var_b.set(int(p.color.b))
             self._swatch.set_rgb(self.var_r.get(), self.var_g.get(), self.var_b.get())
+
+            self.var_tol.set(int(getattr(p, "tolerance", 0) or 0))
 
             self.var_captured_at.set(p.captured_at or "")
             self.var_sample_mode.set(SAMPLE_VALUE_TO_DISPLAY.get(p.sample.mode or "single", "单像素"))
@@ -363,6 +387,7 @@ class PointsPage(PickNotebookCrudPage):
             r=int(self.var_r.get()),
             g=int(self.var_g.get()),
             b=int(self.var_b.get()),
+            tolerance=int(self.var_tol.get()),
             captured_at=self.var_captured_at.get(),
             sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
             sample_radius=int(self.var_sample_radius.get()),

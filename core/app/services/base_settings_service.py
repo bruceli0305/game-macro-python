@@ -1,3 +1,4 @@
+# File: core/app/services/base_settings_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +13,6 @@ from core.events.payloads import (
     StatusPayload,
     ThemeChangePayload,
 )
-from core.input.hotkey_strings import to_pynput_hotkey
 from core.models.base import BaseFile
 from core.models.common import clamp_int
 
@@ -22,8 +22,8 @@ class BaseSettingsPatch:
     theme: str
     monitor_policy: str
 
-    hotkey_enter_pick: str
-    hotkey_cancel_pick: str
+    # Step 5: remove global pick hotkeys; add confirm hotkey for pick
+    pick_confirm_hotkey: str
 
     avoid_mode: str
     avoid_delay_ms: int
@@ -32,8 +32,65 @@ class BaseSettingsPatch:
     preview_offset_y: int
     preview_anchor: str
 
+    # Step 5: mouse avoidance for hover highlight problem
+    mouse_avoid: bool
+    mouse_avoid_offset_y: int
+    mouse_avoid_settle_ms: int
+
     auto_save: bool
     backup_on_save: bool
+
+
+_MODS = {"ctrl", "alt", "shift", "cmd"}
+
+
+def _normalize_hotkey_string(s: str) -> str:
+    """
+    Normalize hotkey string to the same style HotkeyEntry records:
+    - lower-case
+    - '+' separated
+    - strip spaces
+    - collapse duplicated '+'
+    Examples:
+      ' Ctrl + Alt + F8 ' -> 'ctrl+alt+f8'
+      'esc' -> 'esc'
+    """
+    s = (s or "").strip().lower()
+    s = s.replace(" ", "")
+    s = s.replace("-", "+")
+    s = s.replace("_", "+")
+    while "++" in s:
+        s = s.replace("++", "+")
+    return s.strip("+")
+
+
+def _parse_hotkey(s: str) -> tuple[set[str], str]:
+    """
+    Parse normalized hotkey string into (mods, main_key).
+    main_key is the last non-mod part. Raises ValueError if invalid.
+    """
+    s = _normalize_hotkey_string(s)
+    if not s:
+        raise ValueError("confirm_hotkey: 热键不能为空")
+
+    parts = [p for p in s.split("+") if p]
+    if not parts:
+        raise ValueError("confirm_hotkey: 热键不能为空")
+
+    mods: set[str] = set()
+    main: str | None = None
+
+    for p in parts:
+        if p in _MODS:
+            mods.add(p)
+        else:
+            main = p
+
+    if main is None:
+        # only modifiers
+        raise ValueError("confirm_hotkey: 热键必须包含一个主键（不能只有 ctrl/alt/shift/cmd）")
+
+    return mods, main
 
 
 class BaseSettingsService:
@@ -53,26 +110,22 @@ class BaseSettingsService:
         return self._uow.ctx
 
     def validate_patch(self, patch: BaseSettingsPatch) -> None:
-        enter_raw = (patch.hotkey_enter_pick or "").strip()
-        cancel_raw = (patch.hotkey_cancel_pick or "").strip()
+        hk = _normalize_hotkey_string(patch.pick_confirm_hotkey)
 
-        if not enter_raw:
-            raise ValueError("enter_pick_mode: 热键不能为空")
-        if not cancel_raw:
-            raise ValueError("cancel_pick: 热键不能为空")
+        mods, main = _parse_hotkey(hk)
 
-        try:
-            enter_pp = to_pynput_hotkey(enter_raw)
-        except Exception as e:
-            raise ValueError(f"enter_pick_mode: 热键格式错误: {e}") from e
+        # Esc is fixed cancel; any hotkey with main key 'esc' will conflict
+        if main == "esc":
+            raise ValueError("confirm_hotkey: 确认热键不能使用 Esc（Esc 固定为取消）")
 
-        try:
-            cancel_pp = to_pynput_hotkey(cancel_raw)
-        except Exception as e:
-            raise ValueError(f"cancel_pick: 热键格式错误: {e}") from e
+        # Optional: disallow empty/non-sense key name
+        if not main:
+            raise ValueError("confirm_hotkey: 热键格式错误")
 
-        if enter_pp == cancel_pp:
-            raise ValueError("hotkeys: 热键冲突：进入取色 与 取消取色 不能相同")
+        # sanity: avoid_delay_ms etc
+        _ = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
+        _ = clamp_int(int(patch.mouse_avoid_offset_y), 0, 500)
+        _ = clamp_int(int(patch.mouse_avoid_settle_ms), 0, 500)
 
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         theme = (patch.theme or "").strip()
@@ -82,9 +135,7 @@ class BaseSettingsService:
 
         b.capture.monitor_policy = (patch.monitor_policy or "primary").strip() or "primary"
 
-        b.hotkeys.enter_pick_mode = (patch.hotkey_enter_pick or "").strip()
-        b.hotkeys.cancel_pick = (patch.hotkey_cancel_pick or "").strip()
-
+        # pick avoidance (keep existing nesting: b.pick.avoidance.*)
         av = b.pick.avoidance
         av.mode = (patch.avoid_mode or "hide_main").strip() or "hide_main"
         av.delay_ms = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
@@ -92,6 +143,13 @@ class BaseSettingsService:
         av.preview_offset = (int(patch.preview_offset_x), int(patch.preview_offset_y))
         av.preview_anchor = (patch.preview_anchor or "bottom_right").strip() or "bottom_right"
 
+        # Step 5: confirm hotkey + mouse avoidance
+        b.pick.confirm_hotkey = _normalize_hotkey_string(patch.pick_confirm_hotkey) or "f8"
+        b.pick.mouse_avoid = bool(patch.mouse_avoid)
+        b.pick.mouse_avoid_offset_y = clamp_int(int(patch.mouse_avoid_offset_y), 0, 500)
+        b.pick.mouse_avoid_settle_ms = clamp_int(int(patch.mouse_avoid_settle_ms), 0, 500)
+
+        # io
         b.io.auto_save = bool(patch.auto_save)
         b.io.backup_on_save = bool(patch.backup_on_save)
 
@@ -130,7 +188,7 @@ class BaseSettingsService:
 
         if self._bus is not None:
             self._bus.post_payload(EventType.UI_THEME_CHANGE, ThemeChangePayload(theme=self.ctx.base.ui.theme))
-            self._bus.post_payload(EventType.HOTKEYS_CHANGED, None)
+
             self._bus.post_payload(
                 EventType.CONFIG_SAVED,
                 ConfigSavedPayload(section="base", source="manual_save", saved=True),
@@ -151,4 +209,3 @@ class BaseSettingsService:
             )
             self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
             self._bus.post_payload(EventType.UI_THEME_CHANGE, ThemeChangePayload(theme=self.ctx.base.ui.theme))
-            self._bus.post_payload(EventType.HOTKEYS_CHANGED, None)

@@ -1,3 +1,4 @@
+# File: core/app/services/points_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ class PointFormPatch:
     g: int
     b: int
 
+    # Step 9: tolerance for points
+    tolerance: int
+
     captured_at: str
     sample_mode: str
     sample_radius: int
@@ -37,6 +41,9 @@ class PointsService:
     - cmd 命名统一：create_cmd/clone_cmd/delete_cmd（旧 *point_cmd 已移除）
     - 保存/重载统一：save_cmd/reload_cmd
     - 表单 apply 成功后：发布 RECORD_UPDATED(source="form")，让 UI 只“吃事件”刷新
+
+    Step 9:
+    - Point 增加 tolerance 字段，并贯通到 patch/apply/UI
     """
 
     def __init__(
@@ -74,6 +81,9 @@ class PointsService:
         b = clamp_int(int(patch.b), 0, 255)
         p.color = ColorRGB(r=r, g=g, b=b)
 
+        # Step 9: tolerance
+        p.tolerance = clamp_int(int(patch.tolerance), 0, 255)
+
         p.captured_at = (patch.captured_at or "").strip()
         p.sample.mode = (patch.sample_mode or "single").strip() or "single"
         p.sample.radius = clamp_int(int(patch.sample_radius), 0, 50)
@@ -108,7 +118,7 @@ class PointsService:
             except Exception:
                 saved = False
 
-        # Step 5: 统一通过事件让 UI 刷新（source="form" 不 reload 表单）
+        # 统一通过事件让 UI 刷新（source="form" 不 reload 表单）
         if self._bus is not None:
             self._bus.post_payload(
                 EventType.RECORD_UPDATED,
@@ -127,6 +137,7 @@ class PointsService:
             vx=0,
             vy=0,
             color=ColorRGB(0, 0, 0),
+            tolerance=0,
             captured_at=now_iso_utc(),
         )
         p.sample.mode = "single"
@@ -158,6 +169,9 @@ class PointsService:
         return False
 
     def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
+        """
+        Pick 应用只更新坐标/颜色/时间，不改 tolerance（tolerance 属于用户配置）。
+        """
         p = self.find(pid)
         if p is None:
             return False

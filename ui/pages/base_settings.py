@@ -46,10 +46,12 @@ _ANCHOR_VAL_TO_DISP = {v: k for k, v in _ANCHOR_DISP_TO_VAL.items()}
 
 class BaseSettingsPage(tb.Frame):
     """
-    Step 4:
+    Step 5:
+    - 移除“全局进入取色/取消取色”热键（无用）
+    - 新增：确认取色热键（PickService 使用）
+    - 新增：鼠标避让配置（解决 hover 高亮污染像素）
     - dirty 展示只跟随 UoW（DIRTY_STATE_CHANGED）
     - 变更时 debounce 调 service.apply_patch，让 service 标记 dirty
-    - 页面不再直接 mark/clear uow dirty
     """
 
     def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
@@ -84,8 +86,8 @@ class BaseSettingsPage(tb.Frame):
         self.var_theme = tk.StringVar(value=b.ui.theme or "darkly")
         self.var_monitor_policy_disp = tk.StringVar(value=_MONITOR_VAL_TO_DISP.get(b.capture.monitor_policy, "主屏"))
 
-        self.var_hotkey_enter_pick = tk.StringVar(value=b.hotkeys.enter_pick_mode or "ctrl+alt+p")
-        self.var_hotkey_cancel_pick = tk.StringVar(value=b.hotkeys.cancel_pick or "esc")
+        # Step 5: confirm hotkey (Esc fixed cancel)
+        self.var_pick_confirm_hotkey = tk.StringVar(value=getattr(b.pick, "confirm_hotkey", "") or "f8")
 
         av = b.pick.avoidance
         self.var_avoid_mode_disp = tk.StringVar(value=_AVOID_VAL_TO_DISP.get(av.mode, "隐藏主窗口"))
@@ -94,6 +96,11 @@ class BaseSettingsPage(tb.Frame):
         self.var_preview_offset_x = tk.IntVar(value=int(av.preview_offset[0]))
         self.var_preview_offset_y = tk.IntVar(value=int(av.preview_offset[1]))
         self.var_preview_anchor_disp = tk.StringVar(value=_ANCHOR_VAL_TO_DISP.get(av.preview_anchor, "右下"))
+
+        # Step 5: mouse avoidance
+        self.var_mouse_avoid = tk.BooleanVar(value=bool(getattr(b.pick, "mouse_avoid", True)))
+        self.var_mouse_avoid_offset_y = tk.IntVar(value=int(getattr(b.pick, "mouse_avoid_offset_y", 80)))
+        self.var_mouse_avoid_settle_ms = tk.IntVar(value=int(getattr(b.pick, "mouse_avoid_settle_ms", 80)))
 
         self.var_auto_save = tk.BooleanVar(value=bool(b.io.auto_save))
         self.var_backup = tk.BooleanVar(value=bool(b.io.backup_on_save))
@@ -116,7 +123,7 @@ class BaseSettingsPage(tb.Frame):
 
         self._install_dirty_watchers()
 
-        # Step 4: dirty UI 来自 UoW
+        # dirty UI 来自 UoW
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
         self._set_dirty_ui(False)
 
@@ -152,8 +159,7 @@ class BaseSettingsPage(tb.Frame):
             theme=theme or "darkly",
             monitor_policy=_MONITOR_DISP_TO_VAL.get(self.var_monitor_policy_disp.get(), "primary"),
 
-            hotkey_enter_pick=(self.var_hotkey_enter_pick.get() or "").strip(),
-            hotkey_cancel_pick=(self.var_hotkey_cancel_pick.get() or "").strip(),
+            pick_confirm_hotkey=(self.var_pick_confirm_hotkey.get() or "").strip(),
 
             avoid_mode=_AVOID_DISP_TO_VAL.get(self.var_avoid_mode_disp.get(), "hide_main"),
             avoid_delay_ms=clamp_int(int(self.var_avoid_delay.get()), 0, 5000),
@@ -162,46 +168,43 @@ class BaseSettingsPage(tb.Frame):
             preview_offset_y=int(self.var_preview_offset_y.get()),
             preview_anchor=_ANCHOR_DISP_TO_VAL.get(self.var_preview_anchor_disp.get(), "bottom_right"),
 
+            mouse_avoid=bool(self.var_mouse_avoid.get()),
+            mouse_avoid_offset_y=clamp_int(int(self.var_mouse_avoid_offset_y.get()), 0, 500),
+            mouse_avoid_settle_ms=clamp_int(int(self.var_mouse_avoid_settle_ms.get()), 0, 500),
+
             auto_save=bool(self.var_auto_save.get()),
             backup_on_save=bool(self.var_backup.get()),
         )
 
     def _clear_hotkey_errors(self) -> None:
         try:
-            if hasattr(self, "_hk_enter"):
-                self._hk_enter.clear_error()
-            if hasattr(self, "_hk_cancel"):
-                self._hk_cancel.clear_error()
+            if hasattr(self, "_hk_confirm"):
+                self._hk_confirm.clear_error()
         except Exception:
             pass
 
     def _apply_hotkey_error(self, msg: str) -> None:
+        """
+        BaseSettingsService.validate_patch 会抛出 'confirm_hotkey: xxx' 格式错误。
+        这里把错误展示到确认热键输入框上。
+        """
         s = (msg or "").strip()
         self._clear_hotkey_errors()
 
-        if s.startswith("enter_pick_mode:"):
+        if "confirm_hotkey:" in s:
             try:
-                self._hk_enter.set_error(s.split(":", 1)[1].strip())
+                self._hk_confirm.set_error(s.split(":", 1)[1].strip())
             except Exception:
                 pass
             return
 
-        if s.startswith("cancel_pick:"):
-            try:
-                self._hk_cancel.set_error(s.split(":", 1)[1].strip())
-            except Exception:
-                pass
-            return
+        # fallback: still show in confirm field
+        try:
+            self._hk_confirm.set_error(s)
+        except Exception:
+            pass
 
-        if s.startswith("hotkeys:"):
-            detail = s.split(":", 1)[1].strip()
-            try:
-                self._hk_enter.set_error(detail)
-                self._hk_cancel.set_error(detail)
-            except Exception:
-                pass
-
-    def _validate_hotkeys_live(self) -> None:
+    def _validate_confirm_hotkey_live(self) -> None:
         try:
             patch = self._collect_patch()
             self._services.base.validate_patch(patch)
@@ -227,7 +230,7 @@ class BaseSettingsPage(tb.Frame):
             # apply_patch 内部会 mark UoW dirty + notify_dirty（如果有变化）
             self._services.base.apply_patch(patch)
         except Exception:
-            # 输入中间态可能不合法（热键），不阻断 UI
+            # 输入中间态可能不合法，不阻断 UI
             return
 
     # ---------------- watchers ----------------
@@ -235,20 +238,26 @@ class BaseSettingsPage(tb.Frame):
         def on_any(*_args) -> None:
             if self._building:
                 return
-            self._validate_hotkeys_live()
+            self._validate_confirm_hotkey_live()
             self._schedule_apply()
 
         for v in [
             self.var_theme,
             self.var_monitor_policy_disp,
-            self.var_hotkey_enter_pick,
-            self.var_hotkey_cancel_pick,
+
+            self.var_pick_confirm_hotkey,
+
             self.var_avoid_mode_disp,
             self.var_avoid_delay,
             self.var_preview_follow,
             self.var_preview_offset_x,
             self.var_preview_offset_y,
             self.var_preview_anchor_disp,
+
+            self.var_mouse_avoid,
+            self.var_mouse_avoid_offset_y,
+            self.var_mouse_avoid_settle_ms,
+
             self.var_auto_save,
             self.var_backup,
         ]:
@@ -256,7 +265,7 @@ class BaseSettingsPage(tb.Frame):
 
     # ---------------- UI groups ----------------
     def _build_ui_group(self, master: tb.Frame) -> None:
-        lf = tb.Labelframe(master, text="界面 / 截图 / 热键", padding=10)
+        lf = tb.Labelframe(master, text="界面 / 截图 / 取色确认", padding=10)
         lf.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         lf.columnconfigure(1, weight=1)
 
@@ -274,20 +283,18 @@ class BaseSettingsPage(tb.Frame):
             state="readonly",
         ).grid(row=1, column=1, sticky="ew", pady=4)
 
-        tb.Label(lf, text="热键：进入取色").grid(row=2, column=0, sticky="w", pady=4)
-        self._hk_enter = HotkeyEntry(lf, textvariable=self.var_hotkey_enter_pick)
-        self._hk_enter.grid(row=2, column=1, sticky="ew", pady=4)
+        tb.Label(lf, text="取色确认热键").grid(row=2, column=0, sticky="w", pady=4)
+        self._hk_confirm = HotkeyEntry(lf, textvariable=self.var_pick_confirm_hotkey)
+        self._hk_confirm.grid(row=2, column=1, sticky="ew", pady=4)
 
-        tb.Label(lf, text="热键：取消取色").grid(row=3, column=0, sticky="w", pady=4)
-        self._hk_cancel = HotkeyEntry(lf, textvariable=self.var_hotkey_cancel_pick)
-        self._hk_cancel.grid(row=3, column=1, sticky="ew", pady=4)
+        tb.Label(lf, text="提示：Esc 固定为取消").grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     def _build_pick_group(self, master: tb.Frame) -> None:
-        lf = tb.Labelframe(master, text="取色避让", padding=10)
+        lf = tb.Labelframe(master, text="取色避让 / 预览 / 鼠标避让", padding=10)
         lf.grid(row=0, column=1, sticky="nsew")
         lf.columnconfigure(1, weight=1)
 
-        tb.Label(lf, text="避让模式").grid(row=0, column=0, sticky="w", pady=4)
+        tb.Label(lf, text="窗口避让模式").grid(row=0, column=0, sticky="w", pady=4)
         tb.Combobox(
             lf,
             textvariable=self.var_avoid_mode_disp,
@@ -295,7 +302,7 @@ class BaseSettingsPage(tb.Frame):
             state="readonly",
         ).grid(row=0, column=1, sticky="ew", pady=4)
 
-        tb.Label(lf, text="延迟(ms)").grid(row=1, column=0, sticky="w", pady=4)
+        tb.Label(lf, text="进入延迟(ms)").grid(row=1, column=0, sticky="w", pady=4)
         tb.Spinbox(lf, from_=0, to=5000, increment=10, textvariable=self.var_avoid_delay).grid(
             row=1, column=1, sticky="ew", pady=4
         )
@@ -322,6 +329,22 @@ class BaseSettingsPage(tb.Frame):
             state="readonly",
         ).grid(row=5, column=1, sticky="ew", pady=4)
 
+        tb.Separator(lf).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 10))
+
+        tb.Checkbutton(lf, text="确认取色前鼠标避让（防止 hover 高亮污染颜色）", variable=self.var_mouse_avoid).grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(0, 6)
+        )
+
+        tb.Label(lf, text="避让 Y 偏移(px)").grid(row=8, column=0, sticky="w", pady=4)
+        tb.Spinbox(lf, from_=0, to=500, increment=5, textvariable=self.var_mouse_avoid_offset_y).grid(
+            row=8, column=1, sticky="ew", pady=4
+        )
+
+        tb.Label(lf, text="避让后等待(ms)").grid(row=9, column=0, sticky="w", pady=4)
+        tb.Spinbox(lf, from_=0, to=500, increment=10, textvariable=self.var_mouse_avoid_settle_ms).grid(
+            row=9, column=1, sticky="ew", pady=4
+        )
+
     def _build_io_group(self, master: tb.Frame) -> None:
         lf = tb.Labelframe(master, text="保存策略", padding=10)
         lf.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
@@ -342,8 +365,8 @@ class BaseSettingsPage(tb.Frame):
             b = self._ctx.base
             self.var_theme.set(b.ui.theme or "darkly")
             self.var_monitor_policy_disp.set(_MONITOR_VAL_TO_DISP.get(b.capture.monitor_policy, "主屏"))
-            self.var_hotkey_enter_pick.set(b.hotkeys.enter_pick_mode or "ctrl+alt+p")
-            self.var_hotkey_cancel_pick.set(b.hotkeys.cancel_pick or "esc")
+
+            self.var_pick_confirm_hotkey.set(getattr(b.pick, "confirm_hotkey", "") or "f8")
 
             av = b.pick.avoidance
             self.var_avoid_mode_disp.set(_AVOID_VAL_TO_DISP.get(av.mode, "隐藏主窗口"))
@@ -353,12 +376,17 @@ class BaseSettingsPage(tb.Frame):
             self.var_preview_offset_y.set(int(av.preview_offset[1]))
             self.var_preview_anchor_disp.set(_ANCHOR_VAL_TO_DISP.get(av.preview_anchor, "右下"))
 
+            self.var_mouse_avoid.set(bool(getattr(b.pick, "mouse_avoid", True)))
+            self.var_mouse_avoid_offset_y.set(int(getattr(b.pick, "mouse_avoid_offset_y", 80)))
+            self.var_mouse_avoid_settle_ms.set(int(getattr(b.pick, "mouse_avoid_settle_ms", 80)))
+
             self.var_auto_save.set(bool(b.io.auto_save))
             self.var_backup.set(bool(b.io.backup_on_save))
         finally:
             self._building = False
-        self._validate_hotkeys_live()
-        # dirty UI 会被 DIRTY_STATE_CHANGED 同步，无需手动设置
+
+        self._validate_confirm_hotkey_live()
+        # dirty UI 会被 DIRTY_STATE_CHANGED 同步
 
     # ---------------- actions ----------------
     def _on_reload(self) -> None:

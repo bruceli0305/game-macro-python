@@ -1,10 +1,10 @@
+# File: core/events/registry.py
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple, Type
 
 from core.event_types import EventType
 from core.events import payloads as P
-
 
 PayloadType = Type[Any]
 
@@ -25,7 +25,6 @@ def expected_payload_types() -> Dict[EventType, Tuple[PayloadType, ...]]:
         EventType.STATUS: (P.StatusPayload,),
         EventType.ERROR: (P.ErrorPayload,),
         EventType.UI_THEME_CHANGE: (P.ThemeChangePayload,),
-        EventType.HOTKEYS_CHANGED: NONE,
 
         # dirty
         EventType.DIRTY_STATE_CHANGED: (P.DirtyStateChangedPayload,),
@@ -41,7 +40,6 @@ def expected_payload_types() -> Dict[EventType, Tuple[PayloadType, ...]]:
 
         # pick flow
         EventType.PICK_REQUEST: (P.PickRequestPayload,),
-        EventType.PICK_START_LAST: NONE,
         EventType.PICK_CANCEL_REQUEST: NONE,
 
         EventType.PICK_MODE_ENTERED: (P.PickModeEnteredPayload,),

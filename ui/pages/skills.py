@@ -1,3 +1,4 @@
+# File: ui/pages/skills.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -32,6 +33,8 @@ class SkillsPage(PickNotebookCrudPage):
       service 会发 RECORD_UPDATED(source="form")，UI 只刷新列表行，不 reload 表单
     - dirty 展示：enable_uow_dirty_indicator("skills") 跟随 UoW
     - cmd 命名统一：create_cmd/clone_cmd/delete_cmd
+
+    Step 10: UI 文案收口到“按确认热键确认，Esc 取消”
     """
 
     def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
@@ -111,7 +114,7 @@ class SkillsPage(PickNotebookCrudPage):
         super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
-        # Step 6/10: 切换 context 时清 debounce + pending select
+        # 切换 context 时清 debounce + pending select
         try:
             self._cancel_pending_apply()
         except Exception:
@@ -226,22 +229,34 @@ class SkillsPage(PickNotebookCrudPage):
         ).grid(row=0, column=1, sticky="ew", pady=4)
 
         tb.Label(parent, text="X(rel)").grid(row=0, column=2, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(row=0, column=3, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_x).grid(
+            row=0, column=3, sticky="ew", pady=4
+        )
         tb.Label(parent, text="Y(rel)").grid(row=0, column=4, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(row=0, column=5, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=9999999, increment=1, textvariable=self.var_y).grid(
+            row=0, column=5, sticky="ew", pady=4
+        )
 
         self._swatch = ColorSwatch(parent)
         self._swatch.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 10))
 
         tb.Label(parent, text="R").grid(row=2, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(row=2, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_r).grid(
+            row=2, column=1, sticky="ew", pady=4
+        )
         tb.Label(parent, text="G").grid(row=2, column=2, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(row=2, column=3, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_g).grid(
+            row=2, column=3, sticky="ew", pady=4
+        )
         tb.Label(parent, text="B").grid(row=2, column=4, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(row=2, column=5, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_b).grid(
+            row=2, column=5, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="容差").grid(row=3, column=0, sticky="w", pady=4)
-        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_tol).grid(row=3, column=1, sticky="ew", pady=4)
+        tb.Spinbox(parent, from_=0, to=255, increment=1, textvariable=self.var_tol).grid(
+            row=3, column=1, sticky="ew", pady=4
+        )
 
         tb.Label(parent, text="采样模式").grid(row=4, column=0, sticky="w", pady=4)
         tb.Combobox(
@@ -256,7 +271,8 @@ class SkillsPage(PickNotebookCrudPage):
             row=4, column=3, sticky="ew", pady=4
         )
 
-        tb.Button(parent, text="从屏幕取色（左键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
+        # Step 10: 文案不再写“左键确认”
+        tb.Button(parent, text="从屏幕取色（按确认热键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
             row=6, column=0, columnspan=6, sticky="ew", pady=(12, 0)
         )
 

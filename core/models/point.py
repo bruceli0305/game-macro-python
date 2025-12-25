@@ -1,3 +1,4 @@
+# File: core/models/point.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,6 +22,10 @@ class Point:
     vx: int = 0
     vy: int = 0
     color: ColorRGB = field(default_factory=ColorRGB)
+
+    # Step 9: tolerance added for points (0..255)
+    tolerance: int = 0
+
     sample: SampleConfig = field(default_factory=SampleConfig)
     captured_at: str = ""  # ISO string
     note: str = ""
@@ -29,7 +34,7 @@ class Point:
     def from_dict(d: Dict[str, Any]) -> "Point":
         d = as_dict(d)
 
-        # Backward compatibility:
+        # Backward compatibility (best-effort):
         # - new schema uses vx/vy
         # - older schema used x/y (relative coords), repos will migrate on load.
         vx_raw = d.get("vx", None)
@@ -46,6 +51,7 @@ class Point:
             vx=clamp_int(as_int(vx_raw, 0), -10**9, 10**9),
             vy=clamp_int(as_int(vy_raw, 0), -10**9, 10**9),
             color=ColorRGB.from_dict(d.get("color", {}) or {}),
+            tolerance=clamp_int(as_int(d.get("tolerance", 0), 0), 0, 255),
             sample=SampleConfig.from_dict(d.get("sample", {}) or {}),
             captured_at=as_str(d.get("captured_at", "")),
             note=as_str(d.get("note", "")),
@@ -59,6 +65,7 @@ class Point:
             "vx": int(self.vx),
             "vy": int(self.vy),
             "color": self.color.to_dict(),
+            "tolerance": int(self.tolerance),
             "sample": self.sample.to_dict(),
             "captured_at": self.captured_at,
             "note": self.note,
@@ -67,7 +74,7 @@ class Point:
 
 @dataclass
 class PointsFile:
-    schema_version: int = 2
+    schema_version: int = 3
     points: List[Point] = field(default_factory=list)
 
     @staticmethod
@@ -79,7 +86,7 @@ class PointsFile:
             if isinstance(item, dict):
                 points.append(Point.from_dict(item))
         return PointsFile(
-            schema_version=as_int(d.get("schema_version", 2), 2),
+            schema_version=as_int(d.get("schema_version", 3), 3),
             points=points,
         )
 

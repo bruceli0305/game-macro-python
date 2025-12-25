@@ -22,11 +22,126 @@ from core.events.payloads import (
 from core.pick.capture import ScreenCapture, SampleSpec
 
 
+# ---- hotkey matching (aligned with ui/widgets/hotkey_entry.py output style) ----
+_MOD_KEYS = {
+    keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r,
+    keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
+    keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
+    keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r,
+}
+
+_MOD_NAME = {
+    keyboard.Key.shift: "shift",
+    keyboard.Key.shift_l: "shift",
+    keyboard.Key.shift_r: "shift",
+    keyboard.Key.ctrl: "ctrl",
+    keyboard.Key.ctrl_l: "ctrl",
+    keyboard.Key.ctrl_r: "ctrl",
+    keyboard.Key.alt: "alt",
+    keyboard.Key.alt_l: "alt",
+    keyboard.Key.alt_r: "alt",
+    keyboard.Key.cmd: "cmd",
+    keyboard.Key.cmd_l: "cmd",
+    keyboard.Key.cmd_r: "cmd",
+}
+
+_SPECIAL_NAME = {
+    keyboard.Key.esc: "esc",
+    keyboard.Key.enter: "enter",
+    keyboard.Key.tab: "tab",
+    keyboard.Key.space: "space",
+    keyboard.Key.backspace: "backspace",
+    keyboard.Key.delete: "delete",
+    keyboard.Key.insert: "insert",
+    keyboard.Key.home: "home",
+    keyboard.Key.end: "end",
+    keyboard.Key.page_up: "pageup",
+    keyboard.Key.page_down: "pagedown",
+    keyboard.Key.up: "up",
+    keyboard.Key.down: "down",
+    keyboard.Key.left: "left",
+    keyboard.Key.right: "right",
+}
+
+
+def _normalize_hotkey_string(s: str) -> str:
+    """
+    Normalize into HotkeyEntry-like format:
+    - lower-case
+    - '+' separated
+    - strip spaces
+    - collapse multiple '+'
+    """
+    s = (s or "").strip().lower()
+    s = s.replace(" ", "")
+    s = s.replace("-", "+")
+    s = s.replace("_", "+")
+    while "++" in s:
+        s = s.replace("++", "+")
+    return s.strip("+")
+
+
+def _key_to_name(k) -> str | None:
+    if isinstance(k, keyboard.KeyCode):
+        try:
+            if k.char:
+                return str(k.char).lower()
+        except Exception:
+            return None
+        return None
+
+    if k in _SPECIAL_NAME:
+        return _SPECIAL_NAME[k]
+
+    # function keys: f1..f24 etc (pynput uses .name)
+    try:
+        name = getattr(k, "name", None)
+        if isinstance(name, str) and name.startswith("f") and name[1:].isdigit():
+            return name.lower()
+    except Exception:
+        pass
+
+    # fallback
+    try:
+        name = getattr(k, "name", None)
+        if isinstance(name, str) and name:
+            return name.lower()
+    except Exception:
+        pass
+    return None
+
+
+def _compose_hotkey(mods: set[str], main_key: str) -> str:
+    """
+    Compose in the same order as HotkeyEntry:
+    ctrl, alt, shift, cmd, then key
+    """
+    ordered_mods = [m for m in ("ctrl", "alt", "shift", "cmd") if m in mods]
+    parts = ordered_mods + [main_key]
+    return "+".join([p for p in parts if p])
+
+
+def _clamp(v: int, lo: int, hi: int) -> int:
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+
 @dataclass
 class PickConfig:
     delay_ms: int = 120
     preview_throttle_ms: int = 30
     error_throttle_ms: int = 800
+
+    # Step 7: confirm by hotkey; cancel fixed to Esc
+    confirm_hotkey: str = "f8"
+
+    # Step 8: mouse avoidance
+    mouse_avoid: bool = True
+    mouse_avoid_offset_y: int = 80
+    mouse_avoid_settle_ms: int = 80
 
 
 class PickService:
@@ -34,7 +149,15 @@ class PickService:
     Strict typed events + per-thread ScreenCapture lifecycle cleanup.
 
     Step 7 change:
-    - capture_spec_provider 入参从 dict 改为 PickContextRef（彻底去掉 pick 链路 dict 传递）
+    - 确认：按配置 confirm_hotkey（格式与 HotkeyEntry 一致，如 ctrl+alt+f8 / f8）
+    - 取消：Esc 固定（仍支持外部发 PICK_CANCEL_REQUEST）
+
+    Step 8 change:
+    - 确认时执行鼠标避让：
+        1) 记录原始采样点 (x0,y0)
+        2) 鼠标只沿 Y 轴移动到 (x0, y0±offset_y)，避免 hover 高亮污染
+        3) 等待 settle_ms
+        4) 对原始点 (x0,y0) 采样并提交
     """
 
     def __init__(
@@ -52,9 +175,7 @@ class PickService:
 
         self._active = False
         self._context_ref: Optional[PickContextRef] = None
-        self._last_context_ref: Optional[PickContextRef] = None
 
-        self._mouse_listener: Optional[mouse.Listener] = None
         self._kbd_listener: Optional[keyboard.Listener] = None
 
         self._start_t = 0.0
@@ -63,8 +184,10 @@ class PickService:
         self._last_err_t = 0.0
         self._announced_preview = False
 
+        # track currently pressed modifiers (keyboard listener thread)
+        self._mods: set[str] = set()
+
         self._bus.subscribe(EventType.PICK_REQUEST, self._on_pick_request)
-        self._bus.subscribe(EventType.PICK_START_LAST, self._on_pick_start_last)
         self._bus.subscribe(EventType.PICK_CANCEL_REQUEST, self._on_pick_cancel)
 
     def close(self) -> None:
@@ -86,13 +209,6 @@ class PickService:
             return
         self.start(p.context)
 
-    def _on_pick_start_last(self, _ev: Event) -> None:
-        if self._last_context_ref is None:
-            from core.events.payloads import InfoPayload
-            self._bus.post_payload(EventType.INFO, InfoPayload(msg="未设置取色目标：请在技能/点位页点击“从屏幕取色”"))
-            return
-        self.start(self._last_context_ref)
-
     def _on_pick_cancel(self, _ev: Event) -> None:
         if self._active:
             self.cancel()
@@ -103,26 +219,17 @@ class PickService:
 
         self._active = True
         self._context_ref = context
-        self._last_context_ref = context
 
         self._start_t = time.monotonic()
         self._stop_evt.clear()
         self._last_err_t = 0.0
         self._announced_preview = False
+        self._mods.clear()
 
         self._bus.post_payload(EventType.PICK_MODE_ENTERED, PickModeEnteredPayload(context=context))
 
         try:
-            self._mouse_listener = mouse.Listener(on_click=self._on_click)
-            self._mouse_listener.start()
-        except Exception as e:
-            from core.events.payloads import ErrorPayload
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="鼠标监听启动失败", detail=str(e)))
-            self.stop(reason="mouse_listener_failed")
-            return
-
-        try:
-            self._kbd_listener = keyboard.Listener(on_press=self._on_key_press)
+            self._kbd_listener = keyboard.Listener(on_press=self._on_key_press, on_release=self._on_key_release)
             self._kbd_listener.start()
         except Exception as e:
             from core.events.payloads import ErrorPayload
@@ -133,8 +240,13 @@ class PickService:
         self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._preview_thread.start()
 
+        try:
+            hk = _normalize_hotkey_string(self._pick_config_provider().confirm_hotkey) or "f8"
+        except Exception:
+            hk = "f8"
+
         from core.events.payloads import StatusPayload
-        self._bus.post_payload(EventType.STATUS, StatusPayload(msg="取色模式：移动鼠标预览，左键确认，Esc/右键取消"))
+        self._bus.post_payload(EventType.STATUS, StatusPayload(msg=f"取色模式：移动鼠标预览，按 {hk} 确认，Esc 取消"))
 
     def cancel(self) -> None:
         if not self._active:
@@ -151,27 +263,182 @@ class PickService:
         ctx = self._context_ref
         self._active = False
         self._context_ref = None
+        self._mods.clear()
 
         self._stop_evt.set()
 
-        for lst in (self._mouse_listener, self._kbd_listener):
-            if lst is not None:
-                try:
-                    lst.stop()
-                except Exception:
-                    pass
-        self._mouse_listener = None
+        if self._kbd_listener is not None:
+            try:
+                self._kbd_listener.stop()
+            except Exception:
+                pass
         self._kbd_listener = None
 
         if ctx is not None:
             self._bus.post_payload(EventType.PICK_MODE_EXITED, PickModeExitedPayload(context=ctx, reason=reason))
 
     def _on_key_press(self, key) -> None:
+        """
+        NOTE: runs in pynput keyboard listener thread.
+        Confirmation also happens in this thread.
+        """
         try:
+            if not self._active:
+                return
+
+            # cancel fixed to Esc
             if key == keyboard.Key.esc:
                 self.cancel()
+                return
+
+            # update modifiers
+            if key in _MOD_KEYS:
+                name = _MOD_NAME.get(key, "")
+                if name:
+                    self._mods.add(name)
+                return
+
+            # main key
+            key_name = _key_to_name(key)
+            if not key_name:
+                return
+
+            cfg = self._pick_config_provider()
+            want = _normalize_hotkey_string(getattr(cfg, "confirm_hotkey", "") or "f8") or "f8"
+            got = _compose_hotkey(self._mods, key_name)
+
+            if got == want:
+                self._confirm_at_current_mouse()
+                return
+
+        except Exception:
+            # never crash listener thread
+            pass
+
+    def _on_key_release(self, key) -> None:
+        try:
+            if not self._active:
+                return
+            if key in _MOD_KEYS:
+                name = _MOD_NAME.get(key, "")
+                if name and name in self._mods:
+                    self._mods.remove(name)
         except Exception:
             pass
+
+    def _confirm_at_current_mouse(self) -> None:
+        """
+        Confirm pick at CURRENT mouse position.
+
+        Step 8:
+        - 记录原点 (x0,y0)
+        - 鼠标避让到 (x0, y0±dy) 并等待 settle_ms
+        - 对原点 (x0,y0) 采样（避免 hover 高亮污染）
+        """
+        if not self._active:
+            return
+
+        ctx_ref = self._context_ref
+        if ctx_ref is None:
+            from core.events.payloads import ErrorPayload
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败: context 为空"))
+            return
+
+        ctrl = mouse.Controller()
+
+        try:
+            # original sampling point
+            x0, y0 = ctrl.position
+            x0 = int(x0)
+            y0 = int(y0)
+
+            sample, mon_req = self._capture_spec_provider(ctx_ref)
+            mon_used, inside = self._resolve_monitor(x0, y0, mon_req)
+
+            # Step 8: mouse avoidance
+            try:
+                cfg = self._pick_config_provider()
+            except Exception:
+                cfg = PickConfig()
+
+            try:
+                do_avoid = bool(getattr(cfg, "mouse_avoid", True))
+            except Exception:
+                do_avoid = True
+
+            if do_avoid:
+                try:
+                    dy = int(getattr(cfg, "mouse_avoid_offset_y", 80) or 0)
+                except Exception:
+                    dy = 80
+                if dy != 0:
+                    try:
+                        rect = self._cap.get_monitor_rect(mon_used)
+                        # try y0 + dy first, if outside then y0 - dy
+                        y1 = y0 + dy
+                        if not (rect.top <= y1 < rect.bottom):
+                            y1 = y0 - dy
+                        y1 = _clamp(int(y1), int(rect.top), int(rect.bottom) - 1)
+
+                        # move mouse away (keep x)
+                        try:
+                            ctrl.position = (int(x0), int(y1))
+                        except Exception:
+                            pass
+
+                        try:
+                            settle_ms = int(getattr(cfg, "mouse_avoid_settle_ms", 80) or 0)
+                        except Exception:
+                            settle_ms = 80
+                        if settle_ms > 0:
+                            time.sleep(float(settle_ms) / 1000.0)
+                    except Exception:
+                        # avoidance is best-effort; do not block confirm
+                        pass
+
+            # sample original point (x0,y0) using mon_used
+            r, g, b = self._cap.get_rgb_scoped_abs(x0, y0, sample, mon_used, require_inside=False)
+            rel_x, rel_y = self._cap.abs_to_rel(x0, y0, mon_used)
+            hx = f"#{r:02X}{g:02X}{b:02X}"
+
+            payload = PickConfirmedPayload(
+                context=ctx_ref,
+                monitor_requested=mon_req,
+                monitor=mon_used,
+                inside=bool(inside),
+                x=int(rel_x),
+                y=int(rel_y),
+                vx=int(x0),
+                vy=int(y0),
+                abs_x=int(x0),
+                abs_y=int(y0),
+                r=int(r),
+                g=int(g),
+                b=int(b),
+                hex=hx,
+            )
+            self._bus.post_payload(EventType.PICK_CONFIRMED, payload)
+
+            self.stop(reason="confirmed")
+
+        except Exception as e:
+            now = time.monotonic()
+            try:
+                cfg = self._pick_config_provider()
+                throttle_ms = float(getattr(cfg, "error_throttle_ms", 800))
+            except Exception:
+                throttle_ms = 800.0
+
+            if (now - self._last_err_t) * 1000.0 >= throttle_ms:
+                self._last_err_t = now
+                from core.events.payloads import ErrorPayload
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败", detail=str(e)))
+        finally:
+            # close ScreenCapture for THIS listener thread
+            try:
+                self._cap.close_current_thread()
+            except Exception:
+                pass
 
     def _resolve_monitor(self, abs_x: int, abs_y: int, requested: str) -> tuple[str, bool]:
         req = (requested or "primary").strip().lower() or "primary"
@@ -189,67 +456,6 @@ class PickService:
 
         used = self._cap.find_monitor_key_for_abs(int(abs_x), int(abs_y), default=req)
         return used, False
-
-    def _on_click(self, abs_x: int, abs_y: int, button, pressed: bool) -> None:
-        """
-        NOTE: runs in pynput mouse listener thread.
-        We close ScreenCapture for this thread in finally.
-        """
-        try:
-            if not self._active or not pressed:
-                return
-
-            if button == mouse.Button.right:
-                self.cancel()
-                return
-
-            if button != mouse.Button.left:
-                return
-
-            ctx_ref = self._context_ref
-            if ctx_ref is None:
-                from core.events.payloads import ErrorPayload
-                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败: context 为空"))
-                return
-
-            sample, mon_req = self._capture_spec_provider(ctx_ref)
-            mon_used, inside = self._resolve_monitor(int(abs_x), int(abs_y), mon_req)
-
-            r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
-            rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon_used)
-            hx = f"#{r:02X}{g:02X}{b:02X}"
-
-            payload = PickConfirmedPayload(
-                context=ctx_ref,
-                monitor_requested=mon_req,
-                monitor=mon_used,
-                inside=bool(inside),
-                x=int(rel_x),
-                y=int(rel_y),
-                vx=int(abs_x),
-                vy=int(abs_y),
-                abs_x=int(abs_x),
-                abs_y=int(abs_y),
-                r=int(r),
-                g=int(g),
-                b=int(b),
-                hex=hx,
-            )
-            self._bus.post_payload(EventType.PICK_CONFIRMED, payload)
-            self.stop(reason="confirmed")
-
-        except Exception as e:
-            now = time.monotonic()
-            cfg = self._pick_config_provider()
-            if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
-                self._last_err_t = now
-                from core.events.payloads import ErrorPayload
-                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败", detail=str(e)))
-        finally:
-            try:
-                self._cap.close_current_thread()
-            except Exception:
-                pass
 
     def _preview_loop(self) -> None:
         """

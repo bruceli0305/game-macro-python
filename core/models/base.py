@@ -1,3 +1,4 @@
+# File: core/models/base.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,27 +34,14 @@ class CaptureConfig:
 
 
 @dataclass
-class HotkeysConfig:
-    enter_pick_mode: str = "ctrl+alt+p"
-    cancel_pick: str = "esc"
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "HotkeysConfig":
-        d = as_dict(d)
-        return HotkeysConfig(
-            enter_pick_mode=as_str(d.get("enter_pick_mode", "ctrl+alt+p"), "ctrl+alt+p"),
-            cancel_pick=as_str(d.get("cancel_pick", "esc"), "esc"),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "enter_pick_mode": self.enter_pick_mode,
-            "cancel_pick": self.cancel_pick,
-        }
-
-
-@dataclass
 class PickAvoidanceConfig:
+    """
+    Window avoidance + preview UX config.
+
+    NOTE:
+    - 这部分先保持现有结构（avoidance 子结构），避免一次性影响太多 UI/Controller 代码。
+    - 后续如要扁平化，可在 Step 6+ 统一替换引用路径。
+    """
     mode: str = "hide_main"  # "hide_main" | "minimize" | "move_aside" | "none"
     delay_ms: int = 120
     preview_follow_cursor: bool = True
@@ -83,17 +71,42 @@ class PickAvoidanceConfig:
 
 @dataclass
 class PickConfig:
+    """
+    pick config root.
+
+    Step 4 change:
+    - 移除全局取色/取消取色热键（base.hotkeys 全段删除）
+    - 新增：确认取色热键 + 鼠标避让配置（供 PickService 使用）
+    """
     avoidance: PickAvoidanceConfig = field(default_factory=PickAvoidanceConfig)
+
+    # confirm pick by hotkey (Esc is fixed cancel in PickService)
+    confirm_hotkey: str = "f8"
+
+    # mouse avoidance: move mouse away (Y-axis) before sampling the original point
+    mouse_avoid: bool = True
+    mouse_avoid_offset_y: int = 80
+    mouse_avoid_settle_ms: int = 80
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "PickConfig":
         d = as_dict(d)
         return PickConfig(
-            avoidance=PickAvoidanceConfig.from_dict(d.get("avoidance", {}) or {})
+            avoidance=PickAvoidanceConfig.from_dict(d.get("avoidance", {}) or {}),
+            confirm_hotkey=as_str(d.get("confirm_hotkey", "f8"), "f8"),
+            mouse_avoid=as_bool(d.get("mouse_avoid", True), True),
+            mouse_avoid_offset_y=clamp_int(as_int(d.get("mouse_avoid_offset_y", 80), 80), 0, 500),
+            mouse_avoid_settle_ms=clamp_int(as_int(d.get("mouse_avoid_settle_ms", 80), 80), 0, 500),
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"avoidance": self.avoidance.to_dict()}
+        return {
+            "avoidance": self.avoidance.to_dict(),
+            "confirm_hotkey": self.confirm_hotkey,
+            "mouse_avoid": bool(self.mouse_avoid),
+            "mouse_avoid_offset_y": int(self.mouse_avoid_offset_y),
+            "mouse_avoid_settle_ms": int(self.mouse_avoid_settle_ms),
+        }
 
 
 @dataclass
@@ -120,11 +133,13 @@ class IOConfig:
 class BaseFile:
     """
     Represents base.json root object.
+
+    Step 4 change:
+    - 删除 hotkeys 字段（不再存在全局进入/取消取色热键）
     """
-    schema_version: int = 1
+    schema_version: int = 2
     ui: UIConfig = field(default_factory=UIConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
-    hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
     pick: PickConfig = field(default_factory=PickConfig)
     io: IOConfig = field(default_factory=IOConfig)
 
@@ -132,10 +147,9 @@ class BaseFile:
     def from_dict(d: Dict[str, Any]) -> "BaseFile":
         d = as_dict(d)
         return BaseFile(
-            schema_version=as_int(d.get("schema_version", 1), 1),
+            schema_version=as_int(d.get("schema_version", 2), 2),
             ui=UIConfig.from_dict(d.get("ui", {}) or {}),
             capture=CaptureConfig.from_dict(d.get("capture", {}) or {}),
-            hotkeys=HotkeysConfig.from_dict(d.get("hotkeys", {}) or {}),
             pick=PickConfig.from_dict(d.get("pick", {}) or {}),
             io=IOConfig.from_dict(d.get("io", {}) or {}),
         )
@@ -145,7 +159,6 @@ class BaseFile:
             "schema_version": int(self.schema_version),
             "ui": self.ui.to_dict(),
             "capture": self.capture.to_dict(),
-            "hotkeys": self.hotkeys.to_dict(),
             "pick": self.pick.to_dict(),
             "io": self.io.to_dict(),
         }

@@ -1,9 +1,10 @@
+# File: ui/app_window.py
 from __future__ import annotations
 
 import tkinter as tk
+import logging
 
 import ttkbootstrap as tb
-import logging
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
@@ -14,9 +15,9 @@ from core.repos.app_state_repo import AppStateRepo
 from core.app.services.app_services import AppServices
 from core.app.services.profile_service import ProfileService
 from core.app.pick_orchestrator import PickOrchestrator
-from core.input.global_hotkeys import HotkeyConfig
 
 from core.events.payloads import DirtyStateChangedPayload
+
 # optional pick engine
 try:
     from core.pick.pick_service import PickService, PickConfig
@@ -33,7 +34,6 @@ from ui.app.pages_manager import PagesManager
 from ui.app.pick_ui import PickUiController
 from ui.app.profile_controller import ProfileController
 from ui.app.status import StatusBar, StatusController
-from ui.app.hotkeys_controller import HotkeysController
 from ui.app.unsaved_guard import UnsavedChangesGuard
 from ui.app.window_state import WindowStateController
 
@@ -100,16 +100,6 @@ class AppWindow(tb.Window):
         # ---- controllers ----
         self._status = StatusController(root=self, bar=self._status_bar, bus=self._bus)
 
-        # hotkeys controller: reload on HOTKEYS_CHANGED
-        self._hotkeys = HotkeysController(
-            bus=self._bus,
-            config_provider=lambda: HotkeyConfig(
-                enter_pick_mode=self._ctx.base.hotkeys.enter_pick_mode,
-                cancel_pick=self._ctx.base.hotkeys.cancel_pick,
-            ),
-        )
-        self._hotkeys.start()
-
         # pages
         self._pages = PagesManager(master=self._content, ctx=self._ctx, bus=self._bus, services=self._services)
 
@@ -137,12 +127,37 @@ class AppWindow(tb.Window):
         # ---- optional pick engine ----
         self._pick = None
         if PickService is not None and PickConfig is not None and SampleSpec is not None:
+            # Step 6: pass confirm_hotkey + mouse_avoid configs into PickService
+            try:
+                confirm_hotkey = str(getattr(self._ctx.base.pick, "confirm_hotkey", "") or "f8")
+            except Exception:
+                confirm_hotkey = "f8"
+
+            try:
+                mouse_avoid = bool(getattr(self._ctx.base.pick, "mouse_avoid", True))
+            except Exception:
+                mouse_avoid = True
+
+            try:
+                mouse_avoid_offset_y = int(getattr(self._ctx.base.pick, "mouse_avoid_offset_y", 80))
+            except Exception:
+                mouse_avoid_offset_y = 80
+
+            try:
+                mouse_avoid_settle_ms = int(getattr(self._ctx.base.pick, "mouse_avoid_settle_ms", 80))
+            except Exception:
+                mouse_avoid_settle_ms = 80
+
             self._pick = PickService(
                 bus=self._bus,
                 pick_config_provider=lambda: PickConfig(
                     delay_ms=int(self._ctx.base.pick.avoidance.delay_ms),
                     preview_throttle_ms=30,
                     error_throttle_ms=800,
+                    confirm_hotkey=confirm_hotkey,
+                    mouse_avoid=mouse_avoid,
+                    mouse_avoid_offset_y=mouse_avoid_offset_y,
+                    mouse_avoid_settle_ms=mouse_avoid_settle_ms,
                 ),
                 capture_spec_provider=self._capture_spec_for_context,
             )
@@ -212,12 +227,6 @@ class AppWindow(tb.Window):
         # pages get new ctx
         self._pages.set_context(ctx)
 
-        # hotkeys depend on ctx.base
-        try:
-            self._hotkeys.start()
-        except Exception:
-            pass
-
         # refresh profile combobox
         self._refresh_profiles_ui(ctx.profile_name)
 
@@ -261,6 +270,7 @@ class AppWindow(tb.Window):
             pass
 
         return SampleSpec(mode=mode, radius=radius), mon
+
     # ---------- dirty title ----------
     def _on_dirty_state_changed(self, ev: Event) -> None:
         p = ev.payload
@@ -284,11 +294,6 @@ class AppWindow(tb.Window):
         # stop controllers/services
         try:
             self._pump.stop()
-        except Exception:
-            pass
-
-        try:
-            self._hotkeys.stop()
         except Exception:
             pass
 
