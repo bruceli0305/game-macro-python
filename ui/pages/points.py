@@ -334,42 +334,41 @@ class PointsPage(PickNotebookCrudPage):
         except Exception:
             vx, vy = rel_x, rel_y
 
-        from core.app.services.points_service import PointFormPatch  # local import to avoid cycles
+        from core.app.services.points_service import PointFormPatch
 
         patch = PointFormPatch(
             name=self.var_name.get(),
             monitor=mon,
             vx=int(vx),
             vy=int(vy),
-
             r=int(self.var_r.get()),
             g=int(self.var_g.get()),
             b=int(self.var_b.get()),
-
             captured_at=self.var_captured_at.get(),
             sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
             sample_radius=int(self.var_sample_radius.get()),
-
             note=self._txt_note.get("1.0", "end").rstrip("\n"),
         )
 
         if self._services is not None:
             try:
-                saved = self._services.points.apply_form_patch(pid, patch, auto_save=bool(auto_save))
+                changed, saved = self._services.points.apply_form_patch(pid, patch, auto_save=bool(auto_save))
             except Exception as e:
                 self._bus.post(EventType.ERROR, msg=f"应用表单失败: {e}")
                 return False
 
-            self.update_tree_row(pid)
+            if not changed:
+                return True
 
+            self.update_tree_row(pid)
             if saved:
                 self.clear_dirty()
             else:
                 self.mark_dirty()
-
             return True
 
         return True
+        
     def _find_point(self, pid: str) -> Point | None:
         for p in self._ctx.points.points:
             if p.id == pid:

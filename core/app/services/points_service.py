@@ -55,12 +55,8 @@ class PointsService:
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("points")
 
-    # ---------------- pure mutation: form apply (NEW) ----------------
-    def apply_form_patch(self, pid: str, patch: PointFormPatch, *, auto_save: bool) -> bool:
-        p = self.find(pid)
-        if p is None:
-            return False
-
+    # -------- patch apply (idempotent) --------
+    def _apply_patch_to_point(self, p: Point, patch: PointFormPatch) -> None:
         p.name = (patch.name or "").strip()
         p.monitor = (patch.monitor or "primary").strip() or "primary"
         p.vx = clamp_int(int(patch.vx), -10**9, 10**9)
@@ -77,19 +73,38 @@ class PointsService:
 
         p.note = patch.note or ""
 
+    def apply_form_patch(self, pid: str, patch: PointFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
+        """
+        Returns (changed, saved).
+        """
+        p = self.find(pid)
+        if p is None:
+            return (False, False)
+
+        before = p.to_dict()
+        tmp = Point.from_dict(before)
+        self._apply_patch_to_point(tmp, patch)
+        after = tmp.to_dict()
+
+        if after == before:
+            return (False, False)
+
+        self._apply_patch_to_point(p, patch)
         self.mark_dirty()
         self._notify_dirty()
 
+        saved = False
         if auto_save:
             try:
                 if bool(getattr(self.ctx.base.io, "auto_save", False)):
                     backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
                     self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
+                    saved = True
                     self._notify_dirty()
-                    return True
             except Exception:
-                pass
-        return False
+                saved = False
+
+        return (True, saved)
 
     # ---------------- pure mutation CRUD (no events) ----------------
     def create_point(self, *, name: str = "新点位") -> Point:
@@ -131,7 +146,7 @@ class PointsService:
             return True
         return False
 
-    # ---------------- save ----------------
+    # ---------------- manual save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
         self._uow.commit(parts={"points"}, backup=backup, touch_meta=True)
 

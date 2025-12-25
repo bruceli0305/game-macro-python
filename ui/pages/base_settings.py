@@ -12,6 +12,7 @@ from core.profiles import ProfileContext
 from core.app.services.base_settings_service import BaseSettingsPatch
 from ui.widgets.hotkey_entry import HotkeyEntry
 
+from core.models.base import BaseFile
 
 _DARK_THEMES = ["darkly", "superhero", "cyborg", "solar", "vapor"]
 _LIGHT_THEMES = ["flatly", "litera", "cosmo", "journal", "minty", "lumen", "pulse", "sandstone", "simplex", "yeti"]
@@ -365,3 +366,28 @@ class BaseSettingsPage(tb.Frame):
             self._apply_hotkey_error(str(e))
             self._bus.post(EventType.ERROR, msg=f"保存失败: {e}")
             messagebox.showerror("保存失败", f"{e}", parent=self.winfo_toplevel())
+    def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
+        # theme
+        theme = (patch.theme or "").strip()
+        if theme == "---" or not theme:
+            theme = "darkly"
+        b.ui.theme = theme
+
+        # capture
+        b.capture.monitor_policy = (patch.monitor_policy or "primary").strip() or "primary"
+
+        # hotkeys（已在 validate_patch 校验）
+        b.hotkeys.enter_pick_mode = (patch.hotkey_enter_pick or "").strip()
+        b.hotkeys.cancel_pick = (patch.hotkey_cancel_pick or "").strip()
+
+        # avoidance
+        av = b.pick.avoidance
+        av.mode = (patch.avoid_mode or "hide_main").strip() or "hide_main"
+        av.delay_ms = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
+        av.preview_follow_cursor = bool(patch.preview_follow)
+        av.preview_offset = (int(patch.preview_offset_x), int(patch.preview_offset_y))
+        av.preview_anchor = (patch.preview_anchor or "bottom_right").strip() or "bottom_right"
+
+        # io
+        b.io.auto_save = bool(patch.auto_save)
+        b.io.backup_on_save = bool(patch.backup_on_save)

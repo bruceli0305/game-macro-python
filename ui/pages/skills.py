@@ -343,7 +343,7 @@ class SkillsPage(PickNotebookCrudPage):
 
         sid = self._current_id
 
-        # 1) 先把 UI 输入整理成 vx/vy（UI 做坐标换算，不写模型）
+        # UI -> vx/vy
         mon = (self.var_monitor.get() or "primary").strip() or "primary"
         rel_x = clamp_int(int(self.var_x.get()), 0, 10**9)
         rel_y = clamp_int(int(self.var_y.get()), 0, 10**9)
@@ -352,50 +352,45 @@ class SkillsPage(PickNotebookCrudPage):
         except Exception:
             vx, vy = rel_x, rel_y
 
-        from core.app.services.skills_service import SkillFormPatch  # local import to avoid cycles
+        from core.app.services.skills_service import SkillFormPatch
 
         patch = SkillFormPatch(
             name=self.var_name.get(),
             enabled=bool(self.var_enabled.get()),
             trigger_key=self.var_trigger_key.get(),
             readbar_ms=int(self.var_readbar.get()),
-
             monitor=mon,
             vx=int(vx),
             vy=int(vy),
-
             r=int(self.var_r.get()),
             g=int(self.var_g.get()),
             b=int(self.var_b.get()),
-
             tolerance=int(self.var_tol.get()),
             sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.var_sample_mode.get(), "single"),
             sample_radius=int(self.var_sample_radius.get()),
-
             note=self._txt_note.get("1.0", "end").rstrip("\n"),
         )
 
-        # 2) 交给 service 更新模型 + 可选 autosave（touch_meta=False）
         if self._services is not None:
             try:
-                saved = self._services.skills.apply_form_patch(sid, patch, auto_save=bool(auto_save))
+                changed, saved = self._services.skills.apply_form_patch(sid, patch, auto_save=bool(auto_save))
             except Exception as e:
                 self._bus.post(EventType.ERROR, msg=f"应用表单失败: {e}")
                 return False
 
-            # 本地 UI 刷新 tree 行（更快，不依赖事件）
-            self.update_tree_row(sid)
+            if not changed:
+                # IMPORTANT: no change -> do not mark dirty
+                return True
 
+            self.update_tree_row(sid)
             if saved:
                 self.clear_dirty()
             else:
-                # 只要发生了 apply，就应该算 dirty（除非已 autosave）
                 self.mark_dirty()
-
             return True
 
-        # 没 services 的极端 fallback：保持原逻辑（直接认为 ok）
         return True
+        
     def _find_skill(self, sid: str) -> Skill | None:
         for s in self._ctx.skills.skills:
             if s.id == sid:

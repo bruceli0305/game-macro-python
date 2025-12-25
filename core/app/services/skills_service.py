@@ -33,12 +33,6 @@ class SkillFormPatch:
 
 
 class SkillsService:
-    """
-    Two layers of API:
-    - Pure mutation methods: create/clone/delete/apply_pick/apply_form_patch (no events)
-    - Command methods: *_cmd (publish events + optional auto-save + notify_dirty)
-    """
-
     def __init__(
         self,
         *,
@@ -63,16 +57,8 @@ class SkillsService:
     def mark_dirty(self) -> None:
         self._uow.mark_dirty("skills")
 
-    # ---------------- pure mutation: form apply (NEW) ----------------
-    def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> bool:
-        """
-        Apply UI form patch -> model, optionally auto-save (touch_meta=False).
-        Returns saved(bool).
-        """
-        s = self.find(sid)
-        if s is None:
-            return False
-
+    # -------- patch apply (idempotent) --------
+    def _apply_patch_to_skill(self, s: Skill, patch: SkillFormPatch) -> None:
         s.name = (patch.name or "").strip()
         s.enabled = bool(patch.enabled)
 
@@ -95,21 +81,41 @@ class SkillsService:
 
         s.note = patch.note or ""
 
+    def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
+        """
+        Returns (changed, saved).
+        - changed=False -> no-op, do not mark dirty
+        - saved=True only when auto_save triggered and commit succeeded
+        """
+        s = self.find(sid)
+        if s is None:
+            return (False, False)
+
+        before = s.to_dict()
+        tmp = Skill.from_dict(before)
+        self._apply_patch_to_skill(tmp, patch)
+        after = tmp.to_dict()
+
+        if after == before:
+            return (False, False)
+
+        # apply for real
+        self._apply_patch_to_skill(s, patch)
         self.mark_dirty()
         self._notify_dirty()
 
-        # auto-save for form apply: do NOT touch meta
+        saved = False
         if auto_save:
             try:
                 if bool(getattr(self.ctx.base.io, "auto_save", False)):
                     backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
                     self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
+                    saved = True
                     self._notify_dirty()
-                    return True
             except Exception:
-                # caller will surface errors via _save_to_disk or UI message
-                pass
-        return False
+                saved = False
+
+        return (True, saved)
 
     # ---------------- pure mutation CRUD (no events) ----------------
     def create_skill(self, *, name: str = "新技能") -> Skill:
@@ -143,9 +149,8 @@ class SkillsService:
             return True
         return False
 
-    # ---------------- save ----------------
+    # ---------------- manual save ----------------
     def save(self, *, backup: Optional[bool] = None) -> None:
-        # manual save: keep touch_meta default True
         self._uow.commit(parts={"skills"}, backup=backup, touch_meta=True)
 
     # ---------------- pick apply (no events; orchestrator publishes) ----------------

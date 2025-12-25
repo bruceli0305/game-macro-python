@@ -7,6 +7,7 @@ from core.app.uow import ProfileUnitOfWork
 from core.event_bus import EventBus
 from core.event_types import EventType
 from core.input.hotkey_strings import to_pynput_hotkey
+from core.models.base import BaseFile
 from core.models.common import clamp_int
 
 
@@ -32,10 +33,9 @@ class BaseSettingsPatch:
 class BaseSettingsService:
     """
     Application service for base.json settings.
-    - validate input (hotkeys etc.)
-    - apply to model
-    - commit via UoW
-    - publish UI refresh events (theme/hotkeys/config_saved)
+
+    Key property:
+    - apply_patch() is idempotent: if patch doesn't change model, it will NOT mark dirty.
     """
 
     def __init__(
@@ -57,11 +57,10 @@ class BaseSettingsService:
         """
         Validate patch and raise ValueError with FIELD-PREFIXED messages.
 
-        Error message conventions:
+        Conventions:
           - "enter_pick_mode: <msg>"
           - "cancel_pick: <msg>"
           - "hotkeys: <msg>" (conflict etc.)
-          - "base: <msg>" (generic)
         """
         enter_raw = (patch.hotkey_enter_pick or "").strip()
         cancel_raw = (patch.hotkey_cancel_pick or "").strip()
@@ -84,12 +83,7 @@ class BaseSettingsService:
         if enter_pp == cancel_pp:
             raise ValueError("hotkeys: 热键冲突：进入取色 与 取消取色 不能相同")
 
-    def apply_patch(self, patch: BaseSettingsPatch) -> None:
-        # validate first
-        self.validate_patch(patch)
-
-        b = self.ctx.base
-
+    def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         theme = (patch.theme or "").strip()
         if theme == "---" or not theme:
             theme = "darkly"
@@ -97,11 +91,9 @@ class BaseSettingsService:
 
         b.capture.monitor_policy = (patch.monitor_policy or "primary").strip() or "primary"
 
-        # hotkeys (already validated)
         b.hotkeys.enter_pick_mode = (patch.hotkey_enter_pick or "").strip()
         b.hotkeys.cancel_pick = (patch.hotkey_cancel_pick or "").strip()
 
-        # avoidance
         av = b.pick.avoidance
         av.mode = (patch.avoid_mode or "hide_main").strip() or "hide_main"
         av.delay_ms = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
@@ -109,19 +101,48 @@ class BaseSettingsService:
         av.preview_offset = (int(patch.preview_offset_x), int(patch.preview_offset_y))
         av.preview_anchor = (patch.preview_anchor or "bottom_right").strip() or "bottom_right"
 
-        # io
         b.io.auto_save = bool(patch.auto_save)
         b.io.backup_on_save = bool(patch.backup_on_save)
 
+    def apply_patch(self, patch: BaseSettingsPatch) -> bool:
+        """
+        Apply patch to in-memory model.
+        Returns changed(bool). If unchanged, does NOT mark dirty.
+        """
+        self.validate_patch(patch)
+
+        before = self.ctx.base.to_dict()
+
+        tmp = BaseFile.from_dict(before)
+        self._apply_to_basefile(tmp, patch)
+        after = tmp.to_dict()
+
+        if after == before:
+            return False
+
+        self._apply_to_basefile(self.ctx.base, patch)
         self._uow.mark_dirty("base")
         self._notify_dirty()
+        return True
 
     def save_cmd(self, patch: BaseSettingsPatch) -> None:
         """
-        Apply + commit base settings (manual save).
-        Always touch meta.
+        Manual save:
+        - If patch is unchanged AND base is not dirty -> no-op.
+        - If base is already dirty (from previous apply/flush), still commit.
         """
-        self.apply_patch(patch)
+        changed = self.apply_patch(patch)
+
+        # Important: base might already be dirty even if patch matches current model.
+        try:
+            base_dirty = "base" in self._uow.dirty_parts()
+        except Exception:
+            base_dirty = False
+
+        if not changed and not base_dirty:
+            if self._bus is not None:
+                self._bus.post(EventType.STATUS, msg="未检测到更改")
+            return
 
         backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
         self._uow.commit(parts={"base"}, backup=backup, touch_meta=True)
