@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
 from core.input.global_hotkeys import GlobalHotkeyService, HotkeyConfig
+
+log = logging.getLogger(__name__)
 
 
 class HotkeysController:
@@ -15,10 +18,19 @@ class HotkeysController:
         self._bus.subscribe(EventType.HOTKEYS_CHANGED, self._on_hotkeys_changed)
 
     def start(self) -> None:
-        self._svc.start()
+        try:
+            self._svc.start()
+        except Exception:
+            log.exception("HotkeysController.start failed")
 
     def stop(self) -> None:
-        self._svc.stop()
+        try:
+            self._svc.stop()
+        except Exception:
+            log.exception("HotkeysController.stop failed")
 
     def _on_hotkeys_changed(self, _ev: Event) -> None:
-        self._svc.start()
+        try:
+            self._svc.start()
+        except Exception:
+            log.exception("HotkeysController reload failed")

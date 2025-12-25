@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from tkinter import messagebox
 
 from core.app.services.app_services import AppServices
+
+log = logging.getLogger(__name__)
 
 
 class UnsavedChangesGuard:
@@ -17,6 +20,7 @@ class UnsavedChangesGuard:
         try:
             parts = self._services.uow.dirty_parts()
         except Exception:
+            log.exception("read uow dirty_parts failed")
             return []
         mapping = {
             "base": "基础配置",
@@ -34,7 +38,10 @@ class UnsavedChangesGuard:
         """
         Returns True if allowed to proceed, False if cancelled.
         """
-        self._pages.flush_all()
+        try:
+            self._pages.flush_all()
+        except Exception:
+            log.exception("pages.flush_all failed (action=%s)", action_name)
 
         dirty = self._dirty_names()
         if not dirty:
@@ -57,21 +64,27 @@ class UnsavedChangesGuard:
                 self._services.uow.rollback()
                 self._services.notify_dirty()
             except Exception:
-                pass
-            # refresh pages to reflect rollback
+                log.exception("uow.rollback failed (action=%s)", action_name)
+
             try:
                 self._pages.set_context(ctx)
             except Exception:
-                pass
+                log.exception("pages.set_context failed after rollback (action=%s)", action_name)
+
             return True
 
         # Yes -> save dirty parts
         try:
             parts = self._services.uow.dirty_parts()
             if parts:
-                self._services.uow.commit(parts=set(parts), backup=bool(self._backup_provider()), touch_meta=True)
+                self._services.uow.commit(
+                    parts=set(parts),
+                    backup=bool(self._backup_provider()),
+                    touch_meta=True,
+                )
             self._services.notify_dirty()
             return True
         except Exception as e:
+            log.exception("uow.commit failed (action=%s)", action_name)
             messagebox.showerror("保存失败", f"保存失败：{e}", parent=self._root)
             return False

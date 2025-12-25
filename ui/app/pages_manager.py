@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from typing import Dict
 
@@ -12,6 +13,8 @@ from core.app.services.app_services import AppServices
 from ui.pages.base_settings import BaseSettingsPage
 from ui.pages.skills import SkillsPage
 from ui.pages.points import PointsPage
+
+log = logging.getLogger(__name__)
 
 
 class PagesManager:
@@ -38,27 +41,28 @@ class PagesManager:
 
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
-        for p in self.pages.values():
+        for k, p in self.pages.items():
             if hasattr(p, "set_context"):
                 try:
                     p.set_context(ctx)  # type: ignore[attr-defined]
                 except Exception:
-                    pass
+                    log.exception("PagesManager.set_context failed on page=%s", k)
 
     def flush_all(self) -> None:
         """
         Flush UI -> model before saves/switch.
         Priority: flush_to_model() then legacy _apply_form_to_current()
         """
-        for p in self.pages.values():
+        for k, p in self.pages.items():
             if hasattr(p, "flush_to_model"):
                 try:
                     p.flush_to_model()  # type: ignore[attr-defined]
                     continue
                 except Exception:
-                    pass
+                    log.exception("PagesManager.flush_to_model failed on page=%s", k)
+
             if hasattr(p, "_apply_form_to_current"):
                 try:
                     p._apply_form_to_current(auto_save=False)  # type: ignore[attr-defined]
                 except Exception:
-                    pass
+                    log.exception("PagesManager._apply_form_to_current flush failed on page=%s", k)

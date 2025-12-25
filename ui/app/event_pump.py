@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from typing import Callable, Optional
 
 from core.event_bus import EventBus, Event
 
+log = logging.getLogger(__name__)
+
 
 class EventPump:
     """
     Periodically drains EventBus in Tk main thread via after().
+
+    Logging:
+    - Any handler exception will be logged with stacktrace (unless caller overrides on_handler_error).
+    - Any unexpected pump exception will be logged too.
     """
 
     def __init__(
@@ -38,7 +45,7 @@ class EventPump:
             try:
                 self._root.after_cancel(self._after_id)
             except Exception:
-                pass
+                log.exception("EventPump.after_cancel failed")
             self._after_id = None
 
     def _schedule(self) -> None:
@@ -46,8 +53,18 @@ class EventPump:
             return
         self._after_id = self._root.after(self._tick_ms, self._tick)
 
+    def _on_error_default(self, ev: Event, err: BaseException) -> None:
+        try:
+            log.exception("Event handler failed: %s", getattr(ev.type, "value", ev.type), exc_info=err)
+        except Exception:
+            # last resort: do not crash the UI pump
+            pass
+
     def _tick(self) -> None:
         try:
-            self._bus.dispatch_pending(max_events=200, on_error=self._on_handler_error)
+            on_err = self._on_handler_error or self._on_error_default
+            self._bus.dispatch_pending(max_events=200, on_error=on_err)
+        except Exception:
+            log.exception("EventPump tick failed")
         finally:
             self._schedule()

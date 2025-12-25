@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 
 import ttkbootstrap as tb
+import logging
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
@@ -171,6 +172,7 @@ class AppWindow(tb.Window):
         self._services.notify_dirty()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.report_callback_exception = self._tk_exc_handler
 
     # ---------- callbacks from Nav ----------
     def _on_nav(self, page_key: str) -> None:
@@ -183,6 +185,10 @@ class AppWindow(tb.Window):
 
     def _on_profile_select(self, name: str) -> None:
         self._profile_ctrl.on_select(name, self._ctx)
+
+    def _tk_exc_handler(exc, val, tb_):
+        log = logging.getLogger("tk")
+        log.exception("tk callback exception", exc_info=(exc, val, tb_))
 
     def _on_profile_action(self, action: str) -> None:
         self._profile_ctrl.on_action(action, self._ctx)

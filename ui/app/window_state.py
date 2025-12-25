@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 
 from core.models.app_state import AppState
 from core.repos.app_state_repo import AppStateRepo
+
+log = logging.getLogger(__name__)
 
 
 class WindowStateController:
@@ -23,7 +26,7 @@ class WindowStateController:
             else:
                 self._root.geometry(f"{w}x{h}")
         except Exception:
-            pass
+            log.exception("apply_initial_geometry failed")
 
     def persist_current_geometry(self) -> None:
         try:
@@ -34,4 +37,4 @@ class WindowStateController:
             self._state.window.y = int(self._root.winfo_y())
             self._repo.save(self._state)
         except Exception:
-            pass
+            log.exception("persist_current_geometry failed")
