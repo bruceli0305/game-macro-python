@@ -38,9 +38,6 @@ class UnsavedChangesGuard:
         return out
 
     def confirm(self, *, action_name: str, ctx) -> bool:
-        """
-        Returns True if allowed to proceed, False if cancelled.
-        """
         try:
             self._pages.flush_all()
         except Exception:
@@ -62,27 +59,24 @@ class UnsavedChangesGuard:
         if res is None:
             return False
 
-        # No -> rollback in-memory
         if res is False:
             try:
                 self._services.rollback_cmd()
             except Exception:
                 log.exception("services.rollback_cmd failed (action=%s)", action_name)
 
-            # rollback 后 UI 需要重绑当前 ctx 的对象引用（pages 持有 ctx 指针）
+            # rollback 后刷新页面（对象引用已被替换）
             try:
                 self._pages.set_context(ctx)
+                self._pages.flush_all()
+                self._pages.show("base")  # optional: keep UI stable
             except Exception:
-                log.exception("pages.set_context failed after rollback (action=%s)", action_name)
+                pass
 
             return True
 
-        # Yes -> save dirty parts
         try:
-            self._services.save_dirty_cmd(
-                backup=bool(self._backup_provider()),
-                touch_meta=True,
-            )
+            self._services.save_dirty_cmd(backup=bool(self._backup_provider()), touch_meta=True)
             return True
         except Exception as e:
             log.exception("services.save_dirty_cmd failed (action=%s)", action_name)

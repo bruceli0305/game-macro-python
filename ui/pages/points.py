@@ -395,7 +395,9 @@ class PointsPage(PickNotebookCrudPage):
         )
 
         try:
-            self._services.points.apply_form_patch(pid, patch, auto_save=False)
+            changed, _saved = self._services.points.apply_form_patch(pid, patch, auto_save=False)
+            if changed:
+                self.update_tree_row(pid)
         except Exception as e:
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
             return False
@@ -417,3 +419,13 @@ class PointsPage(PickNotebookCrudPage):
             self._apply_form_to_current(auto_save=False)
         except Exception:
             pass
+    def _apply_pick_confirmed(self, rid: str, payload) -> tuple[bool, bool]:
+        return self._services.points.apply_pick_cmd(
+            rid,
+            vx=payload.vx,
+            vy=payload.vy,
+            monitor=payload.monitor,
+            r=payload.r,
+            g=payload.g,
+            b=payload.b,
+        )

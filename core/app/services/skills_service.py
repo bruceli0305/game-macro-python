@@ -1,12 +1,13 @@
+# File: core/app/services/skills_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from core.app.uow import ProfileUnitOfWork
+from core.store.app_store import AppStore
 from core.event_bus import EventBus
 from core.event_types import EventType
-from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload
+from core.events.payloads import ErrorPayload
 from core.models.common import clamp_int
 from core.models.skill import Skill, ColorRGB
 
@@ -34,27 +35,20 @@ class SkillFormPatch:
 
 
 class SkillsService:
-    """
-    Step 10 (part 2) result:
-    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd（旧 *skill_cmd 已移除）
-    - 保存/重载统一：save_cmd/reload_cmd
-    - 表单 apply 成功后：发布 RECORD_UPDATED(source="form")，让 UI 只“吃事件”刷新
-    """
-
     def __init__(
         self,
         *,
-        uow: ProfileUnitOfWork,
+        store: AppStore,
         bus: Optional[EventBus] = None,
         notify_dirty: Optional[Callable[[], None]] = None,
     ) -> None:
-        self._uow = uow
+        self._store = store
         self._bus = bus
         self._notify_dirty = notify_dirty or (lambda: None)
 
     @property
     def ctx(self):
-        return self._uow.ctx
+        return self._store.ctx
 
     def find(self, sid: str) -> Optional[Skill]:
         for s in self.ctx.skills.skills:
@@ -63,7 +57,7 @@ class SkillsService:
         return None
 
     def mark_dirty(self) -> None:
-        self._uow.mark_dirty("skills")
+        self._store.mark_dirty("skills")
 
     def _apply_patch_to_skill(self, s: Skill, patch: SkillFormPatch) -> None:
         s.name = (patch.name or "").strip()
@@ -107,25 +101,44 @@ class SkillsService:
 
         saved = False
         if auto_save:
-            try:
-                if bool(getattr(self.ctx.base.io, "auto_save", False)):
-                    backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
-                    self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
-                    saved = True
-                    self._notify_dirty()
-            except Exception:
-                saved = False
+            saved = self._maybe_autosave()
+            self._notify_dirty()
 
-        # Step 5: 统一通过事件让 UI 刷新（source="form" 不 reload 表单）
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_UPDATED,
-                RecordUpdatedPayload(record_type="skill_pixel", id=sid, source="form", saved=bool(saved)),
-            )
+        return (True, bool(saved))
 
-        return (True, saved)
+    def apply_pick_cmd(
+        self,
+        sid: str,
+        *,
+        vx: int,
+        vy: int,
+        monitor: str,
+        r: int,
+        g: int,
+        b: int,
+    ) -> tuple[bool, bool]:
+        """
+        Used by UI on PICK_CONFIRMED.
+        Returns (applied, saved).
+        """
+        s = self.find(sid)
+        if s is None:
+            return (False, False)
 
-    # ---------- non-cmd helpers (in-memory changes) ----------
+        s.pixel.vx = int(vx)
+        s.pixel.vy = int(vy)
+        if monitor:
+            s.pixel.monitor = str(monitor)
+        s.pixel.color = ColorRGB(r=int(r), g=int(g), b=int(b))
+
+        self.mark_dirty()
+        self._notify_dirty()
+
+        saved = self._maybe_autosave()
+        self._notify_dirty()
+        return (True, bool(saved))
+
+    # ---------- non-cmd helpers ----------
     def create_skill(self, *, name: str = "新技能") -> Skill:
         sid = self.ctx.idgen.next_id()
         s = Skill(id=sid, name=name, enabled=True)
@@ -157,19 +170,7 @@ class SkillsService:
             return True
         return False
 
-    def apply_pick(self, sid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
-        s = self.find(sid)
-        if s is None:
-            return False
-        s.pixel.vx = int(vx)
-        s.pixel.vy = int(vy)
-        if monitor:
-            s.pixel.monitor = str(monitor)
-        s.pixel.color = ColorRGB(r=int(r), g=int(g), b=int(b))
-        self.mark_dirty()
-        return True
-
-    # ---------- autosave used by CRUD cmd ----------
+    # ---------- autosave ----------
     def _maybe_autosave(self) -> bool:
         try:
             auto = bool(getattr(self.ctx.base.io, "auto_save", False))
@@ -177,81 +178,58 @@ class SkillsService:
             auto = False
         if not auto:
             return False
+
         try:
             backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
         except Exception:
             backup = True
-        self._uow.commit(parts={"skills"}, backup=backup, touch_meta=False)
-        return True
 
-    # ---------- cmd API (UI should call these) ----------
+        try:
+            self._store.commit(parts={"skills"}, backup=backup, touch_meta=False)
+            return True
+        except Exception as e:
+            if self._bus is not None:
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="自动保存失败", detail=str(e)))
+            return False
+
+    # ---------- cmd API ----------
     def create_cmd(self, *, name: str = "新技能") -> Skill:
         s = self.create_skill(name=name)
         self._notify_dirty()
-
-        saved = False
-        try:
-            saved = self._maybe_autosave()
-        finally:
-            self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_UPDATED,
-                RecordUpdatedPayload(record_type="skill_pixel", id=s.id, source="crud_add", saved=bool(saved)),
-            )
+        _ = self._maybe_autosave()
+        self._notify_dirty()
         return s
 
     def clone_cmd(self, src_id: str) -> Optional[Skill]:
         clone = self.clone_skill(src_id)
         if clone is None:
             return None
-
         self._notify_dirty()
-        saved = False
-        try:
-            saved = self._maybe_autosave()
-        finally:
-            self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_UPDATED,
-                RecordUpdatedPayload(record_type="skill_pixel", id=clone.id, source="crud_duplicate", saved=bool(saved)),
-            )
+        _ = self._maybe_autosave()
+        self._notify_dirty()
         return clone
 
     def delete_cmd(self, sid: str) -> bool:
         ok = self.delete_skill(sid)
         if not ok:
             return False
-
         self._notify_dirty()
-        saved = False
-        try:
-            saved = self._maybe_autosave()
-        finally:
-            self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_DELETED,
-                RecordDeletedPayload(record_type="skill_pixel", id=sid, source="crud_delete", saved=bool(saved)),
-            )
+        _ = self._maybe_autosave()
+        self._notify_dirty()
         return True
 
     def save_cmd(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"skills"}, backup=backup, touch_meta=True)
+        self._store.commit(parts={"skills"}, backup=backup, touch_meta=True)
         self._notify_dirty()
 
     def reload_cmd(self) -> None:
         self.ctx.skills = self.ctx.skills_repo.load_or_create()
         try:
-            self._uow.clear_dirty("skills")
+            self._store.clear_dirty("skills")
         except Exception:
             pass
         try:
-            self._uow.refresh_snapshot(parts={"skills"})
+            self._store.refresh_snapshot(parts={"skills"})
         except Exception:
             pass
         self._notify_dirty()

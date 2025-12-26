@@ -14,7 +14,6 @@ from core.repos.app_state_repo import AppStateRepo
 
 from core.app.services.app_services import AppServices
 from core.app.services.profile_service import ProfileService
-from core.app.pick_orchestrator import PickOrchestrator
 
 from core.events.payloads import DirtyStateChangedPayload
 
@@ -69,8 +68,7 @@ class AppWindow(tb.Window):
         # ---- services / orchestrators ----
         self._services = AppServices(bus=self._bus, ctx=self._ctx)
         self._profile_service = ProfileService(pm=self._pm, services=self._services, bus=self._bus)
-        self._pick_orch = PickOrchestrator(bus=self._bus, services=self._services)
-
+  
         # ---- window state ----
         self._win_state = WindowStateController(root=self, repo=self._app_state_repo, state=self._app_state)
         self._win_state.apply_initial_geometry()

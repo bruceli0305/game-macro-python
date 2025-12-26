@@ -4,10 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from core.app.uow import ProfileUnitOfWork
+from core.store.app_store import AppStore
 from core.event_bus import EventBus
 from core.event_types import EventType
-from core.events.payloads import RecordUpdatedPayload, RecordDeletedPayload
+from core.events.payloads import ErrorPayload
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
@@ -25,7 +25,6 @@ class PointFormPatch:
     g: int
     b: int
 
-    # Step 9: tolerance for points
     tolerance: int
 
     captured_at: str
@@ -36,30 +35,20 @@ class PointFormPatch:
 
 
 class PointsService:
-    """
-    Step 10 (part 2) result:
-    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd（旧 *point_cmd 已移除）
-    - 保存/重载统一：save_cmd/reload_cmd
-    - 表单 apply 成功后：发布 RECORD_UPDATED(source="form")，让 UI 只“吃事件”刷新
-
-    Step 9:
-    - Point 增加 tolerance 字段，并贯通到 patch/apply/UI
-    """
-
     def __init__(
         self,
         *,
-        uow: ProfileUnitOfWork,
+        store: AppStore,
         bus: Optional[EventBus] = None,
         notify_dirty: Optional[Callable[[], None]] = None,
     ) -> None:
-        self._uow = uow
+        self._store = store
         self._bus = bus
         self._notify_dirty = notify_dirty or (lambda: None)
 
     @property
     def ctx(self):
-        return self._uow.ctx
+        return self._store.ctx
 
     def find(self, pid: str) -> Optional[Point]:
         for p in self.ctx.points.points:
@@ -68,7 +57,7 @@ class PointsService:
         return None
 
     def mark_dirty(self) -> None:
-        self._uow.mark_dirty("points")
+        self._store.mark_dirty("points")
 
     def _apply_patch_to_point(self, p: Point, patch: PointFormPatch) -> None:
         p.name = (patch.name or "").strip()
@@ -81,7 +70,6 @@ class PointsService:
         b = clamp_int(int(patch.b), 0, 255)
         p.color = ColorRGB(r=r, g=g, b=b)
 
-        # Step 9: tolerance
         p.tolerance = clamp_int(int(patch.tolerance), 0, 255)
 
         p.captured_at = (patch.captured_at or "").strip()
@@ -109,25 +97,46 @@ class PointsService:
 
         saved = False
         if auto_save:
-            try:
-                if bool(getattr(self.ctx.base.io, "auto_save", False)):
-                    backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
-                    self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
-                    saved = True
-                    self._notify_dirty()
-            except Exception:
-                saved = False
+            saved = self._maybe_autosave()
+            self._notify_dirty()
 
-        # 统一通过事件让 UI 刷新（source="form" 不 reload 表单）
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_UPDATED,
-                RecordUpdatedPayload(record_type="point", id=pid, source="form", saved=bool(saved)),
-            )
+        return (True, bool(saved))
 
-        return (True, saved)
+    def apply_pick_cmd(
+        self,
+        pid: str,
+        *,
+        vx: int,
+        vy: int,
+        monitor: str,
+        r: int,
+        g: int,
+        b: int,
+    ) -> tuple[bool, bool]:
+        """
+        Used by UI on PICK_CONFIRMED.
+        Pick 只更新坐标/颜色/时间，不改 tolerance。
+        Returns (applied, saved).
+        """
+        p = self.find(pid)
+        if p is None:
+            return (False, False)
 
-    # ---------- non-cmd helpers (in-memory changes) ----------
+        p.vx = int(vx)
+        p.vy = int(vy)
+        if monitor:
+            p.monitor = str(monitor)
+        p.color = ColorRGB(r=int(r), g=int(g), b=int(b))
+        p.captured_at = now_iso_utc()
+
+        self.mark_dirty()
+        self._notify_dirty()
+
+        saved = self._maybe_autosave()
+        self._notify_dirty()
+        return (True, bool(saved))
+
+    # ---------- non-cmd helpers ----------
     def create_point(self, *, name: str = "新点位") -> Point:
         pid = self.ctx.idgen.next_id()
         p = Point(
@@ -168,23 +177,7 @@ class PointsService:
             return True
         return False
 
-    def apply_pick(self, pid: str, *, vx: int, vy: int, monitor: str, r: int, g: int, b: int) -> bool:
-        """
-        Pick 应用只更新坐标/颜色/时间，不改 tolerance（tolerance 属于用户配置）。
-        """
-        p = self.find(pid)
-        if p is None:
-            return False
-        p.vx = int(vx)
-        p.vy = int(vy)
-        if monitor:
-            p.monitor = str(monitor)
-        p.color = ColorRGB(r=int(r), g=int(g), b=int(b))
-        p.captured_at = now_iso_utc()
-        self.mark_dirty()
-        return True
-
-    # ---------- autosave used by CRUD cmd ----------
+    # ---------- autosave ----------
     def _maybe_autosave(self) -> bool:
         try:
             auto = bool(getattr(self.ctx.base.io, "auto_save", False))
@@ -192,81 +185,58 @@ class PointsService:
             auto = False
         if not auto:
             return False
+
         try:
             backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
         except Exception:
             backup = True
-        self._uow.commit(parts={"points"}, backup=backup, touch_meta=False)
-        return True
 
-    # ---------- cmd API (UI should call these) ----------
+        try:
+            self._store.commit(parts={"points"}, backup=backup, touch_meta=False)
+            return True
+        except Exception as e:
+            if self._bus is not None:
+                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="自动保存失败", detail=str(e)))
+            return False
+
+    # ---------- cmd API ----------
     def create_cmd(self, *, name: str = "新点位") -> Point:
         p = self.create_point(name=name)
         self._notify_dirty()
-
-        saved = False
-        try:
-            saved = self._maybe_autosave()
-        finally:
-            self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_UPDATED,
-                RecordUpdatedPayload(record_type="point", id=p.id, source="crud_add", saved=bool(saved)),
-            )
+        _ = self._maybe_autosave()
+        self._notify_dirty()
         return p
 
     def clone_cmd(self, src_id: str) -> Optional[Point]:
         clone = self.clone_point(src_id)
         if clone is None:
             return None
-
         self._notify_dirty()
-        saved = False
-        try:
-            saved = self._maybe_autosave()
-        finally:
-            self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_UPDATED,
-                RecordUpdatedPayload(record_type="point", id=clone.id, source="crud_duplicate", saved=bool(saved)),
-            )
+        _ = self._maybe_autosave()
+        self._notify_dirty()
         return clone
 
     def delete_cmd(self, pid: str) -> bool:
         ok = self.delete_point(pid)
         if not ok:
             return False
-
         self._notify_dirty()
-        saved = False
-        try:
-            saved = self._maybe_autosave()
-        finally:
-            self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(
-                EventType.RECORD_DELETED,
-                RecordDeletedPayload(record_type="point", id=pid, source="crud_delete", saved=bool(saved)),
-            )
+        _ = self._maybe_autosave()
+        self._notify_dirty()
         return True
 
     def save_cmd(self, *, backup: Optional[bool] = None) -> None:
-        self._uow.commit(parts={"points"}, backup=backup, touch_meta=True)
+        self._store.commit(parts={"points"}, backup=backup, touch_meta=True)
         self._notify_dirty()
 
     def reload_cmd(self) -> None:
         self.ctx.points = self.ctx.points_repo.load_or_create()
         try:
-            self._uow.clear_dirty("points")
+            self._store.clear_dirty("points")
         except Exception:
             pass
         try:
-            self._uow.refresh_snapshot(parts={"points"})
+            self._store.refresh_snapshot(parts={"points"})
         except Exception:
             pass
         self._notify_dirty()

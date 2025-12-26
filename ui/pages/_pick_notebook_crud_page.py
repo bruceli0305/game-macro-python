@@ -8,13 +8,7 @@ import ttkbootstrap as tb
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import (
-    RecordUpdatedPayload,
-    RecordDeletedPayload,
-    PickRequestPayload,
-    PickContextRef,
-    ErrorPayload,
-)
+from core.events.payloads import PickRequestPayload, PickContextRef, PickConfirmedPayload, ErrorPayload
 from ui.pages._record_crud_page import RecordCrudPage
 from ui.widgets.scrollable_frame import ScrollableFrame
 
@@ -25,11 +19,9 @@ SAMPLE_VALUE_TO_DISPLAY = {v: k for k, v in SAMPLE_DISPLAY_TO_VALUE.items()}
 
 class PickNotebookCrudPage(RecordCrudPage):
     """
-    Step 6:
-    - CRUD 点击时不再本地插入/删除行（由 RecordCrudPage 做到）
-    - 本类作为“事件消费端”：
-        - RECORD_UPDATED: update_tree_row + (必要时) select pending + (非 form) reload form
-        - RECORD_DELETED: delete row + 处理选中
+    Step 2:
+    - 取色确认由页面消费 PICK_CONFIRMED 并直接应用到当前记录（不再走 PickOrchestrator + RECORD_UPDATED）
+    - CRUD/表单刷新也不依赖 RECORD_* 事件
     """
 
     def __init__(
@@ -69,77 +61,58 @@ class PickNotebookCrudPage(RecordCrudPage):
             self.nb.add(tab, text=name)
             self.tabs[name] = tab
 
-        self._bus.subscribe(EventType.RECORD_UPDATED, self._on_record_updated)
-        self._bus.subscribe(EventType.RECORD_DELETED, self._on_record_deleted)
-
-    def _record_type_key(self) -> str | None:
-        return None
+        self._bus.subscribe(EventType.PICK_CONFIRMED, self._on_pick_confirmed)
 
     def request_pick_current(self) -> None:
         if not self.current_id:
-            self._bus.post_payload(
-                EventType.ERROR,
-                ErrorPayload(msg=f"请先选择一个{self._record_noun}"),
-            )
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"请先选择一个{self._record_noun}"))
             return
 
+        # flush current form so pick is applied to the correct (latest) record state
         self._apply_form_to_current(auto_save=False)
 
         self._bus.post_payload(
             EventType.PICK_REQUEST,
-            PickRequestPayload(
-                context=PickContextRef(type=self._pick_context_type, id=self.current_id)
-            ),
+            PickRequestPayload(context=PickContextRef(type=self._pick_context_type, id=self.current_id)),
         )
 
-    def _on_record_updated(self, ev: Event) -> None:
+    def _on_pick_confirmed(self, ev: Event) -> None:
         p = ev.payload
-        if not isinstance(p, RecordUpdatedPayload):
-            return
-        if p.record_type != self._pick_context_type:
+        if not isinstance(p, PickConfirmedPayload):
             return
 
-        rid = p.id
+        ctx_ref = p.context
+        if ctx_ref.type != self._pick_context_type:
+            return
+
+        rid = ctx_ref.id
         if not rid:
             return
 
-        # 1) 插入/刷新 row（此处是唯一刷新来源）
+        # Apply to model via derived class (calls service.apply_pick_cmd)
+        applied, saved = self._apply_pick_confirmed(rid, p)
+
+        if not applied:
+            return
+
+        # Update row + reload form (pick is an explicit action; reload is OK)
         self.update_tree_row(rid)
-
-        # 2) Step 6: 如果是 pending select，则在 row 确保存在后选中
-        if self.consume_pending_select_if_match(rid):
-            self.try_select_id_if_exists(rid)
-            return
-
-        # 3) Step 5: form 事件不 reload 表单（避免打断输入）
         if self.current_id == rid:
-            src = (p.source or "").strip().lower()
-            if src != "form":
-                try:
-                    self._load_into_form(rid)
-                except Exception:
-                    pass
+            try:
+                self._load_into_form(rid)
+            except Exception:
+                pass
 
-    def _on_record_deleted(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, RecordDeletedPayload):
-            return
-        if p.record_type != self._pick_context_type:
-            return
+        # UI message (optional)
+        from core.events.payloads import StatusPayload, InfoPayload
+        if p.hex:
+            if saved:
+                self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"取色已应用并保存: {p.hex}"))
+            else:
+                self._bus.post_payload(EventType.STATUS, StatusPayload(msg=f"取色已应用(未保存): {p.hex}"))
 
-        rid = p.id
-        if not rid:
-            return
-
-        is_current = (self.current_id == rid)
-
-        # 删除 row（事件消费端执行）
-        try:
-            if self._tv.exists(rid):
-                self._tv.delete(rid)
-        except Exception:
-            pass
-
-        # 若删的是当前选中，选中一个合理项
-        if is_current:
-            self._select_first_if_any()
+    def _apply_pick_confirmed(self, rid: str, payload: PickConfirmedPayload) -> tuple[bool, bool]:
+        """
+        Must return (applied, saved). Implement in SkillsPage / PointsPage.
+        """
+        raise NotImplementedError

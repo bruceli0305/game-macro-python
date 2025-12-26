@@ -1,52 +1,55 @@
 # File: core/app/services/app_services.py
 from __future__ import annotations
 
-from typing import Set, Optional, Iterable
+from typing import Iterable, Optional, Set
 
-from core.app.uow import ProfileUnitOfWork, Part
-from core.app.services.base_settings_service import BaseSettingsService
-from core.app.services.skills_service import SkillsService
-from core.app.services.points_service import PointsService
+from core.store.app_store import AppStore, Part
 from core.event_bus import EventBus
 from core.event_types import EventType
 from core.events.payloads import DirtyStateChangedPayload, ErrorPayload
 from core.profiles import ProfileContext
 
+from core.app.services.base_settings_service import BaseSettingsService
+from core.app.services.skills_service import SkillsService
+from core.app.services.points_service import PointsService
+
 
 class AppServices:
     def __init__(self, *, bus: EventBus, ctx: ProfileContext) -> None:
         self.bus = bus
-        self.uow = ProfileUnitOfWork(ctx)
+        self.store = AppStore(ctx)
 
-        self.base = BaseSettingsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
-        self.skills = SkillsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
-        self.points = PointsService(uow=self.uow, bus=self.bus, notify_dirty=self.notify_dirty)
+        self.base = BaseSettingsService(store=self.store, bus=self.bus, notify_dirty=self.notify_dirty)
+        self.skills = SkillsService(store=self.store, bus=self.bus, notify_dirty=self.notify_dirty)
+        self.points = PointsService(store=self.store, bus=self.bus, notify_dirty=self.notify_dirty)
 
         # repair once on startup context
         self._repair_ids_and_persist()
+        self.notify_dirty()
 
     @property
     def ctx(self) -> ProfileContext:
-        return self.uow.ctx
+        return self.store.ctx
 
     def set_context(self, ctx: ProfileContext) -> None:
-        self.uow.set_context(ctx)
+        self.store.set_context(ctx)
         self._repair_ids_and_persist()
         self.notify_dirty()
 
-    # ---------- UoW state facade ----------
+    # ---------- dirty facade ----------
     def dirty_parts(self) -> Set[Part]:
         try:
-            return set(self.uow.dirty_parts())
+            return set(self.store.dirty_parts())
         except Exception:
             return set()
 
     def is_dirty(self) -> bool:
         try:
-            return bool(self.uow.is_dirty())
+            return bool(self.store.is_dirty())
         except Exception:
             return False
 
+    # ---------- commit/rollback ----------
     def commit_parts_cmd(
         self,
         *,
@@ -54,12 +57,6 @@ class AppServices:
         backup: Optional[bool] = None,
         touch_meta: bool = True,
     ) -> bool:
-        """
-        Centralized commit entry for non-UI orchestrators.
-
-        parts: iterable of {"base","skills","points","meta"} (strings)
-        Returns True if commit performed, False if no valid parts.
-        """
         valid = {"base", "skills", "points", "meta"}
         target: Set[Part] = set()
 
@@ -80,7 +77,7 @@ class AppServices:
             except Exception:
                 backup = True
 
-        self.uow.commit(parts=set(target), backup=bool(backup), touch_meta=bool(touch_meta))
+        self.store.commit(parts=set(target), backup=bool(backup), touch_meta=bool(touch_meta))
         self.notify_dirty()
         return True
 
@@ -95,22 +92,23 @@ class AppServices:
             except Exception:
                 backup = True
 
-        self.uow.commit(parts=set(parts), backup=bool(backup), touch_meta=bool(touch_meta))
+        self.store.commit(parts=set(parts), backup=bool(backup), touch_meta=bool(touch_meta))
         self.notify_dirty()
         return True
 
     def rollback_cmd(self) -> None:
-        self.uow.rollback()
+        self.store.rollback()
         self.notify_dirty()
 
     # ---------- dirty broadcast ----------
     def notify_dirty(self) -> None:
-        parts = sorted(list(self.uow.dirty_parts()))
+        parts = sorted(list(self.store.dirty_parts()))
         self.bus.post_payload(
             EventType.DIRTY_STATE_CHANGED,
-            DirtyStateChangedPayload(dirty=bool(self.uow.is_dirty()), parts=parts),
+            DirtyStateChangedPayload(dirty=bool(self.store.is_dirty()), parts=parts),
         )
 
+    # ---------- repair ----------
     def _repair_ids_and_persist(self) -> None:
         ctx = self.ctx
         changed_parts: Set[str] = set()
@@ -140,16 +138,17 @@ class AppServices:
             backup = True
 
         try:
-            self.uow.commit(parts=set(changed_parts), backup=backup, touch_meta=False)
-            try:
-                for part in changed_parts:
-                    self.uow.clear_dirty(part)  # type: ignore[arg-type]
-            except Exception:
-                pass
+            self.store.commit(parts=set(changed_parts), backup=backup, touch_meta=False)  # type: ignore[arg-type]
+            # repair is not user-visible dirty
+            for part in changed_parts:
+                try:
+                    self.store.clear_dirty(part)  # type: ignore[arg-type]
+                except Exception:
+                    pass
         except Exception as e:
             for part in changed_parts:
                 try:
-                    self.uow.mark_dirty(part)  # type: ignore[arg-type]
+                    self.store.mark_dirty(part)  # type: ignore[arg-type]
                 except Exception:
                     pass
             self.bus.post_payload(EventType.ERROR, ErrorPayload(msg="数据修复保存失败", detail=str(e)))

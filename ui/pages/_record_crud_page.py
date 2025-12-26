@@ -11,11 +11,7 @@ from tkinter import messagebox
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import (
-    InfoPayload,
-    ErrorPayload,
-    DirtyStateChangedPayload,
-)
+from core.events.payloads import InfoPayload, ErrorPayload, DirtyStateChangedPayload
 
 
 @dataclass
@@ -28,11 +24,10 @@ class ColumnDef:
 
 class RecordCrudPage(tb.Frame):
     """
-    Step 10 cleanup:
-    - 删除死代码：RecordCrudPage 不再发布 RECORD_UPDATED/RECORD_DELETED
-      （这些事件由 services（CRUD cmd / pick / form）统一发布）
-    - 本类职责收敛为：UI 框架 + Treeview 选择 + CRUD 按钮触发命令 + reload/save 按钮
-    - Treeview 增删改依赖“事件消费端”（PickNotebookCrudPage）来 update/delete row
+    Step 2 (big cut):
+    - Treeview 增删改由本类直接执行（不再依赖 RECORD_UPDATED/RECORD_DELETED 事件）
+    - services 不再发布 RECORD_*；页面自己决定如何刷新 UI
+    - dirty UI 仍沿用 DIRTY_STATE_CHANGED（由 AppServices.notify_dirty 广播）
     """
 
     def __init__(
@@ -55,14 +50,10 @@ class RecordCrudPage(tb.Frame):
         self._current_id: str | None = None
         self._suppress_select = False
 
-        # dirty UI state (VIEW ONLY, derived from UoW)
+        # dirty UI state
         self._dirty_ui = False
         self._uow_part_key: str | None = None
 
-        # Step 6: new/dup 后等待 RECORD_UPDATED 再选中（由事件消费端执行）
-        self._pending_select_id: str | None = None
-
-        # layout
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
         self.rowconfigure(1, weight=1)
@@ -71,7 +62,6 @@ class RecordCrudPage(tb.Frame):
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
         )
 
-        # left panel
         left = tb.Frame(self)
         left.grid(row=1, column=0, sticky="nsw", padx=(0, 12))
         left.rowconfigure(1, weight=1)
@@ -83,7 +73,6 @@ class RecordCrudPage(tb.Frame):
         tb.Button(toolbar, text="复制", command=self._on_duplicate).pack(side=LEFT, padx=(6, 0))
         tb.Button(toolbar, text="删除", bootstyle="danger", command=self._on_delete).pack(side=LEFT, padx=(6, 0))
 
-        # Step 9: reload（丢弃未保存）
         tb.Button(toolbar, text="重新加载", command=self._on_reload_clicked).pack(side=LEFT, padx=(12, 0))
 
         self._btn_save = tb.Button(toolbar, text="保存", command=self._on_save_clicked)
@@ -98,7 +87,6 @@ class RecordCrudPage(tb.Frame):
 
         self._tv.bind("<<TreeviewSelect>>", self._on_select)
 
-        # right panel
         right = tb.Frame(self)
         right.grid(row=1, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
@@ -121,7 +109,7 @@ class RecordCrudPage(tb.Frame):
 
         self._update_dirty_ui()
 
-    # ---------- dirty UI (VIEW ONLY) ----------
+    # ---------- dirty UI ----------
     def enable_uow_dirty_indicator(self, *, part_key: str) -> None:
         self._uow_part_key = str(part_key)
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
@@ -140,34 +128,10 @@ class RecordCrudPage(tb.Frame):
         self._dirty_ui = bool(flag)
         self._update_dirty_ui()
 
-    def is_dirty(self) -> bool:
-        return bool(self._dirty_ui)
-
     def _update_dirty_ui(self) -> None:
         self._var_dirty.set("未保存*" if self._dirty_ui else "")
         try:
             self._btn_save.configure(bootstyle="warning" if self._dirty_ui else "")
-        except Exception:
-            pass
-
-    # ---------- pending select (Step 6) ----------
-    def _set_pending_select(self, rid: str | None) -> None:
-        self._pending_select_id = (rid or "").strip() or None
-
-    def consume_pending_select_if_match(self, rid: str) -> bool:
-        if not rid:
-            return False
-        if self._pending_select_id != rid:
-            return False
-        self._pending_select_id = None
-        return True
-
-    def try_select_id_if_exists(self, rid: str) -> None:
-        if not rid:
-            return
-        try:
-            if self._tv.exists(rid):
-                self._select_id(rid)
         except Exception:
             pass
 
@@ -201,9 +165,6 @@ class RecordCrudPage(tb.Frame):
             self._select_first_if_any()
 
     def update_tree_row(self, rid: str) -> None:
-        """
-        事件消费端可调用：根据当前 model 刷新/插入对应行。
-        """
         r = self._find_record_by_id(rid)
         if r is None or not rid:
             return
@@ -212,6 +173,13 @@ class RecordCrudPage(tb.Frame):
                 self._tv.item(rid, values=self._record_row_values(r))
             else:
                 self._tv.insert("", "end", iid=rid, values=self._record_row_values(r))
+        except Exception:
+            pass
+
+    def delete_tree_row(self, rid: str) -> None:
+        try:
+            if rid and self._tv.exists(rid):
+                self._tv.delete(rid)
         except Exception:
             pass
 
@@ -243,13 +211,12 @@ class RecordCrudPage(tb.Frame):
         if self._current_id == rid:
             return
 
-        # 离开旧记录：flush 到内存（services 内部标记 dirty / 发事件）
         if self._current_id is not None:
             self._apply_form_to_current(auto_save=False)
 
         self._load_into_form(rid)
 
-    # ---------- CRUD (command only; tree changes via events) ----------
+    # ---------- CRUD ----------
     def _on_add(self) -> None:
         self._apply_form_to_current(auto_save=False)
 
@@ -259,7 +226,8 @@ class RecordCrudPage(tb.Frame):
             self.refresh_tree()
             return
 
-        self._set_pending_select(rid)
+        self.update_tree_row(rid)
+        self._select_id(rid)
         self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已新增{self._record_noun}: {rid[-6:]}"))
 
     def _on_duplicate(self) -> None:
@@ -282,7 +250,8 @@ class RecordCrudPage(tb.Frame):
             self.refresh_tree()
             return
 
-        self._set_pending_select(new_id)
+        self.update_tree_row(new_id)
+        self._select_id(new_id)
         self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已复制{self._record_noun}: {new_id[-6:]}"))
 
     def _on_delete(self) -> None:
@@ -311,8 +280,12 @@ class RecordCrudPage(tb.Frame):
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="删除失败", detail=str(e)))
             return
 
-        if self._pending_select_id == rid:
-            self._pending_select_id = None
+        is_current = (self._current_id == rid)
+        self.delete_tree_row(rid)
+
+        if is_current:
+            self._current_id = None
+            self._select_first_if_any()
 
         self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已删除{self._record_noun}: {rid[-6:]}"))
 
@@ -337,12 +310,8 @@ class RecordCrudPage(tb.Frame):
             self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="重新加载失败", detail=str(e)))
             return
 
-        try:
-            self._current_id = None
-            self.refresh_tree()
-        except Exception:
-            pass
-
+        self._current_id = None
+        self.refresh_tree()
         self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载"))
 
     def _on_save_clicked(self) -> None:
@@ -388,7 +357,6 @@ class RecordCrudPage(tb.Frame):
     def _clear_form(self) -> None:
         raise NotImplementedError
 
-    # ---------- record lookup ----------
     def _find_record_by_id(self, rid: str) -> Any | None:
         for r in self._records():
             if self._record_id(r) == rid:
