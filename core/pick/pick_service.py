@@ -20,105 +20,7 @@ from core.events.payloads import (
     PickConfirmedPayload,
 )
 from core.pick.capture import ScreenCapture, SampleSpec
-
-
-# ---- hotkey matching (aligned with ui/widgets/hotkey_entry.py output style) ----
-_MOD_KEYS = {
-    keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r,
-    keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
-    keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
-    keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r,
-}
-
-_MOD_NAME = {
-    keyboard.Key.shift: "shift",
-    keyboard.Key.shift_l: "shift",
-    keyboard.Key.shift_r: "shift",
-    keyboard.Key.ctrl: "ctrl",
-    keyboard.Key.ctrl_l: "ctrl",
-    keyboard.Key.ctrl_r: "ctrl",
-    keyboard.Key.alt: "alt",
-    keyboard.Key.alt_l: "alt",
-    keyboard.Key.alt_r: "alt",
-    keyboard.Key.cmd: "cmd",
-    keyboard.Key.cmd_l: "cmd",
-    keyboard.Key.cmd_r: "cmd",
-}
-
-_SPECIAL_NAME = {
-    keyboard.Key.esc: "esc",
-    keyboard.Key.enter: "enter",
-    keyboard.Key.tab: "tab",
-    keyboard.Key.space: "space",
-    keyboard.Key.backspace: "backspace",
-    keyboard.Key.delete: "delete",
-    keyboard.Key.insert: "insert",
-    keyboard.Key.home: "home",
-    keyboard.Key.end: "end",
-    keyboard.Key.page_up: "pageup",
-    keyboard.Key.page_down: "pagedown",
-    keyboard.Key.up: "up",
-    keyboard.Key.down: "down",
-    keyboard.Key.left: "left",
-    keyboard.Key.right: "right",
-}
-
-
-def _normalize_hotkey_string(s: str) -> str:
-    """
-    Normalize into HotkeyEntry-like format:
-    - lower-case
-    - '+' separated
-    - strip spaces
-    - collapse multiple '+'
-    """
-    s = (s or "").strip().lower()
-    s = s.replace(" ", "")
-    s = s.replace("-", "+")
-    s = s.replace("_", "+")
-    while "++" in s:
-        s = s.replace("++", "+")
-    return s.strip("+")
-
-
-def _key_to_name(k) -> str | None:
-    if isinstance(k, keyboard.KeyCode):
-        try:
-            if k.char:
-                return str(k.char).lower()
-        except Exception:
-            return None
-        return None
-
-    if k in _SPECIAL_NAME:
-        return _SPECIAL_NAME[k]
-
-    # function keys: f1..f24 etc (pynput uses .name)
-    try:
-        name = getattr(k, "name", None)
-        if isinstance(name, str) and name.startswith("f") and name[1:].isdigit():
-            return name.lower()
-    except Exception:
-        pass
-
-    # fallback
-    try:
-        name = getattr(k, "name", None)
-        if isinstance(name, str) and name:
-            return name.lower()
-    except Exception:
-        pass
-    return None
-
-
-def _compose_hotkey(mods: set[str], main_key: str) -> str:
-    """
-    Compose in the same order as HotkeyEntry:
-    ctrl, alt, shift, cmd, then key
-    """
-    ordered_mods = [m for m in ("ctrl", "alt", "shift", "cmd") if m in mods]
-    parts = ordered_mods + [main_key]
-    return "+".join([p for p in parts if p])
+from core.input.hotkey import MOD_KEYS, MOD_NAME, normalize, compose, key_to_name
 
 
 def _clamp(v: int, lo: int, hi: int) -> int:
@@ -129,35 +31,38 @@ def _clamp(v: int, lo: int, hi: int) -> int:
     return v
 
 
-@dataclass
+@dataclass(frozen=True)
 class PickConfig:
     delay_ms: int = 120
     preview_throttle_ms: int = 30
     error_throttle_ms: int = 800
 
-    # Step 7: confirm by hotkey; cancel fixed to Esc
-    confirm_hotkey: str = "f8"
-
-    # Step 8: mouse avoidance
+    confirm_hotkey: str = "f8"  # e.g. "ctrl+alt+f8"
     mouse_avoid: bool = True
     mouse_avoid_offset_y: int = 80
     mouse_avoid_settle_ms: int = 80
 
 
+@dataclass(frozen=True)
+class _SessionSnapshot:
+    """
+    Immutable per-session snapshot.
+    Background threads will ONLY use this snapshot (no ctx reads).
+    """
+    context: PickContextRef
+    cfg: PickConfig
+    sample: SampleSpec
+    monitor_requested: str
+
+
 class PickService:
     """
-    Strict typed events + per-thread ScreenCapture lifecycle cleanup.
+    大刀阔斧版（仍保留 EventBus 事件协议，避免你一次重写所有 UI）：
 
-    Step 7 change:
-    - 确认：按配置 confirm_hotkey（格式与 HotkeyEntry 一致，如 ctrl+alt+f8 / f8）
-    - 取消：Esc 固定（仍支持外部发 PICK_CANCEL_REQUEST）
-
-    Step 8 change:
-    - 确认时执行鼠标避让：
-        1) 记录原始采样点 (x0,y0)
-        2) 鼠标只沿 Y 轴移动到 (x0, y0±offset_y)，避免 hover 高亮污染
-        3) 等待 settle_ms
-        4) 对原始点 (x0,y0) 采样并提交
+    - start() 时生成 _SessionSnapshot（confirm_hotkey / mouse_avoid / sample / monitor 等一次性固化）
+    - preview 线程 & keyboard listener 线程不再调用 provider（避免切 profile 时读到一半 ctx 被替换）
+    - stop() 会 join preview 线程（短 timeout），减少竞态窗口
+    - Esc 固定取消；确认按 session.confirm_hotkey
     """
 
     def __init__(
@@ -173,23 +78,26 @@ class PickService:
 
         self._cap = ScreenCapture()
 
+        self._lock = threading.RLock()
+
         self._active = False
-        self._context_ref: Optional[PickContextRef] = None
+        self._session: Optional[_SessionSnapshot] = None
 
         self._kbd_listener: Optional[keyboard.Listener] = None
-
-        self._start_t = 0.0
         self._preview_thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
+
+        self._start_t = 0.0
         self._last_err_t = 0.0
         self._announced_preview = False
 
-        # track currently pressed modifiers (keyboard listener thread)
+        # pressed modifiers tracked by keyboard listener thread
         self._mods: set[str] = set()
 
         self._bus.subscribe(EventType.PICK_REQUEST, self._on_pick_request)
         self._bus.subscribe(EventType.PICK_CANCEL_REQUEST, self._on_pick_cancel)
 
+    # ---------- public ----------
     def close(self) -> None:
         self.stop(reason="shutdown")
         try:
@@ -197,34 +105,56 @@ class PickService:
         except Exception:
             pass
 
-    def _on_pick_request(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, PickRequestPayload):
-            from core.events.payloads import ErrorPayload
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST payload 类型错误"))
-            return
-        if not p.context.id or not p.context.type:
-            from core.events.payloads import ErrorPayload
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST 缺少有效 context"))
-            return
-        self.start(p.context)
-
-    def _on_pick_cancel(self, _ev: Event) -> None:
-        if self._active:
-            self.cancel()
+    def cancel(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            sess = self._session
+        if sess is not None:
+            self._bus.post_payload(EventType.PICK_CANCELED, PickCanceledPayload(context=sess.context))
+        self.stop(reason="canceled")
 
     def start(self, context: PickContextRef) -> None:
-        if self._active:
-            self.stop(reason="restart")
+        # 同步重启
+        self.stop(reason="restart")
 
-        self._active = True
-        self._context_ref = context
+        # 生成会话快照（一次性固化）
+        try:
+            cfg = self._pick_config_provider()
+        except Exception:
+            cfg = PickConfig()
 
-        self._start_t = time.monotonic()
-        self._stop_evt.clear()
-        self._last_err_t = 0.0
-        self._announced_preview = False
-        self._mods.clear()
+        try:
+            sample, mon_req = self._capture_spec_provider(context)
+        except Exception:
+            sample, mon_req = SampleSpec(mode="single", radius=0), "primary"
+
+        hk = normalize(getattr(cfg, "confirm_hotkey", "") or "f8") or "f8"
+        cfg2 = PickConfig(
+            delay_ms=int(getattr(cfg, "delay_ms", 120) or 120),
+            preview_throttle_ms=int(getattr(cfg, "preview_throttle_ms", 30) or 30),
+            error_throttle_ms=int(getattr(cfg, "error_throttle_ms", 800) or 800),
+            confirm_hotkey=hk,
+            mouse_avoid=bool(getattr(cfg, "mouse_avoid", True)),
+            mouse_avoid_offset_y=int(getattr(cfg, "mouse_avoid_offset_y", 80) or 80),
+            mouse_avoid_settle_ms=int(getattr(cfg, "mouse_avoid_settle_ms", 80) or 80),
+        )
+
+        sess = _SessionSnapshot(
+            context=context,
+            cfg=cfg2,
+            sample=sample,
+            monitor_requested=(mon_req or "primary").strip().lower() or "primary",
+        )
+
+        with self._lock:
+            self._active = True
+            self._session = sess
+            self._start_t = time.monotonic()
+            self._stop_evt.clear()
+            self._last_err_t = 0.0
+            self._announced_preview = False
+            self._mods.clear()
 
         self._bus.post_payload(EventType.PICK_MODE_ENTERED, PickModeEnteredPayload(context=context))
 
@@ -240,170 +170,149 @@ class PickService:
         self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._preview_thread.start()
 
-        try:
-            hk = _normalize_hotkey_string(self._pick_config_provider().confirm_hotkey) or "f8"
-        except Exception:
-            hk = "f8"
-
         from core.events.payloads import StatusPayload
-        self._bus.post_payload(EventType.STATUS, StatusPayload(msg=f"取色模式：移动鼠标预览，按 {hk} 确认，Esc 取消"))
-
-    def cancel(self) -> None:
-        if not self._active:
-            return
-        ctx = self._context_ref
-        if ctx is not None:
-            self._bus.post_payload(EventType.PICK_CANCELED, PickCanceledPayload(context=ctx))
-        self.stop(reason="canceled")
+        self._bus.post_payload(
+            EventType.STATUS,
+            StatusPayload(msg=f"取色模式：移动鼠标预览，按 {sess.cfg.confirm_hotkey} 确认，Esc 取消"),
+        )
 
     def stop(self, *, reason: str) -> None:
-        if not self._active:
-            return
-
-        ctx = self._context_ref
-        self._active = False
-        self._context_ref = None
-        self._mods.clear()
-
-        self._stop_evt.set()
-
-        if self._kbd_listener is not None:
-            try:
-                self._kbd_listener.stop()
-            except Exception:
-                pass
-        self._kbd_listener = None
-
-        if ctx is not None:
-            self._bus.post_payload(EventType.PICK_MODE_EXITED, PickModeExitedPayload(context=ctx, reason=reason))
-
-    def _on_key_press(self, key) -> None:
-        """
-        NOTE: runs in pynput keyboard listener thread.
-        Confirmation also happens in this thread.
-        """
-        try:
+        with self._lock:
             if not self._active:
                 return
+            sess = self._session
+            self._active = False
+            self._session = None
+            self._mods.clear()
+            self._stop_evt.set()
 
-            # cancel fixed to Esc
+            kbd = self._kbd_listener
+            self._kbd_listener = None
+
+            th = self._preview_thread
+            self._preview_thread = None
+
+        if kbd is not None:
+            try:
+                kbd.stop()
+            except Exception:
+                pass
+
+        # join preview thread（短超时，避免 UI 卡死）
+        if th is not None:
+            try:
+                th.join(timeout=0.25)
+            except Exception:
+                pass
+
+        if sess is not None:
+            self._bus.post_payload(EventType.PICK_MODE_EXITED, PickModeExitedPayload(context=sess.context, reason=reason))
+
+    # ---------- bus handlers ----------
+    def _on_pick_request(self, ev: Event) -> None:
+        p = ev.payload
+        if not isinstance(p, PickRequestPayload):
+            from core.events.payloads import ErrorPayload
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST payload 类型错误"))
+            return
+        if not p.context.id or not p.context.type:
+            from core.events.payloads import ErrorPayload
+            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="PICK_REQUEST 缺少有效 context"))
+            return
+        self.start(p.context)
+
+    def _on_pick_cancel(self, _ev: Event) -> None:
+        self.cancel()
+
+    # ---------- keyboard listener thread ----------
+    def _on_key_press(self, key) -> None:
+        try:
+            with self._lock:
+                if not self._active:
+                    return
+                sess = self._session
+            if sess is None:
+                return
+
             if key == keyboard.Key.esc:
                 self.cancel()
                 return
 
-            # update modifiers
-            if key in _MOD_KEYS:
-                name = _MOD_NAME.get(key, "")
+            if key in MOD_KEYS:
+                name = MOD_NAME.get(key, "")
                 if name:
                     self._mods.add(name)
                 return
 
-            # main key
-            key_name = _key_to_name(key)
-            if not key_name:
+            main = key_to_name(key)
+            if not main:
                 return
 
-            cfg = self._pick_config_provider()
-            want = _normalize_hotkey_string(getattr(cfg, "confirm_hotkey", "") or "f8") or "f8"
-            got = _compose_hotkey(self._mods, key_name)
-
-            if got == want:
-                self._confirm_at_current_mouse()
+            got = compose(self._mods, main)
+            if normalize(got) == sess.cfg.confirm_hotkey:
+                self._confirm_at_current_mouse(sess)
                 return
 
         except Exception:
-            # never crash listener thread
+            # 不崩监听线程
             pass
 
     def _on_key_release(self, key) -> None:
         try:
-            if not self._active:
-                return
-            if key in _MOD_KEYS:
-                name = _MOD_NAME.get(key, "")
+            with self._lock:
+                if not self._active:
+                    return
+            if key in MOD_KEYS:
+                name = MOD_NAME.get(key, "")
                 if name and name in self._mods:
                     self._mods.remove(name)
         except Exception:
             pass
 
-    def _confirm_at_current_mouse(self) -> None:
+    def _confirm_at_current_mouse(self, sess: _SessionSnapshot) -> None:
         """
-        Confirm pick at CURRENT mouse position.
-
-        Step 8:
-        - 记录原点 (x0,y0)
-        - 鼠标避让到 (x0, y0±dy) 并等待 settle_ms
-        - 对原点 (x0,y0) 采样（避免 hover 高亮污染）
+        在 keyboard listener 线程里执行确认：
+        - 读取当前鼠标位置作为原点 (x0,y0)
+        - 可选鼠标避让（只移动 y）
+        - 对原点采样并发 PICK_CONFIRMED
         """
-        if not self._active:
-            return
-
-        ctx_ref = self._context_ref
-        if ctx_ref is None:
-            from core.events.payloads import ErrorPayload
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败: context 为空"))
-            return
-
         ctrl = mouse.Controller()
 
         try:
-            # original sampling point
             x0, y0 = ctrl.position
             x0 = int(x0)
             y0 = int(y0)
 
-            sample, mon_req = self._capture_spec_provider(ctx_ref)
-            mon_used, inside = self._resolve_monitor(x0, y0, mon_req)
+            mon_used, inside = self._resolve_monitor(x0, y0, sess.monitor_requested)
 
-            # Step 8: mouse avoidance
-            try:
-                cfg = self._pick_config_provider()
-            except Exception:
-                cfg = PickConfig()
-
-            try:
-                do_avoid = bool(getattr(cfg, "mouse_avoid", True))
-            except Exception:
-                do_avoid = True
-
-            if do_avoid:
-                try:
-                    dy = int(getattr(cfg, "mouse_avoid_offset_y", 80) or 0)
-                except Exception:
-                    dy = 80
+            # 鼠标避让（best-effort）
+            if sess.cfg.mouse_avoid:
+                dy = int(sess.cfg.mouse_avoid_offset_y)
                 if dy != 0:
                     try:
                         rect = self._cap.get_monitor_rect(mon_used)
-                        # try y0 + dy first, if outside then y0 - dy
                         y1 = y0 + dy
                         if not (rect.top <= y1 < rect.bottom):
                             y1 = y0 - dy
                         y1 = _clamp(int(y1), int(rect.top), int(rect.bottom) - 1)
-
-                        # move mouse away (keep x)
                         try:
                             ctrl.position = (int(x0), int(y1))
                         except Exception:
                             pass
 
-                        try:
-                            settle_ms = int(getattr(cfg, "mouse_avoid_settle_ms", 80) or 0)
-                        except Exception:
-                            settle_ms = 80
-                        if settle_ms > 0:
-                            time.sleep(float(settle_ms) / 1000.0)
+                        settle = int(sess.cfg.mouse_avoid_settle_ms)
+                        if settle > 0:
+                            time.sleep(float(settle) / 1000.0)
                     except Exception:
-                        # avoidance is best-effort; do not block confirm
                         pass
 
-            # sample original point (x0,y0) using mon_used
-            r, g, b = self._cap.get_rgb_scoped_abs(x0, y0, sample, mon_used, require_inside=False)
+            r, g, b = self._cap.get_rgb_scoped_abs(x0, y0, sess.sample, mon_used, require_inside=False)
             rel_x, rel_y = self._cap.abs_to_rel(x0, y0, mon_used)
             hx = f"#{r:02X}{g:02X}{b:02X}"
 
             payload = PickConfirmedPayload(
-                context=ctx_ref,
-                monitor_requested=mon_req,
+                context=sess.context,
+                monitor_requested=sess.monitor_requested,
                 monitor=mon_used,
                 inside=bool(inside),
                 x=int(rel_x),
@@ -418,63 +327,39 @@ class PickService:
                 hex=hx,
             )
             self._bus.post_payload(EventType.PICK_CONFIRMED, payload)
-
             self.stop(reason="confirmed")
 
         except Exception as e:
             now = time.monotonic()
-            try:
-                cfg = self._pick_config_provider()
-                throttle_ms = float(getattr(cfg, "error_throttle_ms", 800))
-            except Exception:
-                throttle_ms = 800.0
-
+            throttle_ms = float(sess.cfg.error_throttle_ms)
             if (now - self._last_err_t) * 1000.0 >= throttle_ms:
                 self._last_err_t = now
                 from core.events.payloads import ErrorPayload
                 self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="取色确认失败", detail=str(e)))
         finally:
-            # close ScreenCapture for THIS listener thread
+            # 释放本线程的 mss
             try:
                 self._cap.close_current_thread()
             except Exception:
                 pass
 
-    def _resolve_monitor(self, abs_x: int, abs_y: int, requested: str) -> tuple[str, bool]:
-        req = (requested or "primary").strip().lower() or "primary"
-        try:
-            rect_req = self._cap.get_monitor_rect(req)
-            inside = rect_req.contains_abs(int(abs_x), int(abs_y))
-        except Exception:
-            inside = True
-
-        if req == "all":
-            return "all", inside
-
-        if inside:
-            return req, True
-
-        used = self._cap.find_monitor_key_for_abs(int(abs_x), int(abs_y), default=req)
-        return used, False
-
+    # ---------- preview thread ----------
     def _preview_loop(self) -> None:
-        """
-        Runs in a dedicated daemon thread.
-        We close ScreenCapture for this thread in finally.
-        """
         ctrl = mouse.Controller()
         try:
-            while self._active and not self._stop_evt.is_set():
-                cfg = self._pick_config_provider()
-                now = time.monotonic()
-
-                if (now - self._start_t) * 1000.0 < float(cfg.delay_ms):
-                    time.sleep(0.01)
+            while True:
+                with self._lock:
+                    if (not self._active) or self._stop_evt.is_set():
+                        break
+                    sess = self._session
+                    start_t = self._start_t
+                if sess is None:
+                    time.sleep(0.02)
                     continue
 
-                ctx_ref = self._context_ref
-                if ctx_ref is None:
-                    time.sleep(0.02)
+                now = time.monotonic()
+                if (now - start_t) * 1000.0 < float(sess.cfg.delay_ms):
+                    time.sleep(0.01)
                     continue
 
                 try:
@@ -482,10 +367,8 @@ class PickService:
                     abs_x = int(abs_x)
                     abs_y = int(abs_y)
 
-                    sample, mon_req = self._capture_spec_provider(ctx_ref)
-                    mon_used, inside = self._resolve_monitor(abs_x, abs_y, mon_req)
-
-                    r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sample, mon_used, require_inside=False)
+                    mon_used, inside = self._resolve_monitor(abs_x, abs_y, sess.monitor_requested)
+                    r, g, b = self._cap.get_rgb_scoped_abs(abs_x, abs_y, sess.sample, mon_used, require_inside=False)
                     rel_x, rel_y = self._cap.abs_to_rel(abs_x, abs_y, mon_used)
                     hx = f"#{r:02X}{g:02X}{b:02X}"
 
@@ -495,8 +378,8 @@ class PickService:
                         self._bus.post_payload(EventType.INFO, InfoPayload(msg="取色预览已开始"))
 
                     payload = PickPreviewPayload(
-                        context=ctx_ref,
-                        monitor_requested=mon_req,
+                        context=sess.context,
+                        monitor_requested=sess.monitor_requested,
                         monitor=mon_used,
                         inside=bool(inside),
                         x=int(rel_x),
@@ -513,14 +396,33 @@ class PickService:
                     self._bus.post_payload(EventType.PICK_PREVIEW, payload)
 
                 except Exception as e:
-                    if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
+                    if (now - self._last_err_t) * 1000.0 >= float(sess.cfg.error_throttle_ms):
                         self._last_err_t = now
                         from core.events.payloads import StatusPayload
                         self._bus.post_payload(EventType.STATUS, StatusPayload(msg=f"取色预览异常: {e}"))
 
-                time.sleep(max(0.005, float(cfg.preview_throttle_ms) / 1000.0))
+                time.sleep(max(0.005, float(sess.cfg.preview_throttle_ms) / 1000.0))
+
         finally:
             try:
                 self._cap.close_current_thread()
             except Exception:
                 pass
+
+    # ---------- monitor selection ----------
+    def _resolve_monitor(self, abs_x: int, abs_y: int, requested: str) -> tuple[str, bool]:
+        req = (requested or "primary").strip().lower() or "primary"
+        try:
+            rect_req = self._cap.get_monitor_rect(req)
+            inside = rect_req.contains_abs(int(abs_x), int(abs_y))
+        except Exception:
+            inside = True
+
+        if req == "all":
+            return "all", inside
+
+        if inside:
+            return req, True
+
+        used = self._cap.find_monitor_key_for_abs(int(abs_x), int(abs_y), default=req)
+        return used, False

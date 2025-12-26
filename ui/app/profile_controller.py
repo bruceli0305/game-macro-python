@@ -24,6 +24,7 @@ class ProfileController:
         apply_ctx_to_ui: Callable[[ProfileContext], None],
         refresh_profiles_ui: Callable[[str], None],
         guard_confirm: Callable[[str], bool],
+        cancel_pick_sync: Callable[[], None],
     ) -> None:
         self._root = root
         self._bus = bus
@@ -31,13 +32,14 @@ class ProfileController:
         self._apply_ctx_to_ui = apply_ctx_to_ui
         self._refresh_profiles_ui = refresh_profiles_ui
         self._guard_confirm = guard_confirm
+        self._cancel_pick_sync = cancel_pick_sync
 
     def on_select(self, name: str, current_ctx: ProfileContext) -> None:
         if not self._guard_confirm("切换 Profile"):
             self._refresh_profiles_ui(current_ctx.profile_name)
             return
 
-        self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None)
+        self._cancel_pick_sync()
 
         try:
             res = self._svc.open_and_bind(name)
@@ -53,7 +55,7 @@ class ProfileController:
             if not self._guard_confirm("Profile 操作"):
                 self._refresh_profiles_ui(current_ctx.profile_name)
                 return
-
+            self._cancel_pick_sync()
         cur = current_ctx.profile_name
 
         if action == "new":

@@ -122,46 +122,56 @@ class AppWindow(tb.Window):
             apply_ctx_to_ui=self._apply_ctx_to_ui,
             refresh_profiles_ui=self._refresh_profiles_ui,
             guard_confirm=lambda action_name: self._guard.confirm(action_name=action_name, ctx=self._ctx),
+            cancel_pick_sync=self._cancel_pick_sync,
         )
 
         # ---- optional pick engine ----
         self._pick = None
         if PickService is not None and PickConfig is not None and SampleSpec is not None:
-            # Step 6: pass confirm_hotkey + mouse_avoid configs into PickService
-            try:
-                confirm_hotkey = str(getattr(self._ctx.base.pick, "confirm_hotkey", "") or "f8")
-            except Exception:
-                confirm_hotkey = "f8"
 
-            try:
-                mouse_avoid = bool(getattr(self._ctx.base.pick, "mouse_avoid", True))
-            except Exception:
-                mouse_avoid = True
+            def _pick_cfg() -> PickConfig:
+                b = self._ctx.base
 
-            try:
-                mouse_avoid_offset_y = int(getattr(self._ctx.base.pick, "mouse_avoid_offset_y", 80))
-            except Exception:
-                mouse_avoid_offset_y = 80
+                try:
+                    delay_ms = int(getattr(b.pick.avoidance, "delay_ms", 120) or 120)
+                except Exception:
+                    delay_ms = 120
 
-            try:
-                mouse_avoid_settle_ms = int(getattr(self._ctx.base.pick, "mouse_avoid_settle_ms", 80))
-            except Exception:
-                mouse_avoid_settle_ms = 80
+                try:
+                    confirm_hotkey = str(getattr(b.pick, "confirm_hotkey", "f8") or "f8")
+                except Exception:
+                    confirm_hotkey = "f8"
 
-            self._pick = PickService(
-                bus=self._bus,
-                pick_config_provider=lambda: PickConfig(
-                    delay_ms=int(self._ctx.base.pick.avoidance.delay_ms),
+                try:
+                    mouse_avoid = bool(getattr(b.pick, "mouse_avoid", True))
+                except Exception:
+                    mouse_avoid = True
+
+                try:
+                    mouse_avoid_offset_y = int(getattr(b.pick, "mouse_avoid_offset_y", 80) or 80)
+                except Exception:
+                    mouse_avoid_offset_y = 80
+
+                try:
+                    mouse_avoid_settle_ms = int(getattr(b.pick, "mouse_avoid_settle_ms", 80) or 80)
+                except Exception:
+                    mouse_avoid_settle_ms = 80
+
+                return PickConfig(
+                    delay_ms=delay_ms,
                     preview_throttle_ms=30,
                     error_throttle_ms=800,
                     confirm_hotkey=confirm_hotkey,
                     mouse_avoid=mouse_avoid,
                     mouse_avoid_offset_y=mouse_avoid_offset_y,
                     mouse_avoid_settle_ms=mouse_avoid_settle_ms,
-                ),
+                )
+
+            self._pick = PickService(
+                bus=self._bus,
+                pick_config_provider=_pick_cfg,
                 capture_spec_provider=self._capture_spec_for_context,
             )
-
         # ---- bus glue ----
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
@@ -201,7 +211,7 @@ class AppWindow(tb.Window):
     def _on_profile_select(self, name: str) -> None:
         self._profile_ctrl.on_select(name, self._ctx)
 
-    def _tk_exc_handler(exc, val, tb_):
+    def _tk_exc_handler(self, exc, val, tb_):
         log = logging.getLogger("tk")
         log.exception("tk callback exception", exc_info=(exc, val, tb_))
 
@@ -312,3 +322,12 @@ class AppWindow(tb.Window):
         self._win_state.persist_current_geometry()
 
         self.destroy()
+    def _cancel_pick_sync(self) -> None:
+        # 同步取消（避免“事件已入队但尚未 dispatch”导致 profile 切换竞态）
+        try:
+            if self._pick is not None:
+                self._pick.cancel()
+            else:
+                self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None)
+        except Exception:
+            pass
