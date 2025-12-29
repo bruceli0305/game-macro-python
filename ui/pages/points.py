@@ -6,14 +6,13 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
 from core.event_bus import EventBus
-from core.event_types import EventType
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
 from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
-from core.events.payloads import ErrorPayload
 
+from ui.app.notify import UiNotify
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
 from ui.widgets.color_swatch import ColorSwatch
@@ -28,25 +27,23 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 class PointsPage(PickNotebookCrudPage):
     """
-    Current state (after Step 10):
-    - CRUD: RecordCrudPage 只触发 services 命令，不本地增删行（事件消费端刷新）
-    - 表单编辑：debounce -> services.points.apply_form_patch(auto_save=False)
-      service 会发 RECORD_UPDATED(source="form")，UI 只刷新列表行，不 reload 表单
-    - dirty 展示：enable_uow_dirty_indicator("points") 跟随 UoW
-    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd
-
-    Step 9:
-    - Point 增加 tolerance，UI 增加容差输入，并在列表显示
+    Step 3-3-3:
+    - 页面提示/报错走 UiNotify，不再发 EventBus 的 INFO/ERROR/STATUS
+    - pick 成功提示由 PickNotebookCrudPage 内部 notify
     """
 
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services, notify: UiNotify) -> None:
         if services is None:
             raise RuntimeError("PointsPage requires services (cannot be None)")
+
+        self._services = services
+        self._cap = ScreenCapture()
 
         super().__init__(
             master,
             ctx=ctx,
             bus=bus,
+            notify=notify,
             page_title="取色点位配置",
             record_noun="点位",
             columns=[
@@ -62,10 +59,7 @@ class PointsPage(PickNotebookCrudPage):
             tab_names=["基本", "颜色&采样", "备注"],
         )
 
-        self._services = services
-        self._cap = ScreenCapture()
-
-        # dirty UI from UoW
+        # dirty UI from store broadcast
         self.enable_uow_dirty_indicator(part_key="points")
 
         # debounce apply
@@ -75,11 +69,12 @@ class PointsPage(PickNotebookCrudPage):
         tab_color = self.tabs["颜色&采样"]
         tab_note = self.tabs["备注"]
 
+        # vars
         self.var_id = tk.StringVar(value="")
         self.var_name = tk.StringVar(value="")
         self.var_monitor = tk.StringVar(value="primary")
 
-        # UI 使用 rel 坐标
+        # UI uses rel coords
         self.var_x = tk.IntVar(value=0)
         self.var_y = tk.IntVar(value=0)
 
@@ -87,7 +82,6 @@ class PointsPage(PickNotebookCrudPage):
         self.var_g = tk.IntVar(value=0)
         self.var_b = tk.IntVar(value=0)
 
-        # Step 9: tolerance
         self.var_tol = tk.IntVar(value=0)
 
         self.var_captured_at = tk.StringVar(value="")
@@ -118,10 +112,6 @@ class PointsPage(PickNotebookCrudPage):
             self._cancel_pending_apply()
         except Exception:
             pass
-        try:
-            self._set_pending_select(None)  # type: ignore[attr-defined]
-        except Exception:
-            pass
 
         self._ctx = ctx
         self._current_id = None
@@ -137,7 +127,7 @@ class PointsPage(PickNotebookCrudPage):
             self._services.notify_dirty()
             return True
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存 points.json 失败", detail=str(e)))
+            self._notify.error("保存 points.json 失败", detail=str(e))
             return False
 
     def _reload_from_disk(self) -> None:
@@ -188,7 +178,7 @@ class PointsPage(PickNotebookCrudPage):
         self._cancel_pending_apply()
         self._apply_after_id = self.after(200, lambda: self._apply_form_to_current(auto_save=False))
 
-    # ----- form -----
+    # ----- form UI -----
     def _build_tab_basic(self, parent: tk.Misc) -> None:
         parent.columnconfigure(1, weight=1)
 
@@ -399,7 +389,7 @@ class PointsPage(PickNotebookCrudPage):
             if changed:
                 self.update_tree_row(pid)
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
+            self._notify.error("应用表单失败", detail=str(e))
             return False
 
         return True
@@ -414,11 +404,6 @@ class PointsPage(PickNotebookCrudPage):
         self.var_captured_at.set(now_iso_utc())
         self._schedule_apply()
 
-    def flush_to_model(self) -> None:
-        try:
-            self._apply_form_to_current(auto_save=False)
-        except Exception:
-            pass
     def _apply_pick_confirmed(self, rid: str, payload) -> tuple[bool, bool]:
         return self._services.points.apply_pick_cmd(
             rid,
@@ -429,3 +414,9 @@ class PointsPage(PickNotebookCrudPage):
             g=payload.g,
             b=payload.b,
         )
+
+    def flush_to_model(self) -> None:
+        try:
+            self._apply_form_to_current(auto_save=False)
+        except Exception:
+            pass

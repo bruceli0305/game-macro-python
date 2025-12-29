@@ -6,13 +6,12 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
 from core.event_bus import EventBus
-from core.event_types import EventType
 from core.models.common import clamp_int
 from core.models.skill import Skill
 from core.pick.capture import ScreenCapture
 from core.profiles import ProfileContext
-from core.events.payloads import ErrorPayload
 
+from ui.app.notify import UiNotify
 from ui.pages._record_crud_page import ColumnDef
 from ui.pages._pick_notebook_crud_page import PickNotebookCrudPage, SAMPLE_DISPLAY_TO_VALUE, SAMPLE_VALUE_TO_DISPLAY
 from ui.widgets.color_swatch import ColorSwatch
@@ -27,24 +26,23 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 class SkillsPage(PickNotebookCrudPage):
     """
-    Current state (after Step 10):
-    - CRUD: RecordCrudPage 只触发 services 命令，不本地增删行（事件消费端刷新）
-    - 表单编辑：debounce -> services.skills.apply_form_patch(auto_save=False)
-      service 会发 RECORD_UPDATED(source="form")，UI 只刷新列表行，不 reload 表单
-    - dirty 展示：enable_uow_dirty_indicator("skills") 跟随 UoW
-    - cmd 命名统一：create_cmd/clone_cmd/delete_cmd
-
-    Step 10: UI 文案收口到“按确认热键确认，Esc 取消”
+    Step 3-3-3:
+    - 页面提示/报错走 UiNotify，不再发 EventBus 的 INFO/ERROR/STATUS
+    - pick 成功提示由 PickNotebookCrudPage 内部 notify
     """
 
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services, notify: UiNotify) -> None:
         if services is None:
             raise RuntimeError("SkillsPage requires services (cannot be None)")
+
+        self._services = services
+        self._cap = ScreenCapture()
 
         super().__init__(
             master,
             ctx=ctx,
             bus=bus,
+            notify=notify,
             page_title="技能配置",
             record_noun="技能",
             columns=[
@@ -61,10 +59,7 @@ class SkillsPage(PickNotebookCrudPage):
             tab_names=["基本", "像素", "备注"],
         )
 
-        self._services = services
-        self._cap = ScreenCapture()
-
-        # dirty UI from UoW
+        # dirty UI from UoW/store broadcast
         self.enable_uow_dirty_indicator(part_key="skills")
 
         # debounce apply
@@ -82,7 +77,7 @@ class SkillsPage(PickNotebookCrudPage):
         self.var_readbar = tk.IntVar(value=0)
 
         self.var_monitor = tk.StringVar(value="primary")
-        # UI 使用 rel 坐标
+        # UI uses rel coords
         self.var_x = tk.IntVar(value=0)
         self.var_y = tk.IntVar(value=0)
 
@@ -114,13 +109,9 @@ class SkillsPage(PickNotebookCrudPage):
         super().destroy()
 
     def set_context(self, ctx: ProfileContext) -> None:
-        # 切换 context 时清 debounce + pending select
+        # switching context: cancel pending apply
         try:
             self._cancel_pending_apply()
-        except Exception:
-            pass
-        try:
-            self._set_pending_select(None)  # type: ignore[attr-defined]
         except Exception:
             pass
 
@@ -138,7 +129,7 @@ class SkillsPage(PickNotebookCrudPage):
             self._services.notify_dirty()
             return True
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存 skills.json 失败", detail=str(e)))
+            self._notify.error("保存 skills.json 失败", detail=str(e))
             return False
 
     def _reload_from_disk(self) -> None:
@@ -271,7 +262,6 @@ class SkillsPage(PickNotebookCrudPage):
             row=4, column=3, sticky="ew", pady=4
         )
 
-        # Step 10: 文案不再写“左键确认”
         tb.Button(parent, text="从屏幕取色（按确认热键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
             row=6, column=0, columnspan=6, sticky="ew", pady=(12, 0)
         )
@@ -411,12 +401,11 @@ class SkillsPage(PickNotebookCrudPage):
         )
 
         try:
-            # 表单编辑一律 auto_save=False（CRUD/pick 才可能自动保存）
             changed, _saved = self._services.skills.apply_form_patch(sid, patch, auto_save=False)
             if changed:
                 self.update_tree_row(sid)
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="应用表单失败", detail=str(e)))
+            self._notify.error("应用表单失败", detail=str(e))
             return False
 
         return True
@@ -427,11 +416,6 @@ class SkillsPage(PickNotebookCrudPage):
                 return s
         return None
 
-    def flush_to_model(self) -> None:
-        try:
-            self._apply_form_to_current(auto_save=False)
-        except Exception:
-            pass
     def _apply_pick_confirmed(self, rid: str, payload) -> tuple[bool, bool]:
         return self._services.skills.apply_pick_cmd(
             rid,
@@ -442,3 +426,9 @@ class SkillsPage(PickNotebookCrudPage):
             g=payload.g,
             b=payload.b,
         )
+
+    def flush_to_model(self) -> None:
+        try:
+            self._apply_form_to_current(auto_save=False)
+        except Exception:
+            pass

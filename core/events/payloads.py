@@ -1,38 +1,11 @@
+# File: core/events/payloads.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Literal
 
 
-# -------- common UI messages --------
-
-@dataclass(frozen=True)
-class InfoPayload:
-    msg: str
-
-
-@dataclass(frozen=True)
-class StatusPayload:
-    msg: str
-
-
-@dataclass(frozen=True)
-class ErrorPayload:
-    msg: str
-    detail: str = ""
-    code: str = ""
-
-
-@dataclass(frozen=True)
-class ThemeChangePayload:
-    theme: str
-
-
-# -------- application-level payloads --------
-
-RecordType = Literal["skill_pixel", "point"]
-ConfigSection = Literal["base"]
-
+# -------- dirty --------
 
 @dataclass(frozen=True)
 class DirtyStateChangedPayload:
@@ -40,30 +13,7 @@ class DirtyStateChangedPayload:
     parts: List[str]
 
 
-@dataclass(frozen=True)
-class RecordUpdatedPayload:
-    record_type: RecordType
-    id: str
-    source: str = ""
-    saved: bool = False
-
-
-@dataclass(frozen=True)
-class RecordDeletedPayload:
-    record_type: RecordType
-    id: str
-    source: str = ""
-    saved: bool = False
-
-
-@dataclass(frozen=True)
-class ConfigSavedPayload:
-    section: ConfigSection
-    source: str = ""
-    saved: bool = False
-
-
-# -------- profile payloads (NEW) --------
+# -------- profile --------
 
 @dataclass(frozen=True)
 class ProfileChangedPayload:
@@ -76,7 +26,10 @@ class ProfileListChangedPayload:
     current: str
 
 
-# -------- pick payloads --------
+# -------- pick --------
+
+RecordType = Literal["skill_pixel", "point"]
+
 
 @dataclass(frozen=True)
 class PickContextRef:

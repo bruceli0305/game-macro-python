@@ -5,9 +5,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.store.app_store import AppStore
-from core.event_bus import EventBus
-from core.event_types import EventType
-from core.events.payloads import ConfigSavedPayload, InfoPayload, StatusPayload, ThemeChangePayload
 from core.models.base import BaseFile
 from core.models.common import clamp_int
 from core.input.hotkey import normalize, parse
@@ -17,6 +14,7 @@ from core.input.hotkey import normalize, parse
 class BaseSettingsPatch:
     theme: str
     monitor_policy: str
+
     pick_confirm_hotkey: str
 
     avoid_mode: str
@@ -35,15 +33,20 @@ class BaseSettingsPatch:
 
 
 class BaseSettingsService:
+    """
+    Step 3-3-3-3-3:
+    - 不再发 EventBus 的 INFO/STATUS/ERROR/UI_THEME_CHANGE/CONFIG_SAVED
+    - 只负责：validate/apply/commit/reload + 标记 dirty
+    - UI 提示与主题应用由页面/UiNotify负责
+    """
+
     def __init__(
         self,
         *,
         store: AppStore,
-        bus: Optional[EventBus] = None,
         notify_dirty: Optional[Callable[[], None]] = None,
     ) -> None:
         self._store = store
-        self._bus = bus
         self._notify_dirty = notify_dirty or (lambda: None)
 
     @property
@@ -52,12 +55,10 @@ class BaseSettingsService:
 
     def validate_patch(self, patch: BaseSettingsPatch) -> None:
         hk = normalize(patch.pick_confirm_hotkey)
-        mods, main = parse(hk)
+        _mods, main = parse(hk)
 
         if main == "esc":
             raise ValueError("confirm_hotkey: 确认热键不能使用 Esc（Esc 固定为取消）")
-
-        _ = mods  # currently unused, reserved for more rules
 
         _ = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
         _ = clamp_int(int(patch.mouse_avoid_offset_y), 0, 500)
@@ -102,23 +103,20 @@ class BaseSettingsService:
         self._notify_dirty()
         return True
 
-    def save_cmd(self, patch: BaseSettingsPatch) -> None:
+    def save_cmd(self, patch: BaseSettingsPatch) -> bool:
+        """
+        Returns True if saved; False if nothing to save.
+        """
         changed = self.apply_patch(patch)
 
         base_dirty = "base" in self._store.dirty_parts()
         if not changed and not base_dirty:
-            if self._bus is not None:
-                self._bus.post_payload(EventType.STATUS, StatusPayload(msg="未检测到更改"))
-            return
+            return False
 
         backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
         self._store.commit(parts={"base"}, backup=backup, touch_meta=True)
         self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(EventType.UI_THEME_CHANGE, ThemeChangePayload(theme=self.ctx.base.ui.theme))
-            self._bus.post_payload(EventType.CONFIG_SAVED, ConfigSavedPayload(section="base", source="manual_save", saved=True))
-            self._bus.post_payload(EventType.INFO, InfoPayload(msg="base.json 已保存"))
+        return True
 
     def reload_cmd(self) -> None:
         self.ctx.base = self.ctx.base_repo.load_or_create()
@@ -132,8 +130,3 @@ class BaseSettingsService:
         except Exception:
             pass
         self._notify_dirty()
-
-        if self._bus is not None:
-            self._bus.post_payload(EventType.CONFIG_SAVED, ConfigSavedPayload(section="base", source="reload", saved=False))
-            self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
-            self._bus.post_payload(EventType.UI_THEME_CHANGE, ThemeChangePayload(theme=self.ctx.base.ui.theme))

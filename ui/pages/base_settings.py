@@ -11,8 +11,9 @@ from core.event_types import EventType
 from core.models.common import clamp_int
 from core.profiles import ProfileContext
 from core.app.services.base_settings_service import BaseSettingsPatch
-from core.events.payloads import InfoPayload, ErrorPayload, DirtyStateChangedPayload
+from core.events.payloads import DirtyStateChangedPayload
 
+from ui.app.notify import UiNotify
 from ui.widgets.hotkey_entry import HotkeyEntry
 
 
@@ -46,15 +47,12 @@ _ANCHOR_VAL_TO_DISP = {v: k for k, v in _ANCHOR_DISP_TO_VAL.items()}
 
 class BaseSettingsPage(tb.Frame):
     """
-    Step 5:
-    - 移除“全局进入取色/取消取色”热键（无用）
-    - 新增：确认取色热键（PickService 使用）
-    - 新增：鼠标避让配置（解决 hover 高亮污染像素）
-    - dirty 展示只跟随 UoW（DIRTY_STATE_CHANGED）
-    - 变更时 debounce 调 service.apply_patch，让 service 标记 dirty
+    Step 3-3-3-3-3:
+    - BaseSettingsService 不再发 EventBus 的 INFO/STATUS/UI_THEME_CHANGE
+    - 页面用 UiNotify 提示，并在保存/重载后直接 apply_theme
     """
 
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services) -> None:
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services, notify: UiNotify) -> None:
         super().__init__(master)
         if services is None:
             raise RuntimeError("BaseSettingsPage requires services (cannot be None)")
@@ -62,13 +60,10 @@ class BaseSettingsPage(tb.Frame):
         self._ctx = ctx
         self._bus = bus
         self._services = services
+        self._notify = notify
 
         self._building = False
-
-        # dirty UI state (VIEW ONLY)
         self._dirty_ui = False
-
-        # debounce apply
         self._apply_after_id: str | None = None
 
         self.columnconfigure(0, weight=1)
@@ -86,7 +81,6 @@ class BaseSettingsPage(tb.Frame):
         self.var_theme = tk.StringVar(value=b.ui.theme or "darkly")
         self.var_monitor_policy_disp = tk.StringVar(value=_MONITOR_VAL_TO_DISP.get(b.capture.monitor_policy, "主屏"))
 
-        # Step 5: confirm hotkey (Esc fixed cancel)
         self.var_pick_confirm_hotkey = tk.StringVar(value=getattr(b.pick, "confirm_hotkey", "") or "f8")
 
         av = b.pick.avoidance
@@ -97,7 +91,6 @@ class BaseSettingsPage(tb.Frame):
         self.var_preview_offset_y = tk.IntVar(value=int(av.preview_offset[1]))
         self.var_preview_anchor_disp = tk.StringVar(value=_ANCHOR_VAL_TO_DISP.get(av.preview_anchor, "右下"))
 
-        # Step 5: mouse avoidance
         self.var_mouse_avoid = tk.BooleanVar(value=bool(getattr(b.pick, "mouse_avoid", True)))
         self.var_mouse_avoid_offset_y = tk.IntVar(value=int(getattr(b.pick, "mouse_avoid_offset_y", 80)))
         self.var_mouse_avoid_settle_ms = tk.IntVar(value=int(getattr(b.pick, "mouse_avoid_settle_ms", 80)))
@@ -123,16 +116,12 @@ class BaseSettingsPage(tb.Frame):
 
         self._install_dirty_watchers()
 
-        # dirty UI 来自 UoW
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
         self._set_dirty_ui(False)
 
     def _set_dirty_ui(self, flag: bool) -> None:
         self._dirty_ui = bool(flag)
         self._var_dirty.set("未保存*" if self._dirty_ui else "")
-
-    def is_dirty(self) -> bool:
-        return bool(self._dirty_ui)
 
     def _on_dirty_state_changed(self, ev: Event) -> None:
         p = ev.payload
@@ -141,7 +130,7 @@ class BaseSettingsPage(tb.Frame):
         parts = set(p.parts or [])
         self._set_dirty_ui("base" in parts)
 
-    # --- standardized flush (best-effort) ---
+    # --- standardized flush ---
     def flush_to_model(self) -> None:
         if self._building:
             return
@@ -158,20 +147,16 @@ class BaseSettingsPage(tb.Frame):
         return BaseSettingsPatch(
             theme=theme or "darkly",
             monitor_policy=_MONITOR_DISP_TO_VAL.get(self.var_monitor_policy_disp.get(), "primary"),
-
             pick_confirm_hotkey=(self.var_pick_confirm_hotkey.get() or "").strip(),
-
             avoid_mode=_AVOID_DISP_TO_VAL.get(self.var_avoid_mode_disp.get(), "hide_main"),
             avoid_delay_ms=clamp_int(int(self.var_avoid_delay.get()), 0, 5000),
             preview_follow=bool(self.var_preview_follow.get()),
             preview_offset_x=int(self.var_preview_offset_x.get()),
             preview_offset_y=int(self.var_preview_offset_y.get()),
             preview_anchor=_ANCHOR_DISP_TO_VAL.get(self.var_preview_anchor_disp.get(), "bottom_right"),
-
             mouse_avoid=bool(self.var_mouse_avoid.get()),
             mouse_avoid_offset_y=clamp_int(int(self.var_mouse_avoid_offset_y.get()), 0, 500),
             mouse_avoid_settle_ms=clamp_int(int(self.var_mouse_avoid_settle_ms.get()), 0, 500),
-
             auto_save=bool(self.var_auto_save.get()),
             backup_on_save=bool(self.var_backup.get()),
         )
@@ -184,10 +169,6 @@ class BaseSettingsPage(tb.Frame):
             pass
 
     def _apply_hotkey_error(self, msg: str) -> None:
-        """
-        BaseSettingsService.validate_patch 会抛出 'confirm_hotkey: xxx' 格式错误。
-        这里把错误展示到确认热键输入框上。
-        """
         s = (msg or "").strip()
         self._clear_hotkey_errors()
 
@@ -198,7 +179,6 @@ class BaseSettingsPage(tb.Frame):
                 pass
             return
 
-        # fallback: still show in confirm field
         try:
             self._hk_confirm.set_error(s)
         except Exception:
@@ -227,13 +207,10 @@ class BaseSettingsPage(tb.Frame):
             return
         patch = self._collect_patch()
         try:
-            # apply_patch 内部会 mark UoW dirty + notify_dirty（如果有变化）
             self._services.base.apply_patch(patch)
         except Exception:
-            # 输入中间态可能不合法，不阻断 UI
             return
 
-    # ---------------- watchers ----------------
     def _install_dirty_watchers(self) -> None:
         def on_any(*_args) -> None:
             if self._building:
@@ -244,20 +221,16 @@ class BaseSettingsPage(tb.Frame):
         for v in [
             self.var_theme,
             self.var_monitor_policy_disp,
-
             self.var_pick_confirm_hotkey,
-
             self.var_avoid_mode_disp,
             self.var_avoid_delay,
             self.var_preview_follow,
             self.var_preview_offset_x,
             self.var_preview_offset_y,
             self.var_preview_anchor_disp,
-
             self.var_mouse_avoid,
             self.var_mouse_avoid_offset_y,
             self.var_mouse_avoid_settle_ms,
-
             self.var_auto_save,
             self.var_backup,
         ]:
@@ -365,7 +338,6 @@ class BaseSettingsPage(tb.Frame):
             b = self._ctx.base
             self.var_theme.set(b.ui.theme or "darkly")
             self.var_monitor_policy_disp.set(_MONITOR_VAL_TO_DISP.get(b.capture.monitor_policy, "主屏"))
-
             self.var_pick_confirm_hotkey.set(getattr(b.pick, "confirm_hotkey", "") or "f8")
 
             av = b.pick.avoidance
@@ -386,23 +358,29 @@ class BaseSettingsPage(tb.Frame):
             self._building = False
 
         self._validate_confirm_hotkey_live()
-        # dirty UI 会被 DIRTY_STATE_CHANGED 同步
 
     # ---------------- actions ----------------
     def _on_reload(self) -> None:
         try:
             self._services.base.reload_cmd()
             self.set_context(self._services.ctx)
-            self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载 base.json"))
+            self._notify.apply_theme(self._services.ctx.base.ui.theme)
+            self._notify.info("已重新加载 base.json")
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="重新加载失败", detail=str(e)))
+            self._notify.error("重新加载失败", detail=str(e))
 
     def _on_save(self) -> None:
         patch = self._collect_patch()
         try:
-            self._services.base.save_cmd(patch)
-            self._bus.post_payload(EventType.INFO, InfoPayload(msg="base.json 已保存"))
+            saved = self._services.base.save_cmd(patch)
+            if not saved:
+                self._notify.status_msg("未检测到更改", ttl_ms=2000)
+                return
+
+            # apply theme immediately
+            self._notify.apply_theme(self._services.ctx.base.ui.theme)
+            self._notify.info("base.json 已保存")
         except Exception as e:
             self._apply_hotkey_error(str(e))
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="保存失败", detail=str(e)))
+            self._notify.error("保存失败", detail=str(e))
             messagebox.showerror("保存失败", f"{e}", parent=self.winfo_toplevel())

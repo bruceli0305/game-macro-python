@@ -1,12 +1,12 @@
 # File: core/app/services/app_services.py
 from __future__ import annotations
 
-from typing import Iterable, Optional, Set
+from typing import Callable, Iterable, Optional, Set
 
 from core.store.app_store import AppStore, Part
 from core.event_bus import EventBus
 from core.event_types import EventType
-from core.events.payloads import DirtyStateChangedPayload, ErrorPayload
+from core.events.payloads import DirtyStateChangedPayload
 from core.profiles import ProfileContext
 
 from core.app.services.base_settings_service import BaseSettingsService
@@ -15,15 +15,30 @@ from core.app.services.points_service import PointsService
 
 
 class AppServices:
-    def __init__(self, *, bus: EventBus, ctx: ProfileContext) -> None:
-        self.bus = bus
+    def __init__(
+        self,
+        *,
+        event_bus: EventBus,
+        ctx: ProfileContext,
+        notify_error: Optional[Callable[[str, str], None]] = None,  # (msg, detail)
+    ) -> None:
+        self.bus = event_bus
         self.store = AppStore(ctx)
+        self._notify_error = notify_error or (lambda _m, _d="": None)
 
-        self.base = BaseSettingsService(store=self.store, bus=self.bus, notify_dirty=self.notify_dirty)
-        self.skills = SkillsService(store=self.store, bus=self.bus, notify_dirty=self.notify_dirty)
-        self.points = PointsService(store=self.store, bus=self.bus, notify_dirty=self.notify_dirty)
+        self.base = BaseSettingsService(store=self.store, notify_dirty=self.notify_dirty)
 
-        # repair once on startup context
+        self.skills = SkillsService(
+            store=self.store,
+            notify_dirty=self.notify_dirty,
+            notify_error=self._notify_error,
+        )
+        self.points = PointsService(
+            store=self.store,
+            notify_dirty=self.notify_dirty,
+            notify_error=self._notify_error,
+        )
+
         self._repair_ids_and_persist()
         self.notify_dirty()
 
@@ -113,7 +128,6 @@ class AppServices:
         ctx = self.ctx
         changed_parts: Set[str] = set()
 
-        # ---- skills ----
         seen: Set[str] = set()
         for s in ctx.skills.skills:
             if (not s.id) or (s.id in seen):
@@ -121,7 +135,6 @@ class AppServices:
                 changed_parts.add("skills")
             seen.add(s.id)
 
-        # ---- points ----
         seen_p: Set[str] = set()
         for p in ctx.points.points:
             if (not p.id) or (p.id in seen_p):
@@ -139,7 +152,6 @@ class AppServices:
 
         try:
             self.store.commit(parts=set(changed_parts), backup=backup, touch_meta=False)  # type: ignore[arg-type]
-            # repair is not user-visible dirty
             for part in changed_parts:
                 try:
                     self.store.clear_dirty(part)  # type: ignore[arg-type]
@@ -151,4 +163,5 @@ class AppServices:
                     self.store.mark_dirty(part)  # type: ignore[arg-type]
                 except Exception:
                     pass
-            self.bus.post_payload(EventType.ERROR, ErrorPayload(msg="数据修复保存失败", detail=str(e)))
+            # 不再走 EventBus.ERROR
+            self._notify_error("数据修复保存失败", str(e))

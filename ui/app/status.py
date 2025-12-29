@@ -1,3 +1,4 @@
+# File: ui/app/status.py
 from __future__ import annotations
 
 import tkinter as tk
@@ -5,10 +6,6 @@ from typing import Optional
 
 import ttkbootstrap as tb
 from ttkbootstrap.constants import LEFT, X, Y, VERTICAL
-
-from core.event_bus import EventBus, Event
-from core.event_types import EventType
-from core.events.payloads import InfoPayload, StatusPayload, ErrorPayload, ThemeChangePayload
 
 try:
     from ttkbootstrap.toast import ToastNotification  # type: ignore
@@ -41,22 +38,19 @@ class StatusBar(tb.Frame):
 
 class StatusController:
     """
-    Owns status bar + toast + theme apply.
-    Strict typed payload version (no dict compatibility).
+    Step 3-3-3-3:
+    - StatusController 完全脱离 EventBus
+    - 只提供直接调用方法：info/status_msg/error/apply_theme
+    - EventBus -> UI 的消息桥接由 BusToNotifyBridge 负责（下一文件）
     """
 
-    def __init__(self, *, root: tb.Window, bar: StatusBar, bus: EventBus) -> None:
+    def __init__(self, *, root: tb.Window, bar: StatusBar) -> None:
         self._root = root
         self._bar = bar
-        self._bus = bus
         self._status_after_id: str | None = None
         self._toast_available = ToastNotification is not None
 
-        self._bus.subscribe(EventType.UI_THEME_CHANGE, self._on_theme_change)
-        self._bus.subscribe(EventType.INFO, self._on_info)
-        self._bus.subscribe(EventType.ERROR, self._on_error)
-        self._bus.subscribe(EventType.STATUS, self._on_status)
-
+    # ---------- basic setters ----------
     def set_profile(self, name: str) -> None:
         self._bar.set_profile(name)
 
@@ -76,6 +70,7 @@ class StatusController:
         if ttl_ms is not None and ttl_ms > 0:
             self._status_after_id = self._root.after(ttl_ms, lambda: self._bar.set_status("ready"))
 
+    # ---------- toast ----------
     def _toast(self, title: str, message: str, bootstyle: str) -> None:
         if not self._toast_available:
             return
@@ -89,45 +84,35 @@ class StatusController:
         except Exception:
             pass
 
-    def _on_theme_change(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, ThemeChangePayload):
-            return
-        theme = (p.theme or "").strip()
+    # ---------- direct-call API ----------
+    def apply_theme(self, theme: str) -> None:
+        theme = (theme or "").strip()
         if not theme:
             return
         try:
-            self._root.style.theme_use(theme)  # ttkbootstrap Window has .style
+            self._root.style.theme_use(theme)
             self.set_status(f"INFO: theme -> {theme}", ttl_ms=2500)
         except Exception as e:
             self.set_status(f"ERROR: theme apply failed: {e}", ttl_ms=6000)
             self._toast("ERROR", f"theme apply failed: {e}", "danger")
 
-    def _on_info(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, InfoPayload):
-            return
-        msg = (p.msg or "").strip()
+    def info(self, msg: str) -> None:
+        msg = (msg or "").strip()
         if not msg:
             return
         self.set_status(f"INFO: {msg}", ttl_ms=3000)
         self._toast("INFO", msg, "success")
 
-    def _on_error(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, ErrorPayload):
-            return
-        msg = (p.msg or "").strip()
+    def error(self, msg: str, *, detail: str = "") -> None:
+        msg = (msg or "").strip()
         if not msg:
             return
+        _ = (detail or "").strip()
         self.set_status(f"ERROR: {msg}", ttl_ms=6000)
         self._toast("ERROR", msg, "danger")
 
-    def _on_status(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, StatusPayload):
-            return
-        msg = (p.msg or "").strip()
+    def status_msg(self, msg: str, *, ttl_ms: Optional[int] = 2000) -> None:
+        msg = (msg or "").strip()
         if not msg:
             return
-        self.set_status(msg, ttl_ms=2000)
+        self.set_status(msg, ttl_ms=ttl_ms)

@@ -5,9 +5,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.store.app_store import AppStore
-from core.event_bus import EventBus
-from core.event_types import EventType
-from core.events.payloads import ErrorPayload
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
@@ -35,16 +32,22 @@ class PointFormPatch:
 
 
 class PointsService:
+    """
+    Step 3-3-3-3-4:
+    - remove EventBus usage entirely
+    - autosave failure uses notify_error callback (UI injected)
+    """
+
     def __init__(
         self,
         *,
         store: AppStore,
-        bus: Optional[EventBus] = None,
         notify_dirty: Optional[Callable[[], None]] = None,
+        notify_error: Optional[Callable[[str, str], None]] = None,  # (msg, detail)
     ) -> None:
         self._store = store
-        self._bus = bus
         self._notify_dirty = notify_dirty or (lambda: None)
+        self._notify_error = notify_error or (lambda _m, _d="": None)
 
     @property
     def ctx(self):
@@ -114,8 +117,7 @@ class PointsService:
         b: int,
     ) -> tuple[bool, bool]:
         """
-        Used by UI on PICK_CONFIRMED.
-        Pick 只更新坐标/颜色/时间，不改 tolerance。
+        Pick only updates coords/color/time; tolerance is user-config.
         Returns (applied, saved).
         """
         p = self.find(pid)
@@ -195,8 +197,7 @@ class PointsService:
             self._store.commit(parts={"points"}, backup=backup, touch_meta=False)
             return True
         except Exception as e:
-            if self._bus is not None:
-                self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="自动保存失败", detail=str(e)))
+            self._notify_error("自动保存失败", str(e))
             return False
 
     # ---------- cmd API ----------

@@ -11,7 +11,9 @@ from tkinter import messagebox
 
 from core.event_bus import EventBus, Event
 from core.event_types import EventType
-from core.events.payloads import InfoPayload, ErrorPayload, DirtyStateChangedPayload
+from core.events.payloads import DirtyStateChangedPayload
+
+from ui.app.notify import UiNotify
 
 
 @dataclass
@@ -24,10 +26,10 @@ class ColumnDef:
 
 class RecordCrudPage(tb.Frame):
     """
-    Step 2 (big cut):
-    - Treeview 增删改由本类直接执行（不再依赖 RECORD_UPDATED/RECORD_DELETED 事件）
-    - services 不再发布 RECORD_*；页面自己决定如何刷新 UI
-    - dirty UI 仍沿用 DIRTY_STATE_CHANGED（由 AppServices.notify_dirty 广播）
+    Step 3-3-3:
+    - CRUD 的提示/报错不再通过 EventBus(INFO/ERROR/STATUS)
+    - 改为 UiNotify（线程安全、UI 线程执行）
+    - EventBus 仅保留用于：DIRTY_STATE_CHANGED 等“状态信号”
     """
 
     def __init__(
@@ -36,6 +38,7 @@ class RecordCrudPage(tb.Frame):
         *,
         ctx: Any,
         bus: EventBus,
+        notify: UiNotify,
         page_title: str,
         record_noun: str,
         columns: list[ColumnDef],
@@ -43,6 +46,8 @@ class RecordCrudPage(tb.Frame):
         super().__init__(master)
         self._ctx = ctx
         self._bus = bus
+        self._notify = notify
+
         self._page_title_text = page_title
         self._record_noun = record_noun
         self._columns = columns
@@ -228,12 +233,12 @@ class RecordCrudPage(tb.Frame):
 
         self.update_tree_row(rid)
         self._select_id(rid)
-        self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已新增{self._record_noun}: {rid[-6:]}"))
+        self._notify.info(f"已新增{self._record_noun}: {rid[-6:]}")
 
     def _on_duplicate(self) -> None:
         sel = self._tv.selection()
         if not sel:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"请先选择要复制的{self._record_noun}"))
+            self._notify.error(f"请先选择要复制的{self._record_noun}")
             return
 
         self._apply_form_to_current(auto_save=False)
@@ -241,7 +246,7 @@ class RecordCrudPage(tb.Frame):
         rid = sel[0]
         src = self._find_record_by_id(rid)
         if src is None:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"源{self._record_noun}不存在"))
+            self._notify.error(f"源{self._record_noun}不存在")
             return
 
         clone = self._clone_record(src)
@@ -252,18 +257,18 @@ class RecordCrudPage(tb.Frame):
 
         self.update_tree_row(new_id)
         self._select_id(new_id)
-        self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已复制{self._record_noun}: {new_id[-6:]}"))
+        self._notify.info(f"已复制{self._record_noun}: {new_id[-6:]}")
 
     def _on_delete(self) -> None:
         sel = self._tv.selection()
         if not sel:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"请先选择要删除的{self._record_noun}"))
+            self._notify.error(f"请先选择要删除的{self._record_noun}")
             return
 
         rid = sel[0]
         rec = self._find_record_by_id(rid)
         if rec is None:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg=f"{self._record_noun}不存在"))
+            self._notify.error(f"{self._record_noun}不存在")
             return
 
         ok = messagebox.askyesno(
@@ -277,7 +282,7 @@ class RecordCrudPage(tb.Frame):
         try:
             self._delete_record_by_id(rid)
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="删除失败", detail=str(e)))
+            self._notify.error("删除失败", detail=str(e))
             return
 
         is_current = (self._current_id == rid)
@@ -287,7 +292,7 @@ class RecordCrudPage(tb.Frame):
             self._current_id = None
             self._select_first_if_any()
 
-        self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"已删除{self._record_noun}: {rid[-6:]}"))
+        self._notify.info(f"已删除{self._record_noun}: {rid[-6:]}")
 
     # ---------- reload/save ----------
     def _on_reload_clicked(self) -> None:
@@ -307,18 +312,18 @@ class RecordCrudPage(tb.Frame):
         try:
             self._reload_from_disk()
         except Exception as e:
-            self._bus.post_payload(EventType.ERROR, ErrorPayload(msg="重新加载失败", detail=str(e)))
+            self._notify.error("重新加载失败", detail=str(e))
             return
 
         self._current_id = None
         self.refresh_tree()
-        self._bus.post_payload(EventType.INFO, InfoPayload(msg="已重新加载"))
+        self._notify.info("已重新加载")
 
     def _on_save_clicked(self) -> None:
         if not self._apply_form_to_current(auto_save=False):
             return
         if self._save_to_disk():
-            self._bus.post_payload(EventType.INFO, InfoPayload(msg=f"{self._record_noun}已保存"))
+            self._notify.info(f"{self._record_noun}已保存")
 
     # ---------- hooks ----------
     def _reload_from_disk(self) -> None:

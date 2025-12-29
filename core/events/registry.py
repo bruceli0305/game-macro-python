@@ -10,31 +10,13 @@ PayloadType = Type[Any]
 
 
 def expected_payload_types() -> Dict[EventType, Tuple[PayloadType, ...]]:
-    """
-    Registry: EventType -> allowed payload types.
-
-    Rules:
-    - For no-payload events, allowed payload is (type(None),)
-    - For typed events, list the exact dataclass payload type(s)
-    """
     NONE = (type(None),)
 
     return {
-        # common
-        EventType.INFO: (P.InfoPayload,),
-        EventType.STATUS: (P.StatusPayload,),
-        EventType.ERROR: (P.ErrorPayload,),
-        EventType.UI_THEME_CHANGE: (P.ThemeChangePayload,),
-
         # dirty
         EventType.DIRTY_STATE_CHANGED: (P.DirtyStateChangedPayload,),
 
-        # record events
-        EventType.RECORD_UPDATED: (P.RecordUpdatedPayload,),
-        EventType.RECORD_DELETED: (P.RecordDeletedPayload,),
-        EventType.CONFIG_SAVED: (P.ConfigSavedPayload,),
-
-        # profile events
+        # profile
         EventType.PROFILE_CHANGED: (P.ProfileChangedPayload,),
         EventType.PROFILE_LIST_CHANGED: (P.ProfileListChangedPayload,),
 
@@ -52,7 +34,6 @@ def expected_payload_types() -> Dict[EventType, Tuple[PayloadType, ...]]:
 
 def validate_payload(event_type: EventType, payload: Any) -> None:
     if event_type is EventType.ANY:
-        # should not normally be published; ignore validation
         return
 
     mapping = expected_payload_types()

@@ -5,36 +5,32 @@ from enum import Enum
 
 
 class EventType(str, Enum):
+    """
+    Step 3-3-3-3-6:
+    EventBus 只保留“信号类事件”：
+    - dirty state
+    - profile change (可选，但目前保留)
+    - pick flow
+    """
+
     ANY = "*"
 
-    # common messages
-    INFO = "INFO"
-    ERROR = "ERROR"
-    STATUS = "STATUS"
+    # dirty state
+    DIRTY_STATE_CHANGED = "DIRTY_STATE_CHANGED"  # payload: DirtyStateChangedPayload
 
-    # ui/config
-    UI_THEME_CHANGE = "UI_THEME_CHANGE"
+    # profile (still kept)
+    PROFILE_LIST_CHANGED = "PROFILE_LIST_CHANGED"  # payload: ProfileListChangedPayload
+    PROFILE_CHANGED = "PROFILE_CHANGED"            # payload: ProfileChangedPayload
 
     # pick flow
-    PICK_REQUEST = "PICK_REQUEST"
-    PICK_CANCEL_REQUEST = "PICK_CANCEL_REQUEST"
+    PICK_REQUEST = "PICK_REQUEST"                  # payload: PickRequestPayload
+    PICK_CANCEL_REQUEST = "PICK_CANCEL_REQUEST"    # payload: None
 
-    PICK_MODE_ENTERED = "PICK_MODE_ENTERED"
-    PICK_PREVIEW = "PICK_PREVIEW"
-    PICK_CONFIRMED = "PICK_CONFIRMED"
-    PICK_CANCELED = "PICK_CANCELED"
-    PICK_MODE_EXITED = "PICK_MODE_EXITED"
-
-    # application-level
-    RECORD_UPDATED = "RECORD_UPDATED"
-    RECORD_DELETED = "RECORD_DELETED"  # payload: record_type, id, source, saved
-    CONFIG_SAVED = "CONFIG_SAVED"      # payload: section(str), source(str), saved(bool)
-
-    PROFILE_LIST_CHANGED = "PROFILE_LIST_CHANGED"  # payload: names(list[str]), current(str)
-    PROFILE_CHANGED = "PROFILE_CHANGED"            # payload: name(str)
-
-    # dirty state
-    DIRTY_STATE_CHANGED = "DIRTY_STATE_CHANGED"  # payload: dirty(bool), parts(list[str])
+    PICK_MODE_ENTERED = "PICK_MODE_ENTERED"        # payload: PickModeEnteredPayload
+    PICK_PREVIEW = "PICK_PREVIEW"                  # payload: PickPreviewPayload
+    PICK_CONFIRMED = "PICK_CONFIRMED"              # payload: PickConfirmedPayload
+    PICK_CANCELED = "PICK_CANCELED"                # payload: PickCanceledPayload
+    PICK_MODE_EXITED = "PICK_MODE_EXITED"          # payload: PickModeExitedPayload
 
     def __str__(self) -> str:
         return self.value

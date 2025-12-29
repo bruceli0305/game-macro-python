@@ -18,10 +18,16 @@ class ProfileResult:
 
 
 class ProfileService:
-    def __init__(self, *, pm: ProfileManager, services: AppServices, bus: EventBus) -> None:
+    """
+    Step 3-3-3-3-6:
+    - 只接受 event_bus 参数名（不再兼容 bus=）
+    - 仍发布 PROFILE_CHANGED / PROFILE_LIST_CHANGED（如果你后面决定彻底删 profile 事件，也可以再砍）
+    """
+
+    def __init__(self, *, pm: ProfileManager, services: AppServices, event_bus: EventBus) -> None:
         self._pm = pm
         self._services = services
-        self._bus = bus
+        self._bus = event_bus
 
     def list_profiles(self) -> List[str]:
         names = self._pm.list_profiles()
@@ -34,7 +40,10 @@ class ProfileService:
         )
 
     def _publish_changed(self, *, name: str) -> None:
-        self._bus.post_payload(EventType.PROFILE_CHANGED, ProfileChangedPayload(name=name))
+        self._bus.post_payload(
+            EventType.PROFILE_CHANGED,
+            ProfileChangedPayload(name=name),
+        )
 
     def _bind_ctx(self, ctx: ProfileContext) -> None:
         self._services.set_context(ctx)

@@ -1,8 +1,8 @@
 # File: ui/app_window.py
 from __future__ import annotations
 
-import tkinter as tk
 import logging
+import tkinter as tk
 
 import ttkbootstrap as tb
 
@@ -14,7 +14,6 @@ from core.repos.app_state_repo import AppStateRepo
 
 from core.app.services.app_services import AppServices
 from core.app.services.profile_service import ProfileService
-
 from core.events.payloads import DirtyStateChangedPayload
 
 # optional pick engine
@@ -27,7 +26,6 @@ except Exception:
     SampleSpec = None  # type: ignore
 
 from ui.nav import NavFrame
-
 from ui.app.event_pump import EventPump
 from ui.app.pages_manager import PagesManager
 from ui.app.pick_ui import PickUiController
@@ -35,6 +33,9 @@ from ui.app.profile_controller import ProfileController
 from ui.app.status import StatusBar, StatusController
 from ui.app.unsaved_guard import UnsavedChangesGuard
 from ui.app.window_state import WindowStateController
+
+from ui.runtime.ui_dispatcher import UiDispatcher
+from ui.app.notify import UiNotify
 
 
 class AppWindow(tb.Window):
@@ -62,13 +63,13 @@ class AppWindow(tb.Window):
         self._app_state_repo = app_state_repo
         self._app_state = app_state
 
+        # ---- UI dispatcher MUST exist before any UiNotify usage ----
+        self._dispatcher = UiDispatcher(root=self, tick_ms=8, max_tasks_per_tick=400)
+        self._dispatcher.start()
+
         self._base_title = "Game Macro - Phase 1"
         self.title(self._base_title)
 
-        # ---- services / orchestrators ----
-        self._services = AppServices(bus=self._bus, ctx=self._ctx)
-        self._profile_service = ProfileService(pm=self._pm, services=self._services, bus=self._bus)
-  
         # ---- window state ----
         self._win_state = WindowStateController(root=self, repo=self._app_state_repo, state=self._app_state)
         self._win_state.apply_initial_geometry()
@@ -95,16 +96,33 @@ class AppWindow(tb.Window):
         self._status_bar = StatusBar(self)
         self._status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
-        # ---- controllers ----
-        self._status = StatusController(root=self, bar=self._status_bar, bus=self._bus)
+        # ---- controllers (Status first) ----
+        self._status = StatusController(root=self, bar=self._status_bar)
+
+        # ---- UiNotify (requires dispatcher + status) ----
+        self._notify = UiNotify(call_soon=self._dispatcher.call_soon, status=self._status)
+
+        # ---- services ----
+        self._services = AppServices(
+            event_bus=self._bus,
+            ctx=self._ctx,
+            notify_error=lambda m, d="": self._notify.error(m, detail=d),
+        )
+        self._profile_service = ProfileService(pm=self._pm, services=self._services, event_bus=self._bus)
 
         # pages
-        self._pages = PagesManager(master=self._content, ctx=self._ctx, bus=self._bus, services=self._services)
+        self._pages = PagesManager(
+            master=self._content,
+            ctx=self._ctx,
+            bus=self._bus,
+            services=self._services,
+            notify=self._notify,
+        )
 
         # pick ui controller (preview/avoidance only)
-        self._pick_ui = PickUiController(root=self, bus=self._bus, ctx_provider=lambda: self._ctx)
+        self._pick_ui = PickUiController(root=self, bus=self._bus, ctx_provider=lambda: self._ctx, notify=self._notify)
 
-        # unsaved guard (UoW-driven)
+        # unsaved guard
         self._guard = UnsavedChangesGuard(
             root=self,
             services=self._services,
@@ -115,12 +133,12 @@ class AppWindow(tb.Window):
         # profile controller (dialogs + calling profile service)
         self._profile_ctrl = ProfileController(
             root=self,
-            bus=self._bus,
             profile_service=self._profile_service,
             apply_ctx_to_ui=self._apply_ctx_to_ui,
             refresh_profiles_ui=self._refresh_profiles_ui,
             guard_confirm=lambda action_name: self._guard.confirm(action_name=action_name, ctx=self._ctx),
             cancel_pick_sync=self._cancel_pick_sync,
+            notify=self._notify,
         )
 
         # ---- optional pick engine ----
@@ -169,7 +187,12 @@ class AppWindow(tb.Window):
                 bus=self._bus,
                 pick_config_provider=_pick_cfg,
                 capture_spec_provider=self._capture_spec_for_context,
+                ui_call_soon=self._dispatcher.call_soon,
+                notify_info=self._notify.info,
+                notify_status=lambda m: self._notify.status_msg(m, ttl_ms=2000),
+                notify_error=lambda m, d="": self._notify.error(m, detail=d),
             )
+
         # ---- bus glue ----
         self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
 
@@ -218,27 +241,18 @@ class AppWindow(tb.Window):
 
     # ---------- apply new ProfileContext ----------
     def _apply_ctx_to_ui(self, ctx: ProfileContext) -> None:
-        """
-        Called after ProfileService has already bound ctx into AppServices.
-        """
         self._ctx = ctx
 
-        # status bar
         self._status.set_profile(ctx.profile_name)
 
-        # apply theme immediately (so user feels the switch)
+        # apply theme immediately
         try:
             self.style.theme_use(ctx.base.ui.theme or "darkly")
         except Exception:
             pass
 
-        # pages get new ctx
         self._pages.set_context(ctx)
-
-        # refresh profile combobox
         self._refresh_profiles_ui(ctx.profile_name)
-
-        # notify dirty
         self._services.notify_dirty()
 
     def _refresh_profiles_ui(self, select: str) -> None:
@@ -247,10 +261,6 @@ class AppWindow(tb.Window):
 
     # ---------- pick capture spec mapping ----------
     def _capture_spec_for_context(self, ctx_ref) -> tuple["SampleSpec", str]:
-        """
-        Step 7:
-        PickService.capture_spec_provider 入参改为 PickContextRef（不再使用 dict）。
-        """
         mon = (self._ctx.base.capture.monitor_policy or "primary")
         mode = "single"
         radius = 0
@@ -296,10 +306,9 @@ class AppWindow(tb.Window):
         if not self._guard.confirm(action_name="退出程序", ctx=self._ctx):
             return
 
-        # cancel pick session
-        self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None)
+        # synchronous cancel pick (avoid race)
+        self._cancel_pick_sync()
 
-        # stop controllers/services
         try:
             self._pump.stop()
         except Exception:
@@ -316,12 +325,19 @@ class AppWindow(tb.Window):
         except Exception:
             pass
 
-        # persist window geometry
-        self._win_state.persist_current_geometry()
+        try:
+            self._win_state.persist_current_geometry()
+        except Exception:
+            pass
+
+        try:
+            self._dispatcher.stop()
+        except Exception:
+            pass
 
         self.destroy()
+
     def _cancel_pick_sync(self) -> None:
-        # 同步取消（避免“事件已入队但尚未 dispatch”导致 profile 切换竞态）
         try:
             if self._pick is not None:
                 self._pick.cancel()

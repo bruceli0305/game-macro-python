@@ -11,6 +11,7 @@ from core.event_bus import EventBus
 from core.profiles import ProfileContext
 from core.app.services.app_services import AppServices
 
+from ui.app.notify import UiNotify
 from ui.pages.base_settings import BaseSettingsPage
 from ui.pages.skills import SkillsPage
 from ui.pages.points import PointsPage
@@ -19,7 +20,15 @@ log = logging.getLogger(__name__)
 
 
 class PagesManager:
-    def __init__(self, *, master: tk.Misc, ctx: ProfileContext, bus: EventBus, services: AppServices) -> None:
+    def __init__(
+        self,
+        *,
+        master: tk.Misc,
+        ctx: ProfileContext,
+        bus: EventBus,
+        services: AppServices,
+        notify: UiNotify,
+    ) -> None:
         if services is None:
             raise RuntimeError("PagesManager requires AppServices (services cannot be None)")
 
@@ -27,12 +36,13 @@ class PagesManager:
         self._ctx = ctx
         self._bus = bus
         self._services = services
+        self._notify = notify
+
         self.pages: Dict[str, tb.Frame] = {}
 
-        # Step 2: pages now REQUIRE services
-        self.pages["base"] = BaseSettingsPage(master, ctx=ctx, bus=bus, services=services)
-        self.pages["skills"] = SkillsPage(master, ctx=ctx, bus=bus, services=services)
-        self.pages["points"] = PointsPage(master, ctx=ctx, bus=bus, services=services)
+        self.pages["base"] = BaseSettingsPage(master, ctx=ctx, bus=bus, services=services, notify=notify)
+        self.pages["skills"] = SkillsPage(master, ctx=ctx, bus=bus, services=services, notify=notify)
+        self.pages["points"] = PointsPage(master, ctx=ctx, bus=bus, services=services, notify=notify)
 
         for p in self.pages.values():
             p.grid(row=0, column=0, sticky="nsew")
@@ -54,11 +64,6 @@ class PagesManager:
                     log.exception("PagesManager.set_context failed on page=%s", k)
 
     def flush_all(self) -> None:
-        """
-        Flush UI -> model before saves/switch.
-        Priority: flush_to_model()
-        (Legacy _apply_form_to_current fallback is intentionally removed in Step 2.)
-        """
         for k, p in self.pages.items():
             if hasattr(p, "flush_to_model"):
                 try:

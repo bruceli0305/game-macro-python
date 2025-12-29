@@ -1,64 +1,92 @@
-# File: ui/app/pick_ui.py
+# File: ui/app/pick_coordinator.py
 from __future__ import annotations
 
 import tkinter as tk
+from dataclasses import dataclass
 from typing import Callable, Optional
 
-from core.event_bus import EventBus, Event
-from core.event_types import EventType
-from core.events.payloads import (
-    PickPreviewPayload,
-    PickModeEnteredPayload,
-    PickModeExitedPayload,
-    PickCanceledPayload,
-)
+from core.pick.engine import PickEngine, PickCallbacks
+from core.pick.models import PickSessionConfig, PickPreview, PickConfirmed
 from ui.pick_preview_window import PickPreviewWindow
-from ui.app.notify import UiNotify
+from ui.app.status import StatusController
+from ui.runtime.ui_dispatcher import UiDispatcher
 
 
-class PickUiController:
+@dataclass(frozen=True)
+class _UiPolicySnapshot:
+    avoid_mode: str
+    preview_follow: bool
+    preview_offset: tuple[int, int]
+    preview_anchor: str
+
+
+class PickCoordinator:
     """
-    Step 3-3-3-3:
-    - UI 提示不再通过 EventBus(INFO/STATUS)，改用 UiNotify
-    - EventBus 仍用于 pick flow 事件订阅（PICK_*）
+    - Owns PickEngine
+    - Owns PickPreviewWindow
+    - Applies main window avoidance/restore
+    - Routes confirm callback to caller
     """
 
     def __init__(
         self,
         *,
         root: tk.Misc,
-        bus: EventBus,
-        ctx_provider: Callable[[], object],
-        notify: UiNotify,
+        dispatcher: UiDispatcher,
+        status: StatusController,
+        ui_policy_provider: Callable[[], _UiPolicySnapshot],
     ) -> None:
         self._root = root
-        self._bus = bus
-        self._ctx_provider = ctx_provider
-        self._notify = notify
+        self._dispatcher = dispatcher
+        self._status = status
+        self._ui_policy_provider = ui_policy_provider
 
+        self._engine = PickEngine(scheduler=dispatcher)
         self._preview: Optional[PickPreviewWindow] = None
+
         self._prev_geo: str | None = None
         self._prev_state: str | None = None
         self._avoid_mode_applied: str | None = None
 
-        self._bus.subscribe(EventType.PICK_MODE_ENTERED, self._on_pick_mode_entered)
-        self._bus.subscribe(EventType.PICK_PREVIEW, self._on_pick_preview)
-        self._bus.subscribe(EventType.PICK_MODE_EXITED, self._on_pick_mode_exited)
-        self._bus.subscribe(EventType.PICK_CANCELED, self._on_pick_canceled)
+        self._policy: Optional[_UiPolicySnapshot] = None
+        self._on_confirm_user: Optional[Callable[[PickConfirmed], None]] = None
 
     def close(self) -> None:
+        try:
+            self.cancel()
+        except Exception:
+            pass
+        try:
+            self._engine.close()
+        except Exception:
+            pass
         self._destroy_preview()
         self._restore_after_exit()
 
-    def _ctx(self):
-        return self._ctx_provider()
+    def cancel(self) -> None:
+        self._engine.cancel()
 
+    def request_pick(self, *, cfg: PickSessionConfig, on_confirm: Callable[[PickConfirmed], None]) -> None:
+        self._on_confirm_user = on_confirm
+        self._policy = self._ui_policy_provider()
+
+        cbs = PickCallbacks(
+            on_enter=self._on_enter,
+            on_preview=self._on_preview,
+            on_confirm=self._on_confirm,
+            on_cancel=self._on_cancel,
+            on_exit=self._on_exit,
+            on_error=self._on_error,
+        )
+        self._engine.start(cfg, cbs)
+
+        # canonical instruction message
+        self._status.status(f"取色模式：移动鼠标预览，按 {cfg.confirm_hotkey} 确认，Esc 取消", ttl_ms=4000)
+
+    # ---------- UI helpers ----------
     def _ensure_preview(self) -> None:
         if self._preview is None:
-            try:
-                self._preview = PickPreviewWindow(self._root)
-            except Exception:
-                self._preview = None
+            self._preview = PickPreviewWindow(self._root, on_cancel=self.cancel)
 
     def _destroy_preview(self) -> None:
         if self._preview is not None:
@@ -69,8 +97,8 @@ class PickUiController:
             self._preview = None
 
     def _apply_avoidance_on_enter(self) -> None:
-        av = getattr(getattr(getattr(self._ctx(), "base", None), "pick", None), "avoidance", None)
-        mode = getattr(av, "mode", "hide_main")
+        pol = self._policy or self._ui_policy_provider()
+        mode = pol.avoid_mode
         self._avoid_mode_applied = mode
 
         try:
@@ -133,6 +161,7 @@ class PickUiController:
     def _get_virtual_screen_bounds(self) -> tuple[int, int, int, int]:
         try:
             import ctypes
+
             user32 = ctypes.windll.user32
             SM_XVIRTUALSCREEN = 76
             SM_YVIRTUALSCREEN = 77
@@ -154,57 +183,38 @@ class PickUiController:
             return hi
         return v
 
-    def _on_pick_mode_entered(self, ev: Event) -> None:
-        if not isinstance(ev.payload, PickModeEnteredPayload):
-            return
-
+    # ---------- engine callbacks (already in UI thread via dispatcher) ----------
+    def _on_enter(self, _cfg: PickSessionConfig) -> None:
         self._apply_avoidance_on_enter()
         self._ensure_preview()
         if self._preview is not None:
-            try:
-                self._preview.hide()
-            except Exception:
-                pass
+            self._preview.hide()
 
-        # 不在这里发提示：PickService 已通过 notify_status 提示进入方式
+    def _on_cancel(self) -> None:
+        self._status.info("取色已取消", ttl_ms=2500)
 
-    def _on_pick_canceled(self, ev: Event) -> None:
-        if not isinstance(ev.payload, PickCanceledPayload):
-            return
-        self._notify.info("取色已取消")
-
-    def _on_pick_mode_exited(self, ev: Event) -> None:
-        if not isinstance(ev.payload, PickModeExitedPayload):
-            return
+    def _on_exit(self, _reason: str) -> None:
         self._destroy_preview()
         self._restore_after_exit()
-        self._notify.status_msg("取色模式已退出", ttl_ms=2000)
+        self._status.status("取色模式已退出", ttl_ms=2000)
 
-    def _on_pick_preview(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, PickPreviewPayload):
-            return
+    def _on_error(self, msg: str) -> None:
+        self._status.status(msg, ttl_ms=3000)
 
+    def _on_preview(self, p: PickPreview) -> None:
         self._ensure_preview()
         if self._preview is None:
             return
 
-        try:
-            self._preview.update_preview(x=p.x, y=p.y, r=p.r, g=p.g, b=p.b)
-        except Exception:
-            pass
+        self._preview.update_preview(x=p.x, y=p.y, r=p.r, g=p.g, b=p.b)
+        self._preview.show()
+
+        pol = self._policy or self._ui_policy_provider()
+        follow = bool(pol.preview_follow)
+        anchor = str(pol.preview_anchor or "bottom_right")
 
         try:
-            self._preview.show()
-        except Exception:
-            pass
-
-        av = getattr(getattr(getattr(self._ctx(), "base", None), "pick", None), "avoidance", None)
-        follow = bool(getattr(av, "preview_follow_cursor", True))
-        anchor = str(getattr(av, "preview_anchor", "bottom_right") or "bottom_right")
-        try:
-            off = getattr(av, "preview_offset", (30, 30))
-            ox, oy = int(off[0]), int(off[1])
+            ox, oy = int(pol.preview_offset[0]), int(pol.preview_offset[1])
         except Exception:
             ox, oy = 30, 30
 
@@ -212,7 +222,7 @@ class PickUiController:
             px = int(self._root.winfo_pointerx())
             py = int(self._root.winfo_pointery())
         except Exception:
-            px, py = p.x, p.y
+            px, py = p.vx, p.vy
 
         try:
             pw, ph = self._preview.size
@@ -237,7 +247,10 @@ class PickUiController:
         nx = self._clamp(int(nx), L, R - pw)
         ny = self._clamp(int(ny), T, B - ph)
 
-        try:
-            self._preview.move_to(nx, ny)
-        except Exception:
-            pass
+        self._preview.move_to(nx, ny)
+
+    def _on_confirm(self, c: PickConfirmed) -> None:
+        fn = self._on_confirm_user
+        if fn is None:
+            return
+        fn(c)
