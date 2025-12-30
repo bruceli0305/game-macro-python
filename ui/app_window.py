@@ -6,35 +6,25 @@ import tkinter as tk
 
 import ttkbootstrap as tb
 
-from core.event_bus import EventBus, Event
-from core.event_types import EventType
 from core.models.app_state import AppState
 from core.profiles import ProfileContext, ProfileManager
 from core.repos.app_state_repo import AppStateRepo
 
 from core.app.services.app_services import AppServices
 from core.app.services.profile_service import ProfileService
-from core.events.payloads import DirtyStateChangedPayload
-
-# optional pick engine
-try:
-    from core.pick.pick_service import PickService, PickConfig
-    from core.pick.capture import SampleSpec
-except Exception:
-    PickService = None  # type: ignore
-    PickConfig = None  # type: ignore
-    SampleSpec = None  # type: ignore
 
 from ui.nav import NavFrame
 from ui.app.pages_manager import PagesManager
-from ui.app.pick_ui import PickUiController
 from ui.app.profile_controller import ProfileController
 from ui.app.status import StatusBar, StatusController
 from ui.app.unsaved_guard import UnsavedChangesGuard
 from ui.app.window_state import WindowStateController
-
+from ui.app.pick_coordinator import PickCoordinator, _UiPolicySnapshot
 from ui.runtime.ui_dispatcher import UiDispatcher
 from ui.app.notify import UiNotify
+
+from core.pick.models import PickSessionConfig, PickConfirmed
+from core.pick.capture import SampleSpec
 
 
 class AppWindow(tb.Window):
@@ -50,7 +40,6 @@ class AppWindow(tb.Window):
         themename: str,
         profile_manager: ProfileManager,
         profile_ctx: ProfileContext,
-        event_bus: EventBus,
         app_state_repo: AppStateRepo,
         app_state: AppState,
     ) -> None:
@@ -58,7 +47,6 @@ class AppWindow(tb.Window):
 
         self._pm = profile_manager
         self._ctx = profile_ctx
-        self._bus = event_bus
         self._app_state_repo = app_state_repo
         self._app_state = app_state
 
@@ -101,34 +89,21 @@ class AppWindow(tb.Window):
         # ---- UiNotify (requires dispatcher + status) ----
         self._notify = UiNotify(call_soon=self._dispatcher.call_soon, status=self._status)
 
-        # ---- drain EventBus in UI thread via dispatcher hook (replaces EventPump) ----
-        def _on_bus_handler_error(ev: Event, e: BaseException) -> None:
-            try:
-                self._notify.error(f"事件处理失败: {ev.type.value}", detail=str(e))
-            except Exception:
-                pass
-
-        self._dispatcher.add_hook(lambda: self._bus.dispatch_pending(max_events=200, on_error=_on_bus_handler_error))
-
         # ---- services ----
         self._services = AppServices(
-            event_bus=self._bus,
             ctx=self._ctx,
             notify_error=lambda m, d="": self._notify.error(m, detail=d),
         )
         self._profile_service = ProfileService(pm=self._pm, services=self._services)
 
-        # pages
+        # pages（包含 Base/Skills/Points）
         self._pages = PagesManager(
             master=self._content,
             ctx=self._ctx,
-            bus=self._bus,
             services=self._services,
             notify=self._notify,
+            start_pick=self._start_pick_for_record,
         )
-
-        # pick ui controller (preview/avoidance only)
-        self._pick_ui = PickUiController(root=self, bus=self._bus, ctx_provider=lambda: self._ctx, notify=self._notify)
 
         # unsaved guard
         self._guard = UnsavedChangesGuard(
@@ -149,69 +124,26 @@ class AppWindow(tb.Window):
             notify=self._notify,
         )
 
-        # ---- optional pick engine ----
-        self._pick = None
-        if PickService is not None and PickConfig is not None and SampleSpec is not None:
+        # ---- pick coordinator (no EventBus) ----
+        self._pick_coord = PickCoordinator(
+            root=self,
+            dispatcher=self._dispatcher,
+            status=self._status,
+            ui_policy_provider=self._ui_policy_snapshot,
+        )
 
-            def _pick_cfg() -> PickConfig:
-                b = self._ctx.base
-
-                try:
-                    delay_ms = int(getattr(b.pick.avoidance, "delay_ms", 120) or 120)
-                except Exception:
-                    delay_ms = 120
-
-                try:
-                    confirm_hotkey = str(getattr(b.pick, "confirm_hotkey", "f8") or "f8")
-                except Exception:
-                    confirm_hotkey = "f8"
-
-                try:
-                    mouse_avoid = bool(getattr(b.pick, "mouse_avoid", True))
-                except Exception:
-                    mouse_avoid = True
-
-                try:
-                    mouse_avoid_offset_y = int(getattr(b.pick, "mouse_avoid_offset_y", 80) or 80)
-                except Exception:
-                    mouse_avoid_offset_y = 80
-
-                try:
-                    mouse_avoid_settle_ms = int(getattr(b.pick, "mouse_avoid_settle_ms", 80) or 80)
-                except Exception:
-                    mouse_avoid_settle_ms = 80
-
-                return PickConfig(
-                    delay_ms=delay_ms,
-                    preview_throttle_ms=30,
-                    error_throttle_ms=800,
-                    confirm_hotkey=confirm_hotkey,
-                    mouse_avoid=mouse_avoid,
-                    mouse_avoid_offset_y=mouse_avoid_offset_y,
-                    mouse_avoid_settle_ms=mouse_avoid_settle_ms,
-                )
-
-            self._pick = PickService(
-                bus=self._bus,
-                pick_config_provider=_pick_cfg,
-                capture_spec_provider=self._capture_spec_for_context,
-                ui_call_soon=self._dispatcher.call_soon,
-                notify_info=self._notify.info,
-                notify_status=lambda m: self._notify.status_msg(m, ttl_ms=2000),
-                notify_error=lambda m, d="": self._notify.error(m, detail=d),
-            )
-
-        # ---- bus glue ----
-        self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
-
-        # preview window click -> cancel pick
-        self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None))
+        # ---- 脏状态标题星号：直接订阅 AppStore ----
+        try:
+            self._services.store.subscribe_dirty(self._on_store_dirty)
+        except Exception:
+            pass
 
         # ---- initial UI state ----
         self._status.set_profile(self._ctx.profile_name)
         self._status.set_page("基础配置")
         self._pages.show("base")
         self._refresh_profiles_ui(self._ctx.profile_name)
+        # 主动广播一次当前 dirty 状态（即便通常为 clean）
         self._services.notify_dirty()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -256,42 +188,130 @@ class AppWindow(tb.Window):
         names = self._profile_service.list_profiles()
         self._nav.set_profiles(names, select)
 
-    # ---------- pick capture spec mapping ----------
-    def _capture_spec_for_context(self, ctx_ref) -> tuple["SampleSpec", str]:
-        mon = (self._ctx.base.capture.monitor_policy or "primary")
-        mode = "single"
-        radius = 0
+    # ---------- pick: UI policy snapshot ----------
+    def _ui_policy_snapshot(self) -> _UiPolicySnapshot:
+        """
+        从当前 ProfileContext 抽取取色相关的 UI 避让/预览策略快照。
+        """
+        b = self._ctx.base
+        av = getattr(getattr(b, "pick", None), "avoidance", None)
+
+        # 默认值
+        mode = "hide_main"
+        preview_follow = True
+        preview_offset = (30, 30)
+        preview_anchor = "bottom_right"
+
+        if av is not None:
+            try:
+                mode = (getattr(av, "mode", mode) or mode).strip()
+            except Exception:
+                pass
+            try:
+                preview_follow = bool(getattr(av, "preview_follow_cursor", preview_follow))
+            except Exception:
+                pass
+            try:
+                off = getattr(av, "preview_offset", preview_offset)
+                ox = int(off[0])
+                oy = int(off[1])
+                preview_offset = (ox, oy)
+            except Exception:
+                pass
+            try:
+                preview_anchor = (getattr(av, "preview_anchor", preview_anchor) or preview_anchor).strip()
+            except Exception:
+                pass
+
+        return _UiPolicySnapshot(
+            avoid_mode=mode or "hide_main",
+            preview_follow=bool(preview_follow),
+            preview_offset=preview_offset,
+            preview_anchor=preview_anchor or "bottom_right",
+        )
+
+    # ---------- pick: pages -> coordinator ----------
+    def _start_pick_for_record(
+        self,
+        *,
+        record_type: str,      # "skill_pixel" | "point"
+        record_id: str,
+        sample_mode: str,
+        sample_radius: int,
+        monitor: str,
+        on_confirm,            # Callable[[PickConfirmed], None]
+    ) -> None:
+        """
+        由 SkillsPage / PointsPage 调用，发起一次取色会话。
+        """
+        b = self._ctx.base
+
+        # 采样配置
+        sample = SampleSpec(
+            mode=(sample_mode or "single").strip() or "single",
+            radius=int(sample_radius),
+        )
+
+        # monitor 策略：记录自身配置优先，否则退回全局 capture.monitor_policy
+        mon_req = (monitor or "").strip()
+        if not mon_req:
+            try:
+                mon_req = (b.capture.monitor_policy or "primary").strip()
+            except Exception:
+                mon_req = "primary"
+        if not mon_req:
+            mon_req = "primary"
+
+        # 避让/确认配置
+        av = getattr(getattr(b, "pick", None), "avoidance", None)
+        try:
+            delay_ms = int(getattr(av, "delay_ms", 120) or 120)
+        except Exception:
+            delay_ms = 120
 
         try:
-            typ = getattr(ctx_ref, "type", None)
-            oid = getattr(ctx_ref, "id", None)
-
-            if typ == "skill_pixel" and isinstance(oid, str):
-                for s in self._ctx.skills.skills:
-                    if s.id == oid:
-                        mode = (s.pixel.sample.mode or "single")
-                        radius = int(getattr(s.pixel.sample, "radius", 0) or 0)
-                        mon = (s.pixel.monitor or mon)
-                        break
-
-            elif typ == "point" and isinstance(oid, str):
-                for p in self._ctx.points.points:
-                    if p.id == oid:
-                        mode = (p.sample.mode or "single")
-                        radius = int(getattr(p.sample, "radius", 0) or 0)
-                        mon = (p.monitor or mon)
-                        break
+            confirm_hotkey = str(getattr(b.pick, "confirm_hotkey", "f8") or "f8")
         except Exception:
-            pass
+            confirm_hotkey = "f8"
 
-        return SampleSpec(mode=mode, radius=radius), mon
+        try:
+            mouse_avoid = bool(getattr(b.pick, "mouse_avoid", True))
+        except Exception:
+            mouse_avoid = True
+
+        try:
+            mouse_avoid_offset_y = int(getattr(b.pick, "mouse_avoid_offset_y", 80) or 80)
+        except Exception:
+            mouse_avoid_offset_y = 80
+
+        try:
+            mouse_avoid_settle_ms = int(getattr(b.pick, "mouse_avoid_settle_ms", 80) or 80)
+        except Exception:
+            mouse_avoid_settle_ms = 80
+
+        cfg = PickSessionConfig(
+            record_type=record_type,       # "skill_pixel" | "point"
+            record_id=record_id,
+            monitor_requested=mon_req,
+            sample=sample,
+            delay_ms=delay_ms,
+            preview_throttle_ms=30,
+            error_throttle_ms=800,
+            confirm_hotkey=confirm_hotkey,
+            mouse_avoid=mouse_avoid,
+            mouse_avoid_offset_y=mouse_avoid_offset_y,
+            mouse_avoid_settle_ms=mouse_avoid_settle_ms,
+        )
+
+        self._pick_coord.request_pick(cfg=cfg, on_confirm=on_confirm)
 
     # ---------- dirty title ----------
-    def _on_dirty_state_changed(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, DirtyStateChangedPayload):
-            return
-        title = self._base_title + (" *" if p.dirty else "")
+    def _on_store_dirty(self, parts) -> None:
+        try:
+            dirty = bool(parts)
+        except Exception:
+            dirty = False
+        title = self._base_title + (" *" if dirty else "")
         try:
             if self.title() != title:
                 self.title(title)
@@ -306,14 +326,8 @@ class AppWindow(tb.Window):
         # synchronous cancel pick (avoid race)
         self._cancel_pick_sync()
 
-        if self._pick is not None:
-            try:
-                self._pick.close()
-            except Exception:
-                pass
-
         try:
-            self._pick_ui.close()
+            self._pick_coord.close()
         except Exception:
             pass
 
@@ -331,9 +345,6 @@ class AppWindow(tb.Window):
 
     def _cancel_pick_sync(self) -> None:
         try:
-            if self._pick is not None:
-                self._pick.cancel()
-            else:
-                self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None)
+            self._pick_coord.cancel()
         except Exception:
             pass

@@ -52,6 +52,13 @@ class AppStore:
             except Exception:
                 pass
 
+    def emit_dirty(self) -> None:
+        """
+        主动向所有 dirty 订阅者广播当前脏状态（不改变任何状态）。
+        主要用于：首次构建 UI 后，让 UI 获取“当前是否脏”的初始值。
+        """
+        self._emit_dirty()
+
     # ---------- context ----------
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx

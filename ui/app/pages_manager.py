@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
-from typing import Dict
+from typing import Dict, Callable, Any
 
 import ttkbootstrap as tb
 
-from core.event_bus import EventBus
 from core.profiles import ProfileContext
 from core.app.services.app_services import AppServices
 
@@ -25,24 +24,36 @@ class PagesManager:
         *,
         master: tk.Misc,
         ctx: ProfileContext,
-        bus: EventBus,
         services: AppServices,
         notify: UiNotify,
+        start_pick: Callable[..., None],   # record_type, record_id, sample_mode, sample_radius, monitor, on_confirm
     ) -> None:
         if services is None:
             raise RuntimeError("PagesManager requires AppServices (services cannot be None)")
 
         self._master = master
         self._ctx = ctx
-        self._bus = bus
         self._services = services
         self._notify = notify
+        self._start_pick = start_pick
 
         self.pages: Dict[str, tb.Frame] = {}
 
-        self.pages["base"] = BaseSettingsPage(master, ctx=ctx, bus=bus, services=services, notify=notify)
-        self.pages["skills"] = SkillsPage(master, ctx=ctx, bus=bus, services=services, notify=notify)
-        self.pages["points"] = PointsPage(master, ctx=ctx, bus=bus, services=services, notify=notify)
+        self.pages["base"] = BaseSettingsPage(master, ctx=ctx, services=services, notify=notify)
+        self.pages["skills"] = SkillsPage(
+            master,
+            ctx=ctx,
+            services=services,
+            notify=notify,
+            start_pick=start_pick,
+        )
+        self.pages["points"] = PointsPage(
+            master,
+            ctx=ctx,
+            services=services,
+            notify=notify,
+            start_pick=start_pick,
+        )
 
         for p in self.pages.values():
             p.grid(row=0, column=0, sticky="nsew")

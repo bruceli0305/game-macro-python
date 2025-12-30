@@ -4,9 +4,6 @@ from __future__ import annotations
 from typing import Callable, Iterable, Optional, Set
 
 from core.store.app_store import AppStore, Part
-from core.event_bus import EventBus
-from core.event_types import EventType
-from core.events.payloads import DirtyStateChangedPayload
 from core.profiles import ProfileContext
 
 from core.app.services.base_settings_service import BaseSettingsService
@@ -18,11 +15,9 @@ class AppServices:
     def __init__(
         self,
         *,
-        event_bus: EventBus,
         ctx: ProfileContext,
         notify_error: Optional[Callable[[str, str], None]] = None,  # (msg, detail)
     ) -> None:
-        self.bus = event_bus
         self.store = AppStore(ctx)
         self._notify_error = notify_error or (lambda _m, _d="": None)
 
@@ -117,11 +112,13 @@ class AppServices:
 
     # ---------- dirty broadcast ----------
     def notify_dirty(self) -> None:
-        parts = sorted(list(self.store.dirty_parts()))
-        self.bus.post_payload(
-            EventType.DIRTY_STATE_CHANGED,
-            DirtyStateChangedPayload(dirty=bool(self.store.is_dirty()), parts=parts),
-        )
+        """
+        主动触发一次当前脏状态的广播（供 UI 初始同步等场景使用）。
+        """
+        try:
+            self.store.emit_dirty()
+        except Exception:
+            pass
 
     # ---------- repair ----------
     def _repair_ids_and_persist(self) -> None:

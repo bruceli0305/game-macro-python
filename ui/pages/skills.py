@@ -5,7 +5,6 @@ import tkinter as tk
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
-from core.event_bus import EventBus
 from core.models.common import clamp_int
 from core.models.skill import Skill
 from core.pick.capture import ScreenCapture
@@ -26,22 +25,31 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 class SkillsPage(PickNotebookCrudPage):
     """
-    Step 3-3-3:
-    - 页面提示/报错走 UiNotify，不再发 EventBus 的 INFO/ERROR/STATUS
-    - pick 成功提示由 PickNotebookCrudPage 内部 notify
+    技能配置页面：
+    - 左侧技能列表 + 右侧 Notebook（基本 / 像素 / 备注）
+    - 提示/报错走 UiNotify
+    - 取色流程通过 AppWindow 注入的 start_pick 回调 + PickCoordinator 完成
     """
 
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services, notify: UiNotify) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        ctx: ProfileContext,
+        services,
+        notify: UiNotify,
+        start_pick,
+    ) -> None:
         if services is None:
             raise RuntimeError("SkillsPage requires services (cannot be None)")
 
         self._services = services
         self._cap = ScreenCapture()
+        self._start_pick = start_pick
 
         super().__init__(
             master,
             ctx=ctx,
-            bus=bus,
             notify=notify,
             page_title="技能配置",
             record_noun="技能",
@@ -55,12 +63,11 @@ class SkillsPage(PickNotebookCrudPage):
                 ColumnDef("tol", "容差", 60, "center"),
                 ColumnDef("readbar", "读条(ms)", 80, "center"),
             ],
-            pick_context_type="skill_pixel",
             tab_names=["基本", "像素", "备注"],
         )
 
-        # dirty UI from UoW/store broadcast
-        self.enable_uow_dirty_indicator(part_key="skills")
+        # dirty UI from UoW/store broadcast（订阅 AppStore）
+        self.enable_uow_dirty_indicator(part_key="skills", store=services.store)
 
         # debounce apply
         self._apply_after_id: str | None = None
@@ -262,9 +269,12 @@ class SkillsPage(PickNotebookCrudPage):
             row=4, column=3, sticky="ew", pady=4
         )
 
-        tb.Button(parent, text="从屏幕取色（按确认热键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
-            row=6, column=0, columnspan=6, sticky="ew", pady=(12, 0)
-        )
+        tb.Button(
+            parent,
+            text="从屏幕取色（按确认热键确认）",
+            bootstyle=PRIMARY,
+            command=self.request_pick_current,
+        ).grid(row=6, column=0, columnspan=6, sticky="ew", pady=(12, 0))
 
     def _build_tab_note(self, parent: tk.Misc) -> None:
         parent.rowconfigure(0, weight=1)
@@ -416,15 +426,68 @@ class SkillsPage(PickNotebookCrudPage):
                 return s
         return None
 
-    def _apply_pick_confirmed(self, rid: str, payload) -> tuple[bool, bool]:
-        return self._services.skills.apply_pick_cmd(
-            rid,
-            vx=payload.vx,
-            vy=payload.vy,
-            monitor=payload.monitor,
-            r=payload.r,
-            g=payload.g,
-            b=payload.b,
+    # ----- pick -----
+    def request_pick_current(self) -> None:
+        """
+        从当前所选技能发起取色：
+        - 先 flush 表单到模型
+        - 再根据技能像素配置构造采样参数
+        - 调用 AppWindow 注入的 start_pick
+        """
+        if not self.current_id:
+            self._notify.error("请先选择一个技能")
+            return
+
+        # flush form -> model
+        if not self._apply_form_to_current(auto_save=False):
+            return
+
+        sid = self.current_id
+        s = self._find_skill(sid)
+        if s is None:
+            self._notify.error("当前技能不存在")
+            return
+
+        sample_mode = s.pixel.sample.mode or "single"
+        sample_radius = int(getattr(s.pixel.sample, "radius", 0) or 0)
+        monitor = s.pixel.monitor or "primary"
+
+        def _on_confirm(c) -> None:
+            applied, saved = self._services.skills.apply_pick_cmd(
+                sid,
+                vx=c.vx,
+                vy=c.vy,
+                monitor=c.monitor,
+                r=c.r,
+                g=c.g,
+                b=c.b,
+            )
+            if not applied:
+                return
+
+            try:
+                self.update_tree_row(sid)
+            except Exception:
+                pass
+            if self.current_id == sid:
+                try:
+                    self._load_into_form(sid)
+                except Exception:
+                    pass
+
+            if getattr(c, "hex", ""):
+                if saved:
+                    self._notify.info(f"取色已应用并保存: {c.hex}")
+                else:
+                    self._notify.status_msg(f"取色已应用(未保存): {c.hex}", ttl_ms=2000)
+
+        self._start_pick(
+            record_type="skill_pixel",
+            record_id=sid,
+            sample_mode=sample_mode,
+            sample_radius=sample_radius,
+            monitor=monitor,
+            on_confirm=_on_confirm,
         )
 
     def flush_to_model(self) -> None:

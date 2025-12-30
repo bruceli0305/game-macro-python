@@ -1,9 +1,9 @@
+# File: main.py
 from pathlib import Path
 
-import ttkbootstrap as tb
+import ttkbootstrap as tb  # 仍在 requirements 中，虽然此处未直接使用
 import logging
 
-from core.event_bus import EventBus
 from core.idgen.snowflake import SnowflakeGenerator
 from core.profiles import ProfileManager
 from core.repos.app_state_repo import AppStateRepo
@@ -33,17 +33,13 @@ def main():
     )
     ctx = pm.open_last_or_fallback()
 
-    # Event bus
-    bus = EventBus()
-
-    # theme fallback (ttkbootstrap may raise if theme invalid)
+    # theme fallback
     themename = ctx.base.ui.theme or "darkly"
     try:
         app = AppWindow(
             themename=themename,
             profile_manager=pm,
             profile_ctx=ctx,
-            event_bus=bus,
             app_state_repo=app_state_repo,
             app_state=app_state,
         )
@@ -53,7 +49,6 @@ def main():
             themename="darkly",
             profile_manager=pm,
             profile_ctx=ctx,
-            event_bus=bus,
             app_state_repo=app_state_repo,
             app_state=app_state,
         )

@@ -6,12 +6,9 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from tkinter import messagebox
 
-from core.event_bus import EventBus, Event
-from core.event_types import EventType
 from core.models.common import clamp_int
 from core.profiles import ProfileContext
 from core.app.services.base_settings_service import BaseSettingsPatch
-from core.events.payloads import DirtyStateChangedPayload
 
 from ui.app.notify import UiNotify
 from ui.widgets.hotkey_entry import HotkeyEntry
@@ -50,15 +47,16 @@ class BaseSettingsPage(tb.Frame):
     Step 3-3-3-3-3:
     - BaseSettingsService 不再发 EventBus 的 INFO/STATUS/UI_THEME_CHANGE
     - 页面用 UiNotify 提示，并在保存/重载后直接 apply_theme
+    - 阶段二：脏状态 UI 不再监听 EventBus.DIRTY_STATE_CHANGED，而是直接订阅 AppStore.dirty
+    - 阶段三：完全移除对 EventBus 的依赖
     """
 
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services, notify: UiNotify) -> None:
+    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, services, notify: UiNotify) -> None:
         super().__init__(master)
         if services is None:
             raise RuntimeError("BaseSettingsPage requires services (cannot be None)")
 
         self._ctx = ctx
-        self._bus = bus
         self._services = services
         self._notify = notify
 
@@ -116,19 +114,27 @@ class BaseSettingsPage(tb.Frame):
 
         self._install_dirty_watchers()
 
-        self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
+        # 脏状态 UI：直接订阅 AppStore，而不是 EventBus.DIRTY_STATE_CHANGED
+        try:
+            self._services.store.subscribe_dirty(self._on_store_dirty)
+        except Exception:
+            pass
+
         self._set_dirty_ui(False)
 
     def _set_dirty_ui(self, flag: bool) -> None:
         self._dirty_ui = bool(flag)
         self._var_dirty.set("未保存*" if self._dirty_ui else "")
 
-    def _on_dirty_state_changed(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, DirtyStateChangedPayload):
-            return
-        parts = set(p.parts or [])
-        self._set_dirty_ui("base" in parts)
+    def _on_store_dirty(self, parts) -> None:
+        """
+        AppStore.dirty 订阅回调：parts 是当前脏的 part 集合（如 {"base", "skills"}）。
+        """
+        try:
+            parts_set = set(parts or [])
+        except Exception:
+            parts_set = set()
+        self._set_dirty_ui("base" in parts_set)
 
     # --- standardized flush ---
     def flush_to_model(self) -> None:

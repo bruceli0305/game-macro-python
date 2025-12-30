@@ -9,9 +9,7 @@ import ttkbootstrap as tb
 from ttkbootstrap.constants import LEFT
 from tkinter import messagebox
 
-from core.event_bus import EventBus, Event
-from core.event_types import EventType
-from core.events.payloads import DirtyStateChangedPayload
+from core.store.app_store import AppStore
 
 from ui.app.notify import UiNotify
 
@@ -26,10 +24,10 @@ class ColumnDef:
 
 class RecordCrudPage(tb.Frame):
     """
-    Step 3-3-3:
-    - CRUD 的提示/报错不再通过 EventBus(INFO/ERROR/STATUS)
-    - 改为 UiNotify（线程安全、UI 线程执行）
-    - EventBus 仅保留用于：DIRTY_STATE_CHANGED 等“状态信号”
+    通用 CRUD 页面基类：
+    - 左侧列表（Treeview）+ 右侧表单（由子类实现）
+    - CRUD 的提示/报错通过 UiNotify（线程安全、UI 线程执行）
+    - 脏状态指示通过订阅 AppStore.dirty（enable_uow_dirty_indicator）
     """
 
     def __init__(
@@ -37,7 +35,6 @@ class RecordCrudPage(tb.Frame):
         master: tk.Misc,
         *,
         ctx: Any,
-        bus: EventBus,
         notify: UiNotify,
         page_title: str,
         record_noun: str,
@@ -45,7 +42,6 @@ class RecordCrudPage(tb.Frame):
     ) -> None:
         super().__init__(master)
         self._ctx = ctx
-        self._bus = bus
         self._notify = notify
 
         self._page_title_text = page_title
@@ -115,19 +111,26 @@ class RecordCrudPage(tb.Frame):
         self._update_dirty_ui()
 
     # ---------- dirty UI ----------
-    def enable_uow_dirty_indicator(self, *, part_key: str) -> None:
+    def enable_uow_dirty_indicator(self, *, part_key: str, store: AppStore) -> None:
+        """
+        使用 AppStore.dirty 状态更新“未保存*”指示。
+        """
         self._uow_part_key = str(part_key)
-        self._bus.subscribe(EventType.DIRTY_STATE_CHANGED, self._on_dirty_state_changed)
+        try:
+            store.subscribe_dirty(self._on_store_dirty)
+        except Exception:
+            # 订阅失败则不显示 dirty 状态，不影响其他功能
+            pass
 
-    def _on_dirty_state_changed(self, ev: Event) -> None:
-        p = ev.payload
-        if not isinstance(p, DirtyStateChangedPayload):
-            return
+    def _on_store_dirty(self, parts) -> None:
         key = self._uow_part_key
         if not key:
             return
-        parts = set(p.parts or [])
-        self._set_dirty_ui(key in parts)
+        try:
+            parts_set = set(parts or [])
+        except Exception:
+            parts_set = set()
+        self._set_dirty_ui(key in parts_set)
 
     def _set_dirty_ui(self, flag: bool) -> None:
         self._dirty_ui = bool(flag)

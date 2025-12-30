@@ -5,7 +5,6 @@ import tkinter as tk
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 
-from core.event_bus import EventBus
 from core.io.json_store import now_iso_utc
 from core.models.common import clamp_int
 from core.models.point import Point
@@ -27,22 +26,31 @@ def rgb_to_hex(r: int, g: int, b: int) -> str:
 
 class PointsPage(PickNotebookCrudPage):
     """
-    Step 3-3-3:
-    - 页面提示/报错走 UiNotify，不再发 EventBus 的 INFO/ERROR/STATUS
-    - pick 成功提示由 PickNotebookCrudPage 内部 notify
+    取色点位配置页面：
+    - 左侧点位列表 + 右侧 Notebook（基本 / 颜色&采样 / 备注）
+    - 提示/报错走 UiNotify
+    - 取色流程通过 AppWindow 注入的 start_pick 回调 + PickCoordinator 完成
     """
 
-    def __init__(self, master: tk.Misc, *, ctx: ProfileContext, bus: EventBus, services, notify: UiNotify) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        *,
+        ctx: ProfileContext,
+        services,
+        notify: UiNotify,
+        start_pick,
+    ) -> None:
         if services is None:
             raise RuntimeError("PointsPage requires services (cannot be None)")
 
         self._services = services
         self._cap = ScreenCapture()
+        self._start_pick = start_pick
 
         super().__init__(
             master,
             ctx=ctx,
-            bus=bus,
             notify=notify,
             page_title="取色点位配置",
             record_noun="点位",
@@ -55,12 +63,11 @@ class PointsPage(PickNotebookCrudPage):
                 ColumnDef("tol", "容差", 60, "center"),
                 ColumnDef("captured_at", "采集时间", 160, "w"),
             ],
-            pick_context_type="point",
             tab_names=["基本", "颜色&采样", "备注"],
         )
 
-        # dirty UI from store broadcast
-        self.enable_uow_dirty_indicator(part_key="points")
+        # dirty UI from store broadcast（订阅 AppStore）
+        self.enable_uow_dirty_indicator(part_key="points", store=services.store)
 
         # debounce apply
         self._apply_after_id: str | None = None
@@ -247,9 +254,12 @@ class PointsPage(PickNotebookCrudPage):
             row=2, column=5, sticky="ew", pady=4
         )
 
-        tb.Button(parent, text="从屏幕取色（按确认热键确认）", bootstyle=PRIMARY, command=self.request_pick_current).grid(
-            row=3, column=0, columnspan=6, sticky="ew", pady=(12, 0)
-        )
+        tb.Button(
+            parent,
+            text="从屏幕取色（按确认热键确认）",
+            bootstyle=PRIMARY,
+            command=self.request_pick_current,
+        ).grid(row=3, column=0, columnspan=6, sticky="ew", pady=(12, 0))
 
         tb.Button(parent, text="更新时间(captured_at=now)", command=self._touch_time).grid(
             row=4, column=0, columnspan=6, sticky="ew", pady=(8, 0)
@@ -404,15 +414,68 @@ class PointsPage(PickNotebookCrudPage):
         self.var_captured_at.set(now_iso_utc())
         self._schedule_apply()
 
-    def _apply_pick_confirmed(self, rid: str, payload) -> tuple[bool, bool]:
-        return self._services.points.apply_pick_cmd(
-            rid,
-            vx=payload.vx,
-            vy=payload.vy,
-            monitor=payload.monitor,
-            r=payload.r,
-            g=payload.g,
-            b=payload.b,
+    # ----- pick -----
+    def request_pick_current(self) -> None:
+        """
+        从当前所选点位发起取色：
+        - 先 flush 表单到模型
+        - 再根据点位配置构造采样参数
+        - 调用 AppWindow 注入的 start_pick
+        """
+        if not self.current_id:
+            self._notify.error("请先选择一个点位")
+            return
+
+        # flush form -> model
+        if not self._apply_form_to_current(auto_save=False):
+            return
+
+        rid = self.current_id
+        p = self._find_point(rid)
+        if p is None:
+            self._notify.error("当前点位不存在")
+            return
+
+        sample_mode = p.sample.mode or "single"
+        sample_radius = int(getattr(p.sample, "radius", 0) or 0)
+        monitor = p.monitor or "primary"
+
+        def _on_confirm(c) -> None:
+            applied, saved = self._services.points.apply_pick_cmd(
+                rid,
+                vx=c.vx,
+                vy=c.vy,
+                monitor=c.monitor,
+                r=c.r,
+                g=c.g,
+                b=c.b,
+            )
+            if not applied:
+                return
+
+            try:
+                self.update_tree_row(rid)
+            except Exception:
+                pass
+            if self.current_id == rid:
+                try:
+                    self._load_into_form(rid)
+                except Exception:
+                    pass
+
+            if getattr(c, "hex", ""):
+                if saved:
+                    self._notify.info(f"取色已应用并保存: {c.hex}")
+                else:
+                    self._notify.status_msg(f"取色已应用(未保存): {c.hex}", ttl_ms=2000)
+
+        self._start_pick(
+            record_type="point",
+            record_id=rid,
+            sample_mode=sample_mode,
+            sample_radius=sample_radius,
+            monitor=monitor,
+            on_confirm=_on_confirm,
         )
 
     def flush_to_model(self) -> None:
