@@ -26,7 +26,6 @@ except Exception:
     SampleSpec = None  # type: ignore
 
 from ui.nav import NavFrame
-from ui.app.event_pump import EventPump
 from ui.app.pages_manager import PagesManager
 from ui.app.pick_ui import PickUiController
 from ui.app.profile_controller import ProfileController
@@ -102,13 +101,22 @@ class AppWindow(tb.Window):
         # ---- UiNotify (requires dispatcher + status) ----
         self._notify = UiNotify(call_soon=self._dispatcher.call_soon, status=self._status)
 
+        # ---- drain EventBus in UI thread via dispatcher hook (replaces EventPump) ----
+        def _on_bus_handler_error(ev: Event, e: BaseException) -> None:
+            try:
+                self._notify.error(f"事件处理失败: {ev.type.value}", detail=str(e))
+            except Exception:
+                pass
+
+        self._dispatcher.add_hook(lambda: self._bus.dispatch_pending(max_events=200, on_error=_on_bus_handler_error))
+
         # ---- services ----
         self._services = AppServices(
             event_bus=self._bus,
             ctx=self._ctx,
             notify_error=lambda m, d="": self._notify.error(m, detail=d),
         )
-        self._profile_service = ProfileService(pm=self._pm, services=self._services, event_bus=self._bus)
+        self._profile_service = ProfileService(pm=self._pm, services=self._services)
 
         # pages
         self._pages = PagesManager(
@@ -198,17 +206,6 @@ class AppWindow(tb.Window):
 
         # preview window click -> cancel pick
         self.bind("<<PICK_PREVIEW_CANCEL>>", lambda _e: self._bus.post_payload(EventType.PICK_CANCEL_REQUEST, None))
-
-        # ---- event pump ----
-        self._pump = EventPump(
-            root=self,
-            bus=self._bus,
-            tick_ms=16,
-            on_handler_error=lambda ev, e: self._status.set_status(
-                f"ERROR: handler failed ({ev.type.value}): {e}", ttl_ms=5000
-            ),
-        )
-        self._pump.start()
 
         # ---- initial UI state ----
         self._status.set_profile(self._ctx.profile_name)
@@ -308,11 +305,6 @@ class AppWindow(tb.Window):
 
         # synchronous cancel pick (avoid race)
         self._cancel_pick_sync()
-
-        try:
-            self._pump.stop()
-        except Exception:
-            pass
 
         if self._pick is not None:
             try:

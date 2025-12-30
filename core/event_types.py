@@ -6,31 +6,26 @@ from enum import Enum
 
 class EventType(str, Enum):
     """
-    Step 3-3-3-3-6:
-    EventBus 只保留“信号类事件”：
+    Step 3-3-3-3-7:
+    EventBus 仅保留：
     - dirty state
-    - profile change (可选，但目前保留)
     - pick flow
     """
 
     ANY = "*"
 
     # dirty state
-    DIRTY_STATE_CHANGED = "DIRTY_STATE_CHANGED"  # payload: DirtyStateChangedPayload
-
-    # profile (still kept)
-    PROFILE_LIST_CHANGED = "PROFILE_LIST_CHANGED"  # payload: ProfileListChangedPayload
-    PROFILE_CHANGED = "PROFILE_CHANGED"            # payload: ProfileChangedPayload
+    DIRTY_STATE_CHANGED = "DIRTY_STATE_CHANGED"
 
     # pick flow
-    PICK_REQUEST = "PICK_REQUEST"                  # payload: PickRequestPayload
-    PICK_CANCEL_REQUEST = "PICK_CANCEL_REQUEST"    # payload: None
+    PICK_REQUEST = "PICK_REQUEST"
+    PICK_CANCEL_REQUEST = "PICK_CANCEL_REQUEST"
 
-    PICK_MODE_ENTERED = "PICK_MODE_ENTERED"        # payload: PickModeEnteredPayload
-    PICK_PREVIEW = "PICK_PREVIEW"                  # payload: PickPreviewPayload
-    PICK_CONFIRMED = "PICK_CONFIRMED"              # payload: PickConfirmedPayload
-    PICK_CANCELED = "PICK_CANCELED"                # payload: PickCanceledPayload
-    PICK_MODE_EXITED = "PICK_MODE_EXITED"          # payload: PickModeExitedPayload
+    PICK_MODE_ENTERED = "PICK_MODE_ENTERED"
+    PICK_PREVIEW = "PICK_PREVIEW"
+    PICK_CONFIRMED = "PICK_CONFIRMED"
+    PICK_CANCELED = "PICK_CANCELED"
+    PICK_MODE_EXITED = "PICK_MODE_EXITED"
 
     def __str__(self) -> str:
         return self.value

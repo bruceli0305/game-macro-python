@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import queue
 import tkinter as tk
-from typing import Callable, Optional
+from typing import Callable, Optional, List
 
 
 class UiDispatcher:
     """
-    UI-thread task dispatcher:
-    - background threads call: dispatcher.call_soon(fn)
+    UI-thread dispatcher:
+    - background threads call: call_soon(fn)
     - UI thread drains tasks via Tk.after tick
+    - also supports tick hooks (run every tick in UI thread)
     """
 
     def __init__(self, *, root: tk.Misc, tick_ms: int = 8, max_tasks_per_tick: int = 200) -> None:
@@ -21,6 +22,13 @@ class UiDispatcher:
         self._q: "queue.Queue[Callable[[], None]]" = queue.Queue()
         self._running = False
         self._after_id: Optional[str] = None
+
+        self._hooks: List[Callable[[], None]] = []
+
+    def add_hook(self, fn: Callable[[], None]) -> None:
+        if fn is None:
+            return
+        self._hooks.append(fn)
 
     def call_soon(self, fn: Callable[[], None]) -> None:
         if fn is None:
@@ -49,6 +57,7 @@ class UiDispatcher:
 
     def _tick(self) -> None:
         try:
+            # 1) run queued tasks first (so tasks that post events can be dispatched in same tick)
             for _ in range(self._max):
                 try:
                     fn = self._q.get_nowait()
@@ -61,5 +70,13 @@ class UiDispatcher:
                         self._q.task_done()
                     except Exception:
                         pass
+
+            # 2) run hooks
+            for h in list(self._hooks):
+                try:
+                    h()
+                except Exception:
+                    # never crash UI tick
+                    pass
         finally:
             self._schedule()

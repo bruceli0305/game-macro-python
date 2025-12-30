@@ -13,19 +13,6 @@ class DirtyStateChangedPayload:
     parts: List[str]
 
 
-# -------- profile --------
-
-@dataclass(frozen=True)
-class ProfileChangedPayload:
-    name: str
-
-
-@dataclass(frozen=True)
-class ProfileListChangedPayload:
-    names: List[str]
-    current: str
-
-
 # -------- pick --------
 
 RecordType = Literal["skill_pixel", "point"]

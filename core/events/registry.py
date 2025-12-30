@@ -16,10 +16,6 @@ def expected_payload_types() -> Dict[EventType, Tuple[PayloadType, ...]]:
         # dirty
         EventType.DIRTY_STATE_CHANGED: (P.DirtyStateChangedPayload,),
 
-        # profile
-        EventType.PROFILE_CHANGED: (P.ProfileChangedPayload,),
-        EventType.PROFILE_LIST_CHANGED: (P.ProfileListChangedPayload,),
-
         # pick flow
         EventType.PICK_REQUEST: (P.PickRequestPayload,),
         EventType.PICK_CANCEL_REQUEST: NONE,

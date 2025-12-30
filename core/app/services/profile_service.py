@@ -5,9 +5,6 @@ from dataclasses import dataclass
 from typing import List
 
 from core.app.services.app_services import AppServices
-from core.event_bus import EventBus
-from core.event_types import EventType
-from core.events.payloads import ProfileChangedPayload, ProfileListChangedPayload
 from core.profiles import ProfileContext, ProfileManager
 
 
@@ -19,42 +16,30 @@ class ProfileResult:
 
 class ProfileService:
     """
-    Step 3-3-3-3-6:
-    - 只接受 event_bus 参数名（不再兼容 bus=）
-    - 仍发布 PROFILE_CHANGED / PROFILE_LIST_CHANGED（如果你后面决定彻底删 profile 事件，也可以再砍）
+    Step 3-3-3-3-7:
+    - ProfileService 不再依赖 EventBus
+    - 不发布 PROFILE_CHANGED / PROFILE_LIST_CHANGED
+    - 只负责：ProfileManager 文件系统操作 + bind ctx 到 AppServices
     """
 
-    def __init__(self, *, pm: ProfileManager, services: AppServices, event_bus: EventBus) -> None:
+    def __init__(self, *, pm: ProfileManager, services: AppServices) -> None:
         self._pm = pm
         self._services = services
-        self._bus = event_bus
 
     def list_profiles(self) -> List[str]:
         names = self._pm.list_profiles()
         return names or ["Default"]
 
-    def _publish_list_changed(self, *, current: str) -> None:
-        self._bus.post_payload(
-            EventType.PROFILE_LIST_CHANGED,
-            ProfileListChangedPayload(names=self.list_profiles(), current=current),
-        )
-
-    def _publish_changed(self, *, name: str) -> None:
-        self._bus.post_payload(
-            EventType.PROFILE_CHANGED,
-            ProfileChangedPayload(name=name),
-        )
-
     def _bind_ctx(self, ctx: ProfileContext) -> None:
         self._services.set_context(ctx)
-        self._publish_changed(name=ctx.profile_name)
-        self._publish_list_changed(current=ctx.profile_name)
 
+    # -------- open/switch --------
     def open_and_bind(self, name: str) -> ProfileResult:
         ctx = self._pm.open_profile(name)
         self._bind_ctx(ctx)
         return ProfileResult(ctx=ctx, names=self.list_profiles())
 
+    # -------- create/copy/rename/delete --------
     def create_and_bind(self, name: str) -> ProfileResult:
         ctx = self._pm.create_profile(name)
         self._bind_ctx(ctx)
