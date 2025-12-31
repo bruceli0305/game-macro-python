@@ -1,0 +1,480 @@
+# qtui/main_window.py
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Optional
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+from PySide6.QtGui import QIcon, QCloseEvent
+
+from core.app.services.app_services import AppServices
+from core.app.services.profile_service import ProfileService
+from core.pick.capture import SampleSpec
+from core.pick.models import PickSessionConfig
+from core.profiles import ProfileContext
+
+from qtui.dispatcher import QtDispatcher
+from qtui.nav_panel import NavPanel
+from qtui.notify import UiNotify
+from qtui.pick.coordinator import QtPickCoordinator, UiPickPolicySnapshot
+from qtui.profile_controller import ProfileController
+from qtui.status_bar import StatusController
+from qtui.theme import apply_theme
+from qtui.window_state import WindowStateController
+from qtui.unsaved_guard import UnsavedChangesGuard
+
+
+class MainWindow(QMainWindow):
+    """
+    Qt 版主窗口：
+
+    - 左侧：NavPanel（Profile 区 + 页面导航，带图标）
+    - 右侧：QStackedWidget（基础配置 / 技能配置 / 点位配置）
+    - 底部：StatusController 封装的 QStatusBar
+    - 服务层：AppServices / ProfileService / ProfileController
+    - 取色：QtPickCoordinator + 预览窗，供 SkillsPage / PointsPage 使用
+    - 几何：WindowStateController 负责记忆窗口大小/位置
+    - 未保存变更：UnsavedChangesGuard 负责提示保存/放弃/取消
+    """
+
+    def __init__(
+        self,
+        *,
+        theme_name: str,
+        profile_manager,
+        profile_ctx: ProfileContext,
+        app_state_repo,
+        app_state,
+    ) -> None:
+        super().__init__()
+
+        # 核心对象
+        self._theme_name = theme_name
+        self._pm = profile_manager
+        self._ctx: ProfileContext = profile_ctx
+        self._app_state_repo = app_state_repo
+        self._app_state = app_state
+
+        # 标题
+        self._base_title = "Game Macro - Qt"
+        self.setWindowTitle(self._base_title)
+
+        # 基础设施
+        self.dispatcher = QtDispatcher(self)
+        self.status = StatusController(self)
+        self.notify = UiNotify(dispatcher=self.dispatcher, status=self.status)
+
+        # 服务层
+        self.services = AppServices(
+            ctx=self._ctx,
+            notify_error=lambda m, d="": self.notify.error(m, detail=d),
+        )
+        self.profile_service = ProfileService(pm=self._pm, services=self.services)
+
+        # 取色协调器
+        self._pick_coord = QtPickCoordinator(
+            root=self,
+            dispatcher=self.dispatcher,
+            status=self.status,
+            ui_policy_provider=self._ui_policy_snapshot,
+        )
+
+        # 窗口几何控制
+        self._win_state = WindowStateController(
+            root=self,
+            repo=self._app_state_repo,
+            state=self._app_state,
+        )
+
+        # 未保存变更守卫（稍后在页面创建完成后实例化）
+        self._guard: Optional[UnsavedChangesGuard] = None
+
+        # Profile 控制器（guard_confirm 先用 wrapper 占位）
+        self.profile_controller = ProfileController(
+            window=self,
+            profile_service=self.profile_service,
+            apply_ctx_to_ui=self._apply_ctx_to_ui,
+            refresh_profiles_ui=self._refresh_profiles_ui,
+            guard_confirm=self._guard_confirm_wrapper,
+            notify=self.notify,
+        )
+
+        # 脏状态标题“*”
+        try:
+            self.services.store.subscribe_dirty(self._on_store_dirty)
+        except Exception:
+            pass
+
+        # UI 布局
+        self._setup_icon()
+        self._setup_central_widget()
+
+        # 实例化未保存变更守卫（此时页面已经创建）
+        self._guard = UnsavedChangesGuard(
+            window=self,
+            services=self.services,
+            pages_flush_all=self._flush_all_pages,
+            pages_set_context=self._set_pages_context,
+            backup_provider=lambda: bool(getattr(self._ctx.base.io, "backup_on_save", True)),
+        )
+
+        # 使用 WindowStateController 恢复窗口几何
+        self._win_state.apply_initial_geometry()
+
+        # 状态栏初始状态
+        self.status.set_profile(self._ctx.profile_name)
+        self.status.set_page("基础配置")
+        self.status.set_status("ready")
+
+        # Profile 下拉初始化
+        self._refresh_profiles_ui(None)
+
+    # ---------- UI 基本结构 ----------
+
+    def _setup_icon(self) -> None:
+        icon_candidates = [
+            Path("assets/icons/profile.svg"),
+            Path("assets/icons/profile.png"),
+        ]
+        for p in icon_candidates:
+            if p.exists():
+                self.setWindowIcon(QIcon(str(p)))
+                break
+
+    def _setup_central_widget(self) -> None:
+        central = QWidget(self)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 左侧导航
+        self._nav = NavPanel(self)
+        layout.addWidget(self._nav)
+
+        # 右侧页面容器
+        self._stack = QStackedWidget(self)
+        layout.addWidget(self._stack, 1)
+
+        from qtui.pages.base_settings_page import BaseSettingsPage
+        from qtui.pages.skills_page import SkillsPage
+        from qtui.pages.points_page import PointsPage
+
+        self._page_indices: Dict[str, int] = {}
+
+        # 三个实际页面
+        self._page_base = BaseSettingsPage(
+            ctx=self._ctx,
+            services=self.services,
+            notify=self.notify,
+            parent=self,
+        )
+        self._page_skills = SkillsPage(
+            ctx=self._ctx,
+            services=self.services,
+            notify=self.notify,
+            start_pick=self._start_pick_for_record,
+            parent=self,
+        )
+        self._page_points = PointsPage(
+            ctx=self._ctx,
+            services=self.services,
+            notify=self.notify,
+            start_pick=self._start_pick_for_record,
+            parent=self,
+        )
+
+        self._page_indices["base"] = self._stack.addWidget(self._page_base)
+        self._page_indices["skills"] = self._stack.addWidget(self._page_skills)
+        self._page_indices["points"] = self._stack.addWidget(self._page_points)
+
+        # 默认显示基础配置
+        self._stack.setCurrentIndex(self._page_indices["base"])
+        self._nav.set_active_page("base")
+
+        # 信号连接
+        self._nav.page_selected.connect(self._on_page_selected)
+        self._nav.profile_selected.connect(self._on_profile_selected)
+        self._nav.profile_action.connect(self._on_profile_action)
+
+        self.setCentralWidget(central)
+
+    # ---------- Profile 列表 UI ----------
+
+    def _refresh_profiles_ui(self, select: Optional[str]) -> None:
+        """
+        用 ProfileManager 列出所有 profiles，并在 NavPanel 中刷新。
+        """
+        try:
+            names = self._pm.list_profiles()
+        except Exception:
+            names = []
+        if not names:
+            names = ["Default"]
+
+        current = select or self._ctx.profile_name or names[0]
+        self._nav.set_profiles(names, current)
+
+    # ---------- 脏状态标题 ----------
+
+    def _on_store_dirty(self, parts) -> None:
+        try:
+            dirty = bool(parts)
+        except Exception:
+            dirty = False
+        title = self._base_title + (" *" if dirty else "")
+        if self.windowTitle() != title:
+            self.setWindowTitle(title)
+
+    # ---------- 导航回调 ----------
+
+    def _on_page_selected(self, key: str) -> None:
+        idx = self._page_indices.get(key)
+        if idx is None:
+            self.notify.error(f"未知页面: {key}")
+            return
+
+        self._stack.setCurrentIndex(idx)
+        self._nav.set_active_page(key)
+
+        title_map = {
+            "base": "基础配置",
+            "skills": "技能配置",
+            "points": "取色点位配置",
+        }
+        page_title = title_map.get(key, key)
+        self.status.set_page(page_title)
+        self.status.status_msg("ready", ttl_ms=1000)
+
+    def _on_profile_selected(self, name: str) -> None:
+        """
+        由 NavPanel 触发的 profile 选择。
+        """
+        self.profile_controller.on_select(name, self._ctx)
+
+    def _on_profile_action(self, action: str) -> None:
+        """
+        由 NavPanel 触发的新建/复制/重命名/删除。
+        """
+        self.profile_controller.on_action(action, self._ctx)
+
+    # ---------- 应用新的 ProfileContext 到 UI ----------
+
+    def _apply_ctx_to_ui(self, ctx: ProfileContext) -> None:
+        """
+        ProfileController 调用：
+        - 更新当前 ctx
+        - 更新状态栏中的 profile 名称
+        - 更新 NavPanel 下拉
+        - 重新应用主题
+        - 通知各页面刷新上下文
+        """
+        self._ctx = ctx
+
+        # 状态栏同步
+        self.status.set_profile(ctx.profile_name)
+
+        # 主题同步
+        app = QApplication.instance()
+        if app is not None:
+            theme = ctx.base.ui.theme or "darkly"
+            apply_theme(app, theme)
+            self._theme_name = theme
+
+        # 左侧下拉同步
+        self._refresh_profiles_ui(ctx.profile_name)
+
+        # 页面上下文同步
+        self._set_pages_context(ctx)
+
+    # ---------- 取色 UI 策略快照 ----------
+
+    def _ui_policy_snapshot(self) -> UiPickPolicySnapshot:
+        """
+        从当前 ProfileContext 抽取取色相关的 UI 避让/预览策略快照。
+        """
+        b = self._ctx.base
+        av = getattr(getattr(b, "pick", None), "avoidance", None)
+
+        mode = "hide_main"
+        preview_follow = True
+        preview_offset = (30, 30)
+        preview_anchor = "bottom_right"
+
+        if av is not None:
+            try:
+                mode = (getattr(av, "mode", mode) or mode).strip()
+            except Exception:
+                pass
+            try:
+                preview_follow = bool(getattr(av, "preview_follow_cursor", preview_follow))
+            except Exception:
+                pass
+            try:
+                off = getattr(av, "preview_offset", preview_offset)
+                ox = int(off[0])
+                oy = int(off[1])
+                preview_offset = (ox, oy)
+            except Exception:
+                pass
+            try:
+                preview_anchor = (getattr(av, "preview_anchor", preview_anchor) or preview_anchor).strip()
+            except Exception:
+                pass
+
+        return UiPickPolicySnapshot(
+            avoid_mode=mode or "hide_main",
+            preview_follow=bool(preview_follow),
+            preview_offset=preview_offset,
+            preview_anchor=preview_anchor or "bottom_right",
+        )
+
+    # ---------- 取色入口（供 SkillsPage / PointsPage 调用） ----------
+
+    def _start_pick_for_record(
+        self,
+        *,
+        record_type: str,      # "skill_pixel" | "point"
+        record_id: str,
+        sample_mode: str,
+        sample_radius: int,
+        monitor: str,
+        on_confirm,            # Callable[[PickConfirmed], None]
+    ) -> None:
+        """
+        由 SkillsPage / PointsPage 调用，发起一次取色会话。
+        """
+        b = self._ctx.base
+
+        # 采样配置
+        sample = SampleSpec(
+            mode=(sample_mode or "single").strip() or "single",
+            radius=int(sample_radius),
+        )
+
+        # monitor 策略：记录自身配置优先，否则退回全局 capture.monitor_policy
+        mon_req = (monitor or "").strip()
+        if not mon_req:
+            try:
+                mon_req = (b.capture.monitor_policy or "primary").strip()
+            except Exception:
+                mon_req = "primary"
+        if not mon_req:
+            mon_req = "primary"
+
+        # 避让/确认配置
+        av = getattr(getattr(b, "pick", None), "avoidance", None)
+        try:
+            delay_ms = int(getattr(av, "delay_ms", 120) or 120)
+        except Exception:
+            delay_ms = 120
+
+        try:
+            confirm_hotkey = str(getattr(b.pick, "confirm_hotkey", "f8") or "f8")
+        except Exception:
+            confirm_hotkey = "f8"
+
+        try:
+            mouse_avoid = bool(getattr(b.pick, "mouse_avoid", True))
+        except Exception:
+            mouse_avoid = True
+
+        try:
+            mouse_avoid_offset_y = int(getattr(b.pick, "mouse_avoid_offset_y", 80) or 80)
+        except Exception:
+            mouse_avoid_offset_y = 80
+
+        try:
+            mouse_avoid_settle_ms = int(getattr(b.pick, "mouse_avoid_settle_ms", 80) or 80)
+        except Exception:
+            mouse_avoid_settle_ms = 80
+
+        cfg = PickSessionConfig(
+            record_type=record_type,
+            record_id=record_id,
+            monitor_requested=mon_req,
+            sample=sample,
+            delay_ms=delay_ms,
+            preview_throttle_ms=30,
+            error_throttle_ms=800,
+            confirm_hotkey=confirm_hotkey,
+            mouse_avoid=mouse_avoid,
+            mouse_avoid_offset_y=mouse_avoid_offset_y,
+            mouse_avoid_settle_ms=mouse_avoid_settle_ms,
+        )
+
+        self._pick_coord.request_pick(cfg=cfg, on_confirm=on_confirm)
+
+    # ---------- 未保存变更守卫辅助 ----------
+
+    def _guard_confirm_wrapper(self, action_name: str, ctx: ProfileContext) -> bool:
+        g = getattr(self, "_guard", None)
+        if g is None:
+            return True
+        return g.confirm(action_name, ctx)
+
+    def _flush_all_pages(self) -> None:
+        """
+        将三个页面的表单状态刷新到模型中（不保存到磁盘）。
+        供 UnsavedChangesGuard 使用。
+        """
+        try:
+            self._page_base.flush_to_model()
+        except Exception:
+            pass
+        try:
+            self._page_skills.flush_to_model()
+        except Exception:
+            pass
+        try:
+            self._page_points.flush_to_model()
+        except Exception:
+            pass
+
+    def _set_pages_context(self, ctx: ProfileContext) -> None:
+        """
+        在 rollback 之后刷新页面绑定的 ctx 对象。
+        """
+        try:
+            self._page_base.set_context(ctx)
+        except Exception:
+            pass
+        try:
+            self._page_skills.set_context(ctx)
+        except Exception:
+            pass
+        try:
+            self._page_points.set_context(ctx)
+        except Exception:
+            pass
+
+    # ---------- 关闭事件：先守卫未保存变更，再停止取色并保存几何 ----------
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        # 先检查未保存更改
+        g = getattr(self, "_guard", None)
+        if g is not None:
+            if not g.confirm("退出程序", self._ctx):
+                event.ignore()
+                return
+
+        # 停止取色协调器
+        try:
+            self._pick_coord.close()
+        except Exception:
+            pass
+
+        # 保存当前窗口几何到 app_state.json
+        try:
+            self._win_state.persist_current_geometry()
+        except Exception:
+            pass
+
+        event.accept()

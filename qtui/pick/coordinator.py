@@ -1,41 +1,47 @@
-# File: ui/app/pick_coordinator.py
+# qtui/pick/coordinator.py
 from __future__ import annotations
 
-import tkinter as tk
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple, List
+
+from PySide6.QtCore import QObject, QPoint
+from PySide6.QtGui import QCursor
+from PySide6.QtWidgets import QMainWindow, QApplication
 
 from core.pick.engine import PickEngine, PickCallbacks
 from core.pick.models import PickSessionConfig, PickPreview, PickConfirmed
-from ui.pick_preview_window import PickPreviewWindow
-from ui.app.status import StatusController
-from ui.runtime.ui_dispatcher import UiDispatcher
+
+from qtui.dispatcher import QtDispatcher
+from qtui.status_bar import StatusController
+from qtui.pick.preview_window import PickPreviewWindow
 
 
 @dataclass(frozen=True)
-class _UiPolicySnapshot:
-    avoid_mode: str
+class UiPickPolicySnapshot:
+    avoid_mode: str           # "hide_main" | "minimize" | "move_aside" | "none"
     preview_follow: bool
     preview_offset: tuple[int, int]
-    preview_anchor: str
+    preview_anchor: str       # "bottom_right" | "bottom_left" | "top_right" | "top_left"
 
 
-class PickCoordinator:
+class QtPickCoordinator(QObject):
     """
-    - Owns PickEngine
-    - Owns PickPreviewWindow
-    - Applies main window avoidance/restore
-    - Routes confirm callback to caller
+    - 拥有 PickEngine
+    - 拥有 PickPreviewWindow
+    - 负责主窗口避让/恢复
+    - 将 confirm 回调传递给调用者（SkillsPage / PointsPage）
     """
 
     def __init__(
         self,
         *,
-        root: tk.Misc,
-        dispatcher: UiDispatcher,
+        root: QMainWindow,
+        dispatcher: QtDispatcher,
         status: StatusController,
-        ui_policy_provider: Callable[[], _UiPolicySnapshot],
+        ui_policy_provider: Callable[[], UiPickPolicySnapshot],
+        parent: Optional[QObject] = None,
     ) -> None:
+        super().__init__(parent)
         self._root = root
         self._dispatcher = dispatcher
         self._status = status
@@ -44,12 +50,14 @@ class PickCoordinator:
         self._engine = PickEngine(scheduler=dispatcher)
         self._preview: Optional[PickPreviewWindow] = None
 
-        self._prev_geo: str | None = None
-        self._prev_state: str | None = None
-        self._avoid_mode_applied: str | None = None
+        self._prev_geo = None
+        self._prev_state = None
+        self._avoid_mode_applied: Optional[str] = None
 
-        self._policy: Optional[_UiPolicySnapshot] = None
+        self._policy: Optional[UiPickPolicySnapshot] = None
         self._on_confirm_user: Optional[Callable[[PickConfirmed], None]] = None
+
+    # ---------- 外部 API ----------
 
     def close(self) -> None:
         try:
@@ -67,6 +75,9 @@ class PickCoordinator:
         self._engine.cancel()
 
     def request_pick(self, *, cfg: PickSessionConfig, on_confirm: Callable[[PickConfirmed], None]) -> None:
+        """
+        由 SkillsPage / PointsPage 调用，发起取色。
+        """
         self._on_confirm_user = on_confirm
         self._policy = self._ui_policy_provider()
 
@@ -80,21 +91,27 @@ class PickCoordinator:
         )
         self._engine.start(cfg, cbs)
 
-        # canonical instruction message
-        self._status.status(f"取色模式：移动鼠标预览，按 {cfg.confirm_hotkey} 确认，Esc 取消", ttl_ms=4000)
+        # 提示信息
+        self._status.status_msg(
+            f"取色模式：移动鼠标预览，按 {cfg.confirm_hotkey} 确认，Esc 取消",
+            ttl_ms=4000,
+        )
 
-    # ---------- UI helpers ----------
+    # ---------- 内部：preview 窗管理 ----------
+
     def _ensure_preview(self) -> None:
         if self._preview is None:
-            self._preview = PickPreviewWindow(self._root, on_cancel=self.cancel)
+            self._preview = PickPreviewWindow(on_cancel=self.cancel, parent=self._root)
 
     def _destroy_preview(self) -> None:
         if self._preview is not None:
             try:
-                self._preview.destroy()
+                self._preview.close()
             except Exception:
                 pass
             self._preview = None
+
+    # ---------- 内部：主窗口避让/恢复 ----------
 
     def _apply_avoidance_on_enter(self) -> None:
         pol = self._policy or self._ui_policy_provider()
@@ -106,26 +123,31 @@ class PickCoordinator:
         except Exception:
             self._prev_geo = None
         try:
-            self._prev_state = self._root.state()
+            self._prev_state = self._root.windowState()
         except Exception:
             self._prev_state = None
 
         if mode == "hide_main":
             try:
-                self._root.withdraw()
+                self._root.hide()
             except Exception:
                 pass
         elif mode == "minimize":
             try:
-                self._root.iconify()
+                self._root.showMinimized()
             except Exception:
                 pass
         elif mode == "move_aside":
             try:
-                self._root.update_idletasks()
-                sw = int(self._root.winfo_screenwidth())
-                w = int(self._root.winfo_width())
-                self._root.geometry(f"+{max(0, sw - w - 10)}+10")
+                screen = self._root.screen()
+                if screen is None:
+                    screen = QApplication.primaryScreen()
+                if screen is not None:
+                    geo = screen.availableGeometry()
+                    self._root.resize(self._root.width(), self._root.height())
+                    x = max(0, geo.right() - self._root.width() - 10)
+                    y = geo.top() + 10
+                    self._root.move(x, y)
             except Exception:
                 pass
 
@@ -133,47 +155,59 @@ class PickCoordinator:
         mode = self._avoid_mode_applied
         self._avoid_mode_applied = None
 
+        # 恢复显示
         try:
             if mode in ("hide_main", "minimize"):
-                self._root.deiconify()
+                self._root.showNormal()
         except Exception:
             pass
 
-        if self._prev_geo:
+        # 恢复位置
+        if self._prev_geo is not None:
             try:
-                self._root.geometry(self._prev_geo)
+                self._root.setGeometry(self._prev_geo)
             except Exception:
                 pass
 
-        if self._prev_state:
+        # 恢复最大化状态
+        if self._prev_state is not None:
             try:
-                if self._prev_state in ("normal", "zoomed"):
-                    self._root.state(self._prev_state)
+                self._root.setWindowState(self._prev_state)
             except Exception:
                 pass
 
+        # 前置
         try:
-            self._root.lift()
-            self._root.focus_force()
+            self._root.raise_()
+            self._root.activateWindow()
         except Exception:
             pass
 
-    def _get_virtual_screen_bounds(self) -> tuple[int, int, int, int]:
-        try:
-            import ctypes
+    def _virtual_bounds(self) -> Tuple[int, int, int, int]:
+        """
+        计算所有屏幕的虚拟边界。
+        """
+        app = QApplication.instance()
+        if app is None:
+            return 0, 0, 1920, 1080
 
-            user32 = ctypes.windll.user32
-            SM_XVIRTUALSCREEN = 76
-            SM_YVIRTUALSCREEN = 77
-            SM_CXVIRTUALSCREEN = 78
-            SM_CYVIRTUALSCREEN = 79
-            l = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
-            t = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
-            w = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
-            h = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
-            return l, t, l + w, t + h
-        except Exception:
-            return 0, 0, int(self._root.winfo_screenwidth()), int(self._root.winfo_screenheight())
+        screens = app.screens()
+        if not screens:
+            return 0, 0, 1920, 1080
+
+        xs: List[int] = []
+        ys: List[int] = []
+        rs: List[int] = []
+        bs: List[int] = []
+
+        for s in screens:
+            g = s.geometry()
+            xs.append(g.left())
+            ys.append(g.top())
+            rs.append(g.right())
+            bs.append(g.bottom())
+
+        return min(xs), min(ys), max(rs), max(bs)
 
     @staticmethod
     def _clamp(v: int, lo: int, hi: int) -> int:
@@ -183,12 +217,13 @@ class PickCoordinator:
             return hi
         return v
 
-    # ---------- engine callbacks (already in UI thread via dispatcher) ----------
+    # ---------- PickEngine 回调（已在 UI 线程） ----------
+
     def _on_enter(self, _cfg: PickSessionConfig) -> None:
         self._apply_avoidance_on_enter()
         self._ensure_preview()
         if self._preview is not None:
-            self._preview.hide()
+            self._preview.hide_preview()
 
     def _on_cancel(self) -> None:
         self._status.info("取色已取消", ttl_ms=2500)
@@ -196,10 +231,10 @@ class PickCoordinator:
     def _on_exit(self, _reason: str) -> None:
         self._destroy_preview()
         self._restore_after_exit()
-        self._status.status("取色模式已退出", ttl_ms=2000)
+        self._status.status_msg("取色模式已退出", ttl_ms=2000)
 
     def _on_error(self, msg: str) -> None:
-        self._status.status(msg, ttl_ms=3000)
+        self._status.status_msg(msg, ttl_ms=3000)
 
     def _on_preview(self, p: PickPreview) -> None:
         self._ensure_preview()
@@ -207,7 +242,7 @@ class PickCoordinator:
             return
 
         self._preview.update_preview(x=p.x, y=p.y, r=p.r, g=p.g, b=p.b)
-        self._preview.show()
+        self._preview.show_preview()
 
         pol = self._policy or self._ui_policy_provider()
         follow = bool(pol.preview_follow)
@@ -218,16 +253,14 @@ class PickCoordinator:
         except Exception:
             ox, oy = 30, 30
 
+        # 获取鼠标位置
         try:
-            px = int(self._root.winfo_pointerx())
-            py = int(self._root.winfo_pointery())
+            pos = QCursor.pos()
+            px, py = pos.x(), pos.y()
         except Exception:
             px, py = p.vx, p.vy
 
-        try:
-            pw, ph = self._preview.size
-        except Exception:
-            pw, ph = (180, 74)
+        pw, ph = self._preview.size_tuple
 
         if not follow:
             nx, ny = 20, 20
@@ -243,7 +276,7 @@ class PickCoordinator:
             else:
                 nx, ny = px + ox, py + oy
 
-        L, T, R, B = self._get_virtual_screen_bounds()
+        L, T, R, B = self._virtual_bounds()
         nx = self._clamp(int(nx), L, R - pw)
         ny = self._clamp(int(ny), T, B - ph)
 
