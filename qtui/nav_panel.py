@@ -15,18 +15,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFrame,
     QSizePolicy,
-    QStyle,  # 注意：QStyle 在 QtWidgets 里
+    QStyle,
 )
 
-
-def _load_icon_or(style: QStyle, rel_path: str, fallback: QStyle.StandardPixmap) -> QIcon:
-    """
-    优先加载 assets/icons/ 下的图标；不存在时用 Qt 内置标准图标兜底。
-    """
-    p = Path("assets/icons") / rel_path
-    if p.exists():
-        return QIcon(str(p))
-    return style.standardIcon(fallback)
+from qtui.icons import load_icon
 
 
 class NavPanel(QWidget):
@@ -60,7 +52,7 @@ class NavPanel(QWidget):
         style = self.style()
 
         # ---- 标题 ----
-        title = QLabel("Game Macro")
+        title = QLabel("Game Macro", self)
         font = title.font()
         font.setPointSize(14)
         font.setBold(True)
@@ -69,14 +61,14 @@ class NavPanel(QWidget):
 
         # ---- 分组辅助函数 ----
         def add_group_header(text: str) -> None:
-            lbl = QLabel(text)
+            lbl = QLabel(text, self)
             f = lbl.font()
             f.setPointSize(10)
             f.setBold(True)
             lbl.setFont(f)
             layout.addWidget(lbl)
 
-            line = QFrame()
+            line = QFrame(self)
             line.setFrameShape(QFrame.HLine)
             line.setFrameShadow(QFrame.Sunken)
             layout.addWidget(line)
@@ -90,10 +82,10 @@ class NavPanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
-        icon_new = _load_icon_or(style, "add.svg", QStyle.StandardPixmap.SP_FileIcon)
-        icon_copy = _load_icon_or(style, "copy.svg", QStyle.StandardPixmap.SP_DirLinkIcon)
-        icon_rename = _load_icon_or(style, "settings.svg", QStyle.StandardPixmap.SP_FileDialogDetailedView)
-        icon_delete = _load_icon_or(style, "delete.svg", QStyle.StandardPixmap.SP_TrashIcon)
+        icon_new = load_icon("add", style, QStyle.StandardPixmap.SP_FileIcon)
+        icon_copy = load_icon("copy", style, QStyle.StandardPixmap.SP_DirLinkIcon)
+        icon_rename = load_icon("settings", style, QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        icon_delete = load_icon("delete", style, QStyle.StandardPixmap.SP_TrashIcon)
 
         btn_new = QPushButton("新建", self)
         btn_new.setIcon(icon_new)
@@ -120,9 +112,9 @@ class NavPanel(QWidget):
         # -------- 导航组：配置 --------
         add_group_header("配置")
 
-        icon_base = _load_icon_or(style, "settings.svg", QStyle.StandardPixmap.SP_FileDialogContentsView)
-        icon_skill = _load_icon_or(style, "skill.svg", QStyle.StandardPixmap.SP_ComputerIcon)
-        icon_point = _load_icon_or(style, "point.svg", QStyle.StandardPixmap.SP_DriveHDIcon)
+        icon_base = load_icon("settings", style, QStyle.StandardPixmap.SP_FileDialogContentsView)
+        icon_skill = load_icon("skill", style, QStyle.StandardPixmap.SP_ComputerIcon)
+        icon_point = load_icon("point", style, QStyle.StandardPixmap.SP_DriveHDIcon)
 
         self._btn_base = QPushButton("基础配置", self)
         self._btn_base.setIcon(icon_base)
@@ -145,7 +137,7 @@ class NavPanel(QWidget):
         layout.addStretch(1)
 
         # 底部提示
-        hint = QLabel("Phase 1：配置管理")
+        hint = QLabel("Phase 1：配置管理", self)
         hint.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(hint)
 

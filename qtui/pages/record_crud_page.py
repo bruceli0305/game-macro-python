@@ -15,13 +15,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QSplitter,
     QSizePolicy,
+    QStyle,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
 
 from core.store.app_store import AppStore
 
 from qtui.notify import UiNotify
+from qtui.icons import load_icon
 
 
 @dataclass
@@ -38,7 +39,8 @@ class RecordCrudPage(QWidget):
 
     - 左侧：工具栏（新增/复制/删除/重新加载/保存） + QTreeWidget 列表
     - 右侧：标题 + “未保存*” 标签 + 表单容器（right_body）
-    - 中间使用 QSplitter，可调整左右宽度比例（默认右侧不会特别宽）
+    - 中间使用 QSplitter，可调整左右宽度比例
+    - 工具栏按钮放在一个固定宽度的小 QWidget 里，始终贴左上角，不随宽度漂移
     - 脏状态指示：enable_uow_dirty_indicator(part_key, store) 订阅 AppStore.dirty
     """
 
@@ -87,64 +89,61 @@ class RecordCrudPage(QWidget):
         splitter = QSplitter(Qt.Horizontal, self)
         root.addWidget(splitter, 1)
 
+        style = self.style()
+
         # 左侧容器：工具栏 + 列表
         left_container = QWidget(self)
         left_layout = QVBoxLayout(left_container)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
 
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
-        left_layout.addLayout(toolbar)
+        # ---- 工具栏区域：用一个单独的小 QWidget 承载，贴左上角 ----
+        toolbar_widget = QWidget(self)
+        toolbar_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        toolbar_layout = QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(6)
 
-        style = self.style()
-
-        btn_add = QPushButton("新增", self)
-        icon_add = QIcon("assets/icons/add.svg")
-        if icon_add.isNull():
-            icon_add = style.standardIcon(style.StandardPixmap.SP_FileIcon)
+        # 工具栏按钮，SizePolicy 固定，避免被拉成长条
+        btn_add = QPushButton("新增", toolbar_widget)
+        icon_add = load_icon("add", style, QStyle.StandardPixmap.SP_FileIcon)
         btn_add.setIcon(icon_add)
-        btn_add.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)  # 不随宽度拉伸
+        btn_add.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn_add.clicked.connect(self._on_add)
-        toolbar.addWidget(btn_add)
+        toolbar_layout.addWidget(btn_add)
 
-        btn_dup = QPushButton("复制", self)
-        icon_copy = QIcon("assets/icons/copy.svg")
-        if icon_copy.isNull():
-            icon_copy = style.standardIcon(style.StandardPixmap.SP_DirLinkIcon)
+        btn_dup = QPushButton("复制", toolbar_widget)
+        icon_copy = load_icon("copy", style, QStyle.StandardPixmap.SP_DirLinkIcon)
         btn_dup.setIcon(icon_copy)
         btn_dup.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn_dup.clicked.connect(self._on_duplicate)
-        toolbar.addWidget(btn_dup)
+        toolbar_layout.addWidget(btn_dup)
 
-        btn_del = QPushButton("删除", self)
-        icon_del = QIcon("assets/icons/delete.svg")
-        if icon_del.isNull():
-            icon_del = style.standardIcon(style.StandardPixmap.SP_TrashIcon)
+        btn_del = QPushButton("删除", toolbar_widget)
+        icon_del = load_icon("delete", style, QStyle.StandardPixmap.SP_TrashIcon)
         btn_del.setIcon(icon_del)
         btn_del.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn_del.clicked.connect(self._on_delete)
-        toolbar.addWidget(btn_del)
+        toolbar_layout.addWidget(btn_del)
 
-        ...
+        toolbar_layout.addSpacing(12)
 
-        btn_reload = QPushButton("重新加载", self)
-        icon_reload = QIcon("assets/icons/reload.svg")
-        if icon_reload.isNull():
-            icon_reload = style.standardIcon(style.StandardPixmap.SP_BrowserReload)
+        btn_reload = QPushButton("重新加载", toolbar_widget)
+        icon_reload = load_icon("reload", style, QStyle.StandardPixmap.SP_BrowserReload)
         btn_reload.setIcon(icon_reload)
         btn_reload.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         btn_reload.clicked.connect(self._on_reload_clicked)
-        toolbar.addWidget(btn_reload)
+        toolbar_layout.addWidget(btn_reload)
 
-        self._btn_save = QPushButton("保存", self)
-        icon_save = QIcon("assets/icons/save.svg")
-        if icon_save.isNull():
-            icon_save = style.standardIcon(style.StandardPixmap.SP_DialogSaveButton)
+        self._btn_save = QPushButton("保存", toolbar_widget)
+        icon_save = load_icon("save", style, QStyle.StandardPixmap.SP_DialogSaveButton)
         self._btn_save.setIcon(icon_save)
         self._btn_save.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._btn_save.clicked.connect(self._on_save_clicked)
-        toolbar.addWidget(self._btn_save)
+        toolbar_layout.addWidget(self._btn_save)
+
+        # 把 toolbar_widget 贴左上角
+        left_layout.addWidget(toolbar_widget, 0, Qt.AlignLeft)
 
         # 列表
         self._tv = QTreeWidget(self)
@@ -202,7 +201,6 @@ class RecordCrudPage(QWidget):
         splitter.setStretchFactor(1, 4)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
-        # 初始宽度比例（可按需要调整）
         splitter.setSizes([420, 580])
 
         self._update_dirty_ui()

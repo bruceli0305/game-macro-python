@@ -14,12 +14,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QPushButton,
     QFormLayout,
+    QStyle,
 )
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QIcon
 
 from core.profiles import ProfileContext
-    # BaseSettingsPatch 就在 app.services.base_settings_service 里
 from core.models.common import clamp_int
 from core.app.services.base_settings_service import BaseSettingsPatch
 from core.app.services.app_services import AppServices
@@ -27,6 +26,7 @@ from core.app.services.app_services import AppServices
 from qtui.notify import UiNotify
 from qtui.theme import DARK_THEMES, LIGHT_THEMES
 from qtui.widgets.hotkey_edit import HotkeyEdit
+from qtui.icons import load_icon
 
 
 _MONITOR_DISP_TO_VAL = {
@@ -207,17 +207,16 @@ class BaseSettingsPage(QWidget):
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
 
-        icon_save = QIcon("assets/icons/save.svg")
-        icon_reload = QIcon("assets/icons/reload.svg")
+        style = self.style()
+        icon_save = load_icon("save", style, QStyle.StandardPixmap.SP_DialogSaveButton)
+        icon_reload = load_icon("reload", style, QStyle.StandardPixmap.SP_BrowserReload)
 
         self.btn_reload = QPushButton("重新加载(放弃未保存)", self)
-        if not icon_reload.isNull():
-            self.btn_reload.setIcon(icon_reload)
+        self.btn_reload.setIcon(icon_reload)
         btn_row.addWidget(self.btn_reload)
 
         self.btn_save = QPushButton("保存", self)
-        if not icon_save.isNull():
-            self.btn_save.setIcon(icon_save)
+        self.btn_save.setIcon(icon_save)
         btn_row.addWidget(self.btn_save)
 
         vbox.addLayout(btn_row)
