@@ -67,7 +67,7 @@ class AppServices:
         backup: Optional[bool] = None,
         touch_meta: bool = True,
     ) -> bool:
-        valid = {"base", "skills", "points", "meta"}
+        valid = {"base", "skills", "points", "meta", "rotations"}
         target: Set[Part] = set()
 
         for p in parts:

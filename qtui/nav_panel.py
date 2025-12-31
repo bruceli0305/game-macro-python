@@ -26,12 +26,16 @@ class NavPanel(QWidget):
     左侧导航面板：
     - 顶部应用标题
     - Profile 区：下拉选择 + 新建/复制/重命名/删除 按钮（带图标）
-    - 页面导航按钮：基础配置 / 技能配置 / 取色点位配置（带图标）
+    - 页面导航按钮：
+        - 基础配置
+        - 技能配置
+        - 取色点位配置
+        - 循环/轨道方案（Rotation presets）
 
     信号：
     - profile_selected(str)  : 用户从下拉框选择了某个 profile
     - profile_action(str)    : "new" | "copy" | "rename" | "delete"
-    - page_selected(str)     : "base" | "skills" | "points"
+    - page_selected(str)     : "base" | "skills" | "points" | "rotation"
     """
 
     profile_selected = Signal(str)
@@ -115,6 +119,7 @@ class NavPanel(QWidget):
         icon_base = load_icon("settings", style, QStyle.StandardPixmap.SP_FileDialogContentsView)
         icon_skill = load_icon("skill", style, QStyle.StandardPixmap.SP_ComputerIcon)
         icon_point = load_icon("point", style, QStyle.StandardPixmap.SP_DriveHDIcon)
+        icon_rotation = load_icon("timeline", style, QStyle.StandardPixmap.SP_FileDialogListView)
 
         self._btn_base = QPushButton("基础配置", self)
         self._btn_base.setIcon(icon_base)
@@ -133,6 +138,12 @@ class NavPanel(QWidget):
         self._btn_points.setCheckable(True)
         self._btn_points.clicked.connect(lambda: self.page_selected.emit("points"))
         layout.addWidget(self._btn_points)
+
+        self._btn_rotation = QPushButton("循环/轨道方案", self)
+        self._btn_rotation.setIcon(icon_rotation)
+        self._btn_rotation.setCheckable(True)
+        self._btn_rotation.clicked.connect(lambda: self.page_selected.emit("rotation"))
+        layout.addWidget(self._btn_rotation)
 
         layout.addStretch(1)
 
@@ -172,6 +183,8 @@ class NavPanel(QWidget):
         self._btn_base.setChecked(key == "base")
         self._btn_skills.setChecked(key == "skills")
         self._btn_points.setChecked(key == "points")
+        if hasattr(self, "_btn_rotation"):
+            self._btn_rotation.setChecked(key == "rotation")
 
     # ---------- 内部回调 ----------
 

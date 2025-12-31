@@ -31,13 +31,16 @@ from qtui.theme import apply_theme
 from qtui.window_state import WindowStateController
 from qtui.unsaved_guard import UnsavedChangesGuard
 
+from rotation_editor.ui.presets_page import RotationPresetsPage
+from rotation_editor.ui.editor.main_page import RotationEditorPage
+
 
 class MainWindow(QMainWindow):
     """
     Qt 版主窗口：
 
     - 左侧：NavPanel（Profile 区 + 页面导航，带图标）
-    - 右侧：QStackedWidget（基础配置 / 技能配置 / 点位配置）
+    - 右侧：QStackedWidget（基础配置 / 技能配置 / 点位配置 / 循环方案管理 / 循环编辑器）
     - 底部：StatusController 封装的 QStatusBar
     - 服务层：AppServices / ProfileService / ProfileController
     - 取色：QtPickCoordinator + 预览窗，供 SkillsPage / PointsPage 使用
@@ -191,9 +194,28 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
+        # 循环/轨道方案管理页（rotation_editor）
+        self._page_rotation = RotationPresetsPage(
+            ctx=self._ctx,
+            store=self.services.store,
+            notify=self.notify,
+            open_editor=self._open_rotation_editor,
+            parent=self,
+        )
+
+        # 循环编辑器页（Mode/Track/Node 列表版）
+        self._page_rotation_editor = RotationEditorPage(
+            ctx=self._ctx,
+            store=self.services.store,
+            notify=self.notify,
+            parent=self,
+        )
+
         self._page_indices["base"] = self._stack.addWidget(self._page_base)
         self._page_indices["skills"] = self._stack.addWidget(self._page_skills)
         self._page_indices["points"] = self._stack.addWidget(self._page_points)
+        self._page_indices["rotation"] = self._stack.addWidget(self._page_rotation)
+        self._page_indices["rotation_editor"] = self._stack.addWidget(self._page_rotation_editor)
 
         # 默认显示基础配置
         self._stack.setCurrentIndex(self._page_indices["base"])
@@ -248,6 +270,8 @@ class MainWindow(QMainWindow):
             "base": "基础配置",
             "skills": "技能配置",
             "points": "取色点位配置",
+            "rotation": "循环/轨道方案",
+            "rotation_editor": "循环编辑器",
         }
         page_title = title_map.get(key, key)
         self.status.set_page(page_title)
@@ -422,7 +446,7 @@ class MainWindow(QMainWindow):
 
     def _flush_all_pages(self) -> None:
         """
-        将三个页面的表单状态刷新到模型中（不保存到磁盘）。
+        将各页面的表单状态刷新到模型中（不保存到磁盘）。
         供 UnsavedChangesGuard 使用。
         """
         try:
@@ -435,6 +459,14 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._page_points.flush_to_model()
+        except Exception:
+            pass
+        try:
+            self._page_rotation.flush_to_model()
+        except Exception:
+            pass
+        try:
+            self._page_rotation_editor.flush_to_model()
         except Exception:
             pass
 
@@ -454,6 +486,43 @@ class MainWindow(QMainWindow):
             self._page_points.set_context(ctx)
         except Exception:
             pass
+        try:
+            self._page_rotation.set_context(ctx)
+        except Exception:
+            pass
+        try:
+            self._page_rotation_editor.set_context(ctx)
+        except Exception:
+            pass
+
+    # ---------- 从方案页打开循环编辑器 ----------
+
+    def _open_rotation_editor(self, preset_id: str) -> None:
+        """
+        由 RotationPresetsPage 调用：
+        - 定位到指定 preset
+        - 切换中央 stack 到循环编辑器页
+        - 左侧导航仍高亮“循环/轨道方案”
+        """
+        pid = (preset_id or "").strip()
+        if not pid:
+            return
+
+        try:
+            self._page_rotation_editor.set_current_preset(pid)
+        except Exception:
+            pass
+
+        idx = self._page_indices.get("rotation_editor")
+        if idx is not None:
+            self._stack.setCurrentIndex(idx)
+            try:
+                self._nav.set_active_page("rotation")
+            except Exception:
+                pass
+
+            self.status.set_page("循环编辑器")
+            self.status.status_msg("ready", ttl_ms=1000)
 
     # ---------- 关闭事件：先守卫未保存变更，再停止取色并保存几何 ----------
 

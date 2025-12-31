@@ -58,10 +58,11 @@ class UnsavedChangesGuard:
             "skills": "技能配置",
             "points": "取色点位配置",
             "meta": "Profile 元信息",
+            "rotations": "循环/轨道配置",
         }
 
         out: list[str] = []
-        for p in ["base", "skills", "points", "meta"]:
+        for p in ["base", "skills", "points", "meta", "rotations"]:
             if p in parts:
                 out.append(mapping.get(p, p))
         return out

@@ -18,7 +18,8 @@ from core.repos.base_repo import BaseRepo
 from core.repos.meta_repo import MetaRepo
 from core.repos.points_repo import PointsRepo
 from core.repos.skills_repo import SkillsRepo
-
+from rotation_editor.core.models import RotationsFile
+from rotation_editor.core.storage import load_or_create_rotations
 
 _ILLEGAL_FS_CHARS = r'<>:"/\\|?*'
 _ILLEGAL_FS_RE = re.compile(f"[{re.escape(_ILLEGAL_FS_CHARS)}]")
@@ -50,6 +51,8 @@ class ProfileContext:
     base: BaseFile
     skills: SkillsFile
     points: PointsFile
+    # 新增：循环/轨道配置（rotation_editor 下的 RotationsFile）
+    rotations: RotationsFile
 
     def save_all(self, *, backup: bool = True) -> None:
         self.base_repo.save(self.base, backup=backup)
@@ -201,8 +204,10 @@ class ProfileManager:
 
         meta = meta_repo.load_or_create(profile_name=profile_name, idgen=self._idgen)
         base = base_repo.load_or_create()
-        skills = skills_repo.load_or_create()   # <- no idgen
-        points = points_repo.load_or_create()   # <- no idgen
+        skills = skills_repo.load_or_create()
+        points = points_repo.load_or_create()
+        # 新增：从 profile_dir 加载/创建 rotation.json
+        rotations = load_or_create_rotations(profile_dir)
 
         return ProfileContext(
             profile_name=profile_name,
@@ -216,4 +221,5 @@ class ProfileManager:
             base=base,
             skills=skills,
             points=points,
+            rotations=rotations,  # 新增字段
         )

@@ -9,8 +9,10 @@ from core.models.meta import ProfileMeta
 from core.models.point import PointsFile
 from core.models.skill import SkillsFile
 from core.profiles import ProfileContext
+from rotation_editor.core.models import RotationsFile
+from rotation_editor.core.storage import save_rotations
 
-Part = Literal["base", "skills", "points", "meta"]
+Part = Literal["base", "skills", "points", "meta", "rotations"]
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,7 @@ class Snapshot:
     skills: Dict[str, Any]
     points: Dict[str, Any]
     meta: Dict[str, Any]
+    rotations: Dict[str, Any]
 
 
 class AppStore:
@@ -94,14 +97,21 @@ class AppStore:
     def refresh_snapshot(self, *, parts: Optional[Set[Part]] = None) -> None:
         ctx = self._ctx
         old = self._snap
-        target = set(parts) if parts is not None else {"base", "skills", "points", "meta"}
+        target = set(parts) if parts is not None else {"base", "skills", "points", "meta", "rotations"}
 
         base = ctx.base.to_dict() if "base" in target else old.base
         skills = ctx.skills.to_dict() if "skills" in target else old.skills
         points = ctx.points.to_dict() if "points" in target else old.points
         meta = ctx.meta.to_dict() if "meta" in target else old.meta
+        rotations = ctx.rotations.to_dict() if "rotations" in target else old.rotations
 
-        self._snap = Snapshot(base=base, skills=skills, points=points, meta=meta)
+        self._snap = Snapshot(
+            base=base,
+            skills=skills,
+            points=points,
+            meta=meta,
+            rotations=rotations,
+        )
 
     def rollback(self) -> None:
         ctx = self._ctx
@@ -121,6 +131,10 @@ class AppStore:
             pass
         try:
             ctx.meta = ProfileMeta.from_dict(snap.meta)
+        except Exception:
+            pass
+        try:
+            ctx.rotations = RotationsFile.from_dict(snap.rotations)
         except Exception:
             pass
 
@@ -158,6 +172,11 @@ class AppStore:
             ctx.points_repo.save(ctx.points, backup=bool(backup))
             self._dirty.discard("points")
 
+        # 新增：保存 rotation.json
+        if "rotations" in target:
+            save_rotations(ctx.profile_dir, ctx.rotations, backup=bool(backup))
+            self._dirty.discard("rotations")
+
         if touch_meta:
             ctx.meta_repo.save(ctx.meta, backup=bool(backup))
             self._dirty.discard("meta")
@@ -172,4 +191,5 @@ class AppStore:
             skills=ctx.skills.to_dict(),
             points=ctx.points.to_dict(),
             meta=ctx.meta.to_dict(),
+            rotations=ctx.rotations.to_dict(),
         )
