@@ -1,11 +1,28 @@
+# core/repos/profile_repo.py
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from core.idgen.snowflake import SnowflakeGenerator
 from core.io.json_store import ensure_dir, read_json, atomic_write_json
 from core.domain.profile import Profile
-from core.profiles import sanitize_profile_name
+
+
+# 为避免循环依赖，这里本地实现与 core.profiles 中一致的 sanitize_profile_name
+
+_ILLEGAL_FS_CHARS = r'<>:"/\\|?*'
+_ILLEGAL_FS_RE = re.compile(f"[{re.escape(_ILLEGAL_FS_CHARS)}]")
+
+
+def _sanitize_profile_name(name: str) -> str:
+    """Windows 友好的目录名清洗（本模块内部使用版）。"""
+    name = (name or "").strip()
+    if not name:
+        return "Default"
+    name = _ILLEGAL_FS_RE.sub("_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:64] if len(name) > 64 else name
 
 
 class ProfileRepository:
@@ -29,7 +46,7 @@ class ProfileRepository:
         """
         返回某个 profile 名称对应的目录路径（已 sanitize）。
         """
-        return self._root / sanitize_profile_name(name)
+        return self._root / _sanitize_profile_name(name)
 
     def path_for(self, name: str) -> Path:
         """

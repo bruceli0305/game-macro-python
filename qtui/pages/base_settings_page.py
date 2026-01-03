@@ -61,7 +61,7 @@ class BaseSettingsPage(QWidget):
     - 表单变更会防抖 200ms 调用 apply_patch
     - “保存”按钮调用 save_cmd
     - “重新加载”按钮调用 reload_cmd
-    - 通过 store.subscribe_dirty 显示“未保存*”
+    - 通过 ProfileSession.subscribe_dirty 显示“未保存*”
     - 取色确认热键使用 HotkeyEdit 录制
     """
 
@@ -89,9 +89,9 @@ class BaseSettingsPage(QWidget):
         self._init_ui()
         self.set_context(ctx)
 
-        # 订阅 dirty 状态
+        # 订阅 dirty 状态 —— 使用 ProfileSession
         try:
-            self._services.store.subscribe_dirty(self._on_store_dirty)
+            self._services.session.subscribe_dirty(self._on_store_dirty)
         except Exception:
             pass
 
@@ -387,8 +387,8 @@ class BaseSettingsPage(QWidget):
                 return
 
             # 立即应用主题
-            self._notify.apply_theme(self._services.ctx.base.ui.theme)
-            self._notify.info("base.json 已保存")
+            self._notify.apply_theme(self._services.profile.base.ui.theme)
+            self._notify.info("profile.json 已保存（基础配置）")
         except Exception as e:
             self._apply_hotkey_error(str(e))
             self._notify.error("保存失败", detail=str(e))
@@ -397,8 +397,8 @@ class BaseSettingsPage(QWidget):
         try:
             self._services.base.reload_cmd()
             self.set_context(self._services.ctx)
-            self._notify.apply_theme(self._services.ctx.base.ui.theme)
-            self._notify.info("已重新加载 base.json")
+            self._notify.apply_theme(self._services.profile.base.ui.theme)
+            self._notify.info("已重新加载基础配置")
         except Exception as e:
             self._notify.error("重新加载失败", detail=str(e))
 
@@ -406,7 +406,7 @@ class BaseSettingsPage(QWidget):
 
     def flush_to_model(self) -> None:
         """
-        供 UnsavedGuard 调用：强制把当前表单状态写入 ctx.base。
+        供 UnsavedGuard 调用：强制把当前表单状态写入 profile.base。
         """
         try:
             self._apply_now()

@@ -3,13 +3,19 @@ from __future__ import annotations
 """
 rotation_editor.core
 
-核心领域模型与存储接口的统一出口：
-- 数据模型：Condition / Node / SkillNode / GatewayNode / Track / Mode / RotationPreset / RotationsFile
-- 存储：load_or_create_rotations / save_rotations
+核心领域模型的统一出口：
+- 数据模型：
+    * Condition
+    * Node / SkillNode / GatewayNode
+    * Track
+    * Mode
+    * RotationPreset
+    * RotationsFile
 
-注意：
-- 服务层（RotationService）在 rotation_editor.core.services.rotation_service 中，
-  为避免循环依赖，不在此处导入。
+说明：
+- 原先这里还暴露了 load_or_create_rotations / save_rotations（来自 core.storage），
+  现在已改为统一由 ProfileSession + ProfileRepository 读写 profile.json，
+  不再有独立的 rotation.json 存储模块。
 """
 
 from .models import (
@@ -22,7 +28,6 @@ from .models import (
     RotationPreset,
     RotationsFile,
 )
-from .storage import load_or_create_rotations, save_rotations
 
 __all__ = [
     "Condition",
@@ -33,6 +38,4 @@ __all__ = [
     "Mode",
     "RotationPreset",
     "RotationsFile",
-    "load_or_create_rotations",
-    "save_rotations",
 ]
