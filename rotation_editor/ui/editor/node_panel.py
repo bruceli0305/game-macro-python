@@ -1,4 +1,3 @@
-# rotation_editor/ui/editor/node_panel.py
 from __future__ import annotations
 
 import uuid
@@ -32,41 +31,42 @@ from rotation_editor.core.models import (
     SkillNode,
     GatewayNode,
 )
-from rotation_editor.ui.editor.timeline_view import TrackTimelineView
+from rotation_editor.core.services.rotation_edit_service import RotationEditService
 from rotation_editor.ui.editor.node_props_dialog import NodePropertiesDialog
 from rotation_editor.ui.editor.condition_dialog import ConditionEditorDialog
 
 
 class NodeListPanel(QWidget):
     """
-    右侧“节点”子面板（带简易时间轴）：
+    节点编辑面板（逻辑组件，当前不直接显示到 UI）：
 
-    - set_context(ctx, preset): 绑定 ProfileContext & 当前 RotationPreset
-    - set_target(mode_id, track_id):
-        * 若 mode_id 非空 => 编辑该 Mode 下的指定轨道
-        * 若 mode_id 为空 且 track_id 非空 => 编辑 preset.global_tracks 中的指定轨道
+    职责：
+    - 绑定 ProfileContext & 当前 RotationPreset
+    - 绑定“目标轨道”（mode_id + track_id）
+    - 使用 RotationEditService 对当前轨道的节点进行：
+        * 列表展示（QTreeWidget）
+        * 新增技能节点 / 网关节点
+        * 编辑节点属性（NodePropertiesDialog）
+        * 设置条件（ConditionEditorDialog）
+        * 上移 / 下移 / 删除节点
 
-    提供功能：
-    - 新增技能节点：从 ctx.skills 中选 Skill 绑定到 SkillNode
-    - 新增网关节点：选择目标 Mode（GatewayNode.action="switch_mode"）
-    - 编辑节点：NodePropertiesDialog（支持 SkillNode / GatewayNode 的详细属性）
-    - 设置条件：ConditionEditorDialog（只对 GatewayNode 可用，将 condition_id 绑定到网关）
-    - 上移 / 下移 / 删除节点
-    - 时间轴视图：按节点顺序绘制盒子，宽度与大致时长成比例
+    注意：
+    - 本面板不加入 layout，而是由 RotationEditorPage 调用其方法作为逻辑助手。
+    - 若未来需要重新展示“列表编辑”UI，只需将本 widget 加入到某个 layout 即可。
     """
 
     def __init__(
         self,
         *,
         ctx: ProfileContext,
+        edit_svc: RotationEditService,
         notify: UiNotify,
-        mark_dirty,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._ctx = ctx
+        self._edit_svc = edit_svc
         self._notify = notify
-        self._mark_dirty_cb = mark_dirty
 
         self._preset: Optional[RotationPreset] = None
         self._mode_id: Optional[str] = None
@@ -83,11 +83,6 @@ class NodeListPanel(QWidget):
 
         lbl_nodes = QLabel("节点 (Nodes):", self)
         root.addWidget(lbl_nodes)
-
-        # 时间轴视图
-        self._timeline = TrackTimelineView(self)
-        root.addWidget(self._timeline)
-        self._timeline.nodeClicked.connect(self._on_timeline_clicked)
 
         # 节点列表
         self._tree = QTreeWidget(self)
@@ -163,14 +158,18 @@ class NodeListPanel(QWidget):
     # ---------- 外部 API ----------
 
     def set_context(self, ctx: ProfileContext, preset: Optional[RotationPreset]) -> None:
+        """
+        绑定新的 ProfileContext 和 RotationPreset。
+        """
         self._ctx = ctx
         self._preset = preset
         self._rebuild_nodes()
 
     def set_target(self, mode_id: Optional[str], track_id: Optional[str]) -> None:
         """
-        mode_id 非空 => 模式轨道
-        mode_id 为空 => 全局轨道
+        绑定当前编辑的“目标轨道”：
+        - mode_id 非空 => 模式轨道
+        - mode_id 为空 且 track_id 非空 => 全局轨道
         """
         self._mode_id = (mode_id or "").strip() or None
         self._track_id = (track_id or "").strip() or None
@@ -189,102 +188,60 @@ class NodeListPanel(QWidget):
         return None
 
     def _current_track(self) -> Optional[Track]:
+        """
+        优先通过服务查找 Track，保持逻辑入口一致。
+        """
         p = self._preset
-        tid = self._track_id
-        if p is None or not tid:
+        if p is None:
             return None
+        return self._edit_svc.get_track(p, self._mode_id, self._track_id)
 
-        # 有 mode_id 时，视为模式轨道
-        if self._mode_id:
-            m = self._current_mode()
-            if m is None:
-                return None
-            for t in m.tracks:
-                if t.id == tid:
-                    return t
-            return None
-
-        # 无 mode_id，则优先按全局轨道查找
-        for t in p.global_tracks:
-            if t.id == tid:
-                return t
-        return None
-
-    # ---------- 重建节点列表 & 时间轴 ----------
+    # ---------- 重建节点列表 ----------
 
     def _rebuild_nodes(self) -> None:
+        """
+        根据当前 preset/mode_id/track_id 重建节点列表。
+        """
         self._tree.clear()
         t = self._current_track()
-        nodes: List[SkillNode | GatewayNode] = []
-        durations: List[int] = []
+        if t is None:
+            self._btn_cond.setEnabled(False)
+            return
 
-        if t is not None:
-            nodes = list(t.nodes)
-            p = self._preset
-            modes_by_id = {m.id: m.name for m in (p.modes if p else [])}
+        p = self._preset
+        modes_by_id = {m.id: m.name for m in (p.modes if p else [])}
 
-            # 为计算时长，构建 Skill 映射
-            skills_by_id: dict[str, Skill] = {}
-            try:
-                for s in getattr(self._ctx.skills, "skills", []) or []:
-                    if s.id:
-                        skills_by_id[s.id] = s
-            except Exception:
-                pass
+        for n in t.nodes:
+            # 列表显示
+            if isinstance(n, SkillNode):
+                typ = "技能"
+                label = n.label or "Skill"
+                skill_id = n.skill_id or ""
+                action = ""
+                target_mode = ""
+            elif isinstance(n, GatewayNode):
+                typ = "网关"
+                label = n.label or "Gateway"
+                skill_id = ""
+                action = n.action or ""
+                target_mode = modes_by_id.get(n.target_mode_id or "", "") if n.target_mode_id else ""
+            else:
+                typ = getattr(n, "kind", "") or "未知"
+                label = getattr(n, "label", "") or ""
+                skill_id = ""
+                action = ""
+                target_mode = ""
 
-            for n in t.nodes:
-                # 列表显示
-                if isinstance(n, SkillNode):
-                    typ = "技能"
-                    label = n.label or "Skill"
-                    skill_id = n.skill_id or ""
-                    action = ""
-                    target_mode = ""
-                elif isinstance(n, GatewayNode):
-                    typ = "网关"
-                    label = n.label or "Gateway"
-                    skill_id = ""
-                    action = n.action or ""
-                    target_mode = modes_by_id.get(n.target_mode_id or "", "") if n.target_mode_id else ""
-                else:
-                    typ = getattr(n, "kind", "") or "未知"
-                    label = getattr(n, "label", "") or ""
-                    skill_id = ""
-                    action = ""
-                    target_mode = ""
+            item = QTreeWidgetItem([typ, label, skill_id, action, target_mode])
+            item.setData(0, Qt.UserRole, getattr(n, "id", ""))
+            self._tree.addTopLevelItem(item)
 
-                item = QTreeWidgetItem([typ, label, skill_id, action, target_mode])
-                item.setData(0, Qt.UserRole, getattr(n, "id", ""))
-                self._tree.addTopLevelItem(item)
-
-                # 计算时长（毫秒）用于时间轴宽度
-                d = 1000  # 默认 1 秒
-                try:
-                    if isinstance(n, SkillNode):
-                        if n.override_cast_ms is not None and n.override_cast_ms > 0:
-                            d = int(n.override_cast_ms)
-                        else:
-                            s = skills_by_id.get(n.skill_id or "", None)
-                            if s is not None and getattr(s.cast, "readbar_ms", 0) > 0:
-                                d = int(s.cast.readbar_ms)
-                    elif isinstance(n, GatewayNode):
-                        d = 500  # 网关节点统一给个较短长度
-                    else:
-                        d = 800
-                except Exception:
-                    d = 1000
-                durations.append(d)
-
-        # 更新时间轴视图
-        if nodes:
-            from rotation_editor.ui.editor.timeline_view import TrackTimelineView  # type: ignore  # 避免循环
-            self._timeline.set_nodes_with_durations(nodes, durations)
-        else:
-            self._timeline.set_nodes([])
-
-        self._timeline.set_current_index(-1)
+        self._btn_cond.setEnabled(False)
 
     def _current_node_index(self) -> int:
+        """
+        返回当前选中节点在 Track.nodes 列表中的索引，若无选中或找不到则返回 -1。
+        """
         t = self._current_track()
         if t is None:
             return -1
@@ -299,17 +256,14 @@ class NodeListPanel(QWidget):
                 return idx
         return -1
 
-    # ---------- 列表与时间轴联动 ----------
+    # ---------- 列表联动 ----------
 
     def _on_tree_selection_changed(self) -> None:
         """
         当树形列表选中项变化时：
-        - 更新时间轴高亮；
         - 根据是否为 GatewayNode 启用/禁用“设置条件”按钮。
         """
         idx = self._current_node_index()
-        self._timeline.set_current_index(idx)
-
         t = self._current_track()
         enable_cond = False
         if t is not None and 0 <= idx < len(t.nodes):
@@ -317,16 +271,6 @@ class NodeListPanel(QWidget):
             if isinstance(n, GatewayNode):
                 enable_cond = True
         self._btn_cond.setEnabled(enable_cond)
-
-    def _on_timeline_clicked(self, index: int) -> None:
-        """
-        当点击时间轴上的盒子时，选中树形列表对应节点。
-        """
-        if index < 0:
-            return
-        item = self._tree.topLevelItem(index)
-        if item is not None:
-            self._tree.setCurrentItem(item)
 
     def _on_tree_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """
@@ -337,6 +281,11 @@ class NodeListPanel(QWidget):
     # ---------- 按钮行为：新增/编辑/条件/移动/删除 ----------
 
     def _on_add_skill_node(self) -> None:
+        p = self._preset
+        if p is None:
+            self._notify.error("当前没有选中的方案")
+            return
+
         t = self._current_track()
         if t is None:
             self._notify.error("请先选择一个轨道")
@@ -362,23 +311,30 @@ class NodeListPanel(QWidget):
         idx = items.index(choice) if choice in items else 0
         s = skills[idx]
         label = s.name or s.trigger.key or "Skill"
-        nid = uuid.uuid4().hex
-        node = SkillNode(
-            id=nid,
-            kind="skill",
-            label=label,
+
+        node = self._edit_svc.add_skill_node(
+            preset=p,
+            mode_id=self._mode_id,
+            track_id=self._track_id,
             skill_id=s.id or "",
+            label=label,
             override_cast_ms=None,
             comment="",
         )
-        t.nodes.append(node)
-        self._mark_dirty()
+        if node is None:
+            self._notify.error("新增技能节点失败：轨道不存在")
+            return
+
         self._rebuild_nodes()
 
     def _on_add_gateway_node(self) -> None:
-        t = self._current_track()
         p = self._preset
-        if t is None or p is None:
+        if p is None:
+            self._notify.error("当前没有选中的方案")
+            return
+
+        t = self._current_track()
+        if t is None:
             self._notify.error("请先选择一个轨道")
             return
 
@@ -406,28 +362,30 @@ class NodeListPanel(QWidget):
         idx = names.index(choice) if choice in names else 0
         target_mode = modes[idx]
 
-        nid = uuid.uuid4().hex
-        gw = GatewayNode(
-            id=nid,
-            kind="gateway",
+        gw = self._edit_svc.add_gateway_node(
+            preset=p,
+            mode_id=self._mode_id,
+            track_id=self._track_id,
             label=label,
-            condition_id=None,
-            action="switch_mode",
             target_mode_id=target_mode.id or "",
-            target_track_id=None,
-            target_node_index=None,
         )
-        t.nodes.append(gw)
-        self._mark_dirty()
+        if gw is None:
+            self._notify.error("新增网关节点失败：轨道不存在")
+            return
+
         self._rebuild_nodes()
 
     def _on_edit_node(self) -> None:
         """
         打开当前选中节点的属性编辑对话框。
         """
-        t = self._current_track()
         p = self._preset
-        if t is None or p is None:
+        if p is None:
+            self._notify.error("当前没有选中的方案")
+            return
+
+        t = self._current_track()
+        if t is None:
             self._notify.error("请先选择一个轨道")
             return
 
@@ -445,6 +403,7 @@ class NodeListPanel(QWidget):
             parent=self,
         )
         if dlg.exec() == QDialog.Accepted:
+            # NodePropertiesDialog 直接修改了节点对象；这里只需标记脏并重建列表
             self._mark_dirty()
             self._rebuild_nodes()
             if 0 <= idx < self._tree.topLevelItemCount():
@@ -454,9 +413,13 @@ class NodeListPanel(QWidget):
         """
         为当前选中的网关节点设置/编辑条件。
         """
-        t = self._current_track()
         p = self._preset
-        if t is None or p is None:
+        if p is None:
+            self._notify.error("当前没有选中的方案")
+            return
+
+        t = self._current_track()
+        if t is None:
             self._notify.error("请先选择一个轨道")
             return
 
@@ -485,30 +448,45 @@ class NodeListPanel(QWidget):
             self._tree.setCurrentItem(self._tree.topLevelItem(idx))
 
     def _on_node_up(self) -> None:
-        t = self._current_track()
-        if t is None:
+        p = self._preset
+        if p is None:
             return
         idx = self._current_node_index()
         if idx <= 0:
             return
-        t.nodes[idx - 1], t.nodes[idx] = t.nodes[idx], t.nodes[idx - 1]
-        self._mark_dirty()
+        moved = self._edit_svc.move_node_up(
+            preset=p,
+            mode_id=self._mode_id,
+            track_id=self._track_id,
+            index=idx,
+        )
+        if not moved:
+            return
         self._rebuild_nodes()
         self._tree.setCurrentItem(self._tree.topLevelItem(idx - 1))
 
     def _on_node_down(self) -> None:
-        t = self._current_track()
-        if t is None:
+        p = self._preset
+        if p is None:
             return
         idx = self._current_node_index()
-        if idx < 0 or idx >= len(t.nodes) - 1:
+        if idx < 0:
             return
-        t.nodes[idx + 1], t.nodes[idx] = t.nodes[idx], t.nodes[idx + 1]
-        self._mark_dirty()
+        moved = self._edit_svc.move_node_down(
+            preset=p,
+            mode_id=self._mode_id,
+            track_id=self._track_id,
+            index=idx,
+        )
+        if not moved:
+            return
         self._rebuild_nodes()
         self._tree.setCurrentItem(self._tree.topLevelItem(idx + 1))
 
     def _on_delete_node(self) -> None:
+        p = self._preset
+        if p is None:
+            return
         t = self._current_track()
         if t is None:
             return
@@ -526,17 +504,18 @@ class NodeListPanel(QWidget):
         )
         if ok != QMessageBox.Yes:
             return
-        del t.nodes[idx]
-        self._mark_dirty()
+        deleted = self._edit_svc.delete_node(
+            preset=p,
+            mode_id=self._mode_id,
+            track_id=self._track_id,
+            index=idx,
+        )
+        if not deleted:
+            return
         self._rebuild_nodes()
 
-    # ---------- 脏标记 ----------
+    # ---------- 对外便捷方法：供主编辑器调用 ----------
 
-    def _mark_dirty(self) -> None:
-        try:
-            self._mark_dirty_cb()
-        except Exception:
-            pass
     def select_node_index(self, index: int) -> None:
         """
         供外部调用：根据索引选中当前轨道上的某个节点。
@@ -546,3 +525,35 @@ class NodeListPanel(QWidget):
         item = self._tree.topLevelItem(index)
         if item is not None:
             self._tree.setCurrentItem(item)
+
+    def add_skill_node(self) -> None:
+        """在当前轨道末尾新增一个技能节点。"""
+        self._on_add_skill_node()
+
+    def add_gateway_node(self) -> None:
+        """在当前轨道末尾新增一个网关节点。"""
+        self._on_add_gateway_node()
+
+    def edit_current_node(self) -> None:
+        """打开当前选中节点的属性编辑对话框。"""
+        self._on_edit_node()
+
+    def set_condition_for_current(self) -> None:
+        """为当前选中节点（若为 GatewayNode）设置/编辑条件。"""
+        self._on_set_condition()
+
+    def delete_current_node(self) -> None:
+        """删除当前选中节点。"""
+        self._on_delete_node()
+
+    # ---------- 脏标记 ----------
+
+    def _mark_dirty(self) -> None:
+        """
+        供 ConditionEditorDialog / NodePropertiesDialog 调用。
+        实际委托给 RotationEditService.mark_dirty()。
+        """
+        try:
+            self._edit_svc.mark_dirty()
+        except Exception:
+            pass

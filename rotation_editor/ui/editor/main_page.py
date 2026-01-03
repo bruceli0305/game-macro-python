@@ -1,20 +1,19 @@
-# rotation_editor/ui/editor/main_page.py
 from __future__ import annotations
 
-from typing import Optional, List
+from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSplitter,
     QComboBox,
     QStyle,
     QMessageBox,
-    QTabWidget,
+    QMenu,
+    QInputDialog,
 )
 
 from core.profiles import ProfileContext
@@ -23,31 +22,29 @@ from core.store.app_store import AppStore
 from qtui.notify import UiNotify
 from qtui.icons import load_icon
 
-from rotation_editor.core.services import RotationService
-from rotation_editor.core.models import RotationPreset, Track
-from rotation_editor.ui.editor.mode_track_panel import ModeTrackPanel
+from rotation_editor.core.services.rotation_service import RotationService
+from rotation_editor.core.services.rotation_edit_service import RotationEditService
+from rotation_editor.core.models import RotationPreset, Track, Mode
 from rotation_editor.ui.editor.node_panel import NodeListPanel
 from rotation_editor.ui.editor.timeline_canvas import TimelineCanvas
+from rotation_editor.ui.editor.mode_bar import ModeTabBar
 
 
 class RotationEditorPage(QWidget):
     """
-    循环编辑器页（拆分版 + 多轨时间轴预览）：
+    循环编辑器页：
 
-    - 顶部：
-        - 当前方案选择（preset 下拉）
-        - 入口模式 / 入口轨道 下拉（决定 executor 从哪里开始）
-        - 保存 / 重新加载 + 脏状态
-    - 中间：左右分栏
-        - 左侧：ModeTrackPanel（模式 + 模式轨道 + 全局轨道）
-        - 右侧：TabWidget
-            - Tab1：NodeListPanel（列表编辑）
-            - Tab2：TimelineCanvas（多轨时间轴预览）
+    布局：
+    - 顶部：方案下拉 + 保存/重载 + 脏标记
+    - 下一行：模式标签栏 [模式A][模式B]... + 新增/重命名/删除 按钮
+    - 中间：TimelineCanvas（多轨时间轴预览 + 编辑）
 
-    当前版本：
-      - 编辑操作仍在 Tab1（列表编辑）完成；
-      - Tab2 只做整体时间轴预览，不做编辑。
-      - 后续可以在 TimelineCanvas 上逐步加入拖拽编辑能力。
+    说明：
+    - 模式通过 ModeTabBar 管理，对应 RotationPreset.modes。
+    - TimelineCanvas 显示：
+        - 全局轨道（global_tracks）
+        - 当前模式下的所有轨道
+    - NodeListPanel 仅作为逻辑协助（不加入布局），负责节点 CRUD / 条件编辑等。
     """
 
     def __init__(
@@ -63,17 +60,23 @@ class RotationEditorPage(QWidget):
         self._store = store
         self._notify = notify
 
-        self._svc = RotationService(
+        # preset 级服务（新增/删除/重命名方案 & 保存/重载）
+        self._preset_svc = RotationService(
             store=self._store,
             notify_dirty=self._on_service_dirty,
             notify_error=lambda m, d="": self._notify.error(m, detail=d),
         )
+        # 轨道/节点编辑服务
+        self._edit_svc = RotationEditService(
+            store=self._store,
+            notify_dirty=None,  # store.mark_dirty 已触发 subscribe_dirty
+            notify_error=lambda m, d="": self._notify.error(m, detail=d),
+        )
 
         self._current_preset_id: Optional[str] = None
-        self._current_mode_id_for_timeline: Optional[str] = None
+        self._current_mode_id: Optional[str] = None  # 当前模式 ID；None => 仅显示全局轨道
 
         self._building = False
-        self._building_entry = False
         self._dirty_ui = False
 
         self._build_ui()
@@ -87,6 +90,8 @@ class RotationEditorPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
+
+        style = self.style()
 
         # 顶部：标题 + preset 下拉 + 保存/重载 + 脏标记
         header = QHBoxLayout()
@@ -106,7 +111,6 @@ class RotationEditorPage(QWidget):
 
         header.addSpacing(10)
 
-        style = self.style()
         icon_reload = load_icon("reload", style, QStyle.StandardPixmap.SP_BrowserReload)
         icon_save = load_icon("save", style, QStyle.StandardPixmap.SP_DialogSaveButton)
 
@@ -126,64 +130,47 @@ class RotationEditorPage(QWidget):
 
         root.addLayout(header)
 
-        # 入口模式 / 入口轨道
-        entry_row = QHBoxLayout()
-        entry_row.setSpacing(6)
+        # 模式标签栏
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
 
-        entry_row.addWidget(QLabel("入口模式:", self))
-        self._cmb_entry_mode = QComboBox(self)
-        entry_row.addWidget(self._cmb_entry_mode, 1)
+        mode_row.addWidget(QLabel("模式:", self))
 
-        entry_row.addSpacing(10)
-        entry_row.addWidget(QLabel("入口轨道:", self))
-        self._cmb_entry_track = QComboBox(self)
-        entry_row.addWidget(self._cmb_entry_track, 1)
+        self._tab_modes = ModeTabBar(self)
+        self._tab_modes.modeChanged.connect(self._on_mode_changed_from_tab)
+        mode_row.addWidget(self._tab_modes, 1)
 
-        root.addLayout(entry_row)
+        self._btn_mode_add = QPushButton("新增", self)
+        self._btn_mode_add.clicked.connect(self._on_mode_add_clicked)
+        mode_row.addWidget(self._btn_mode_add)
 
-        self._cmb_entry_mode.currentIndexChanged.connect(self._on_entry_mode_changed)
-        self._cmb_entry_track.currentIndexChanged.connect(self._on_entry_track_changed)
+        self._btn_mode_rename = QPushButton("重命名", self)
+        self._btn_mode_rename.clicked.connect(self._on_mode_rename_clicked)
+        mode_row.addWidget(self._btn_mode_rename)
 
-        # 中间：ModeTrackPanel + 右侧 Tab（列表编辑 / 时间轴预览）
-        splitter = QSplitter(Qt.Horizontal, self)
-        root.addWidget(splitter, 1)
+        self._btn_mode_delete = QPushButton("删除", self)
+        self._btn_mode_delete.clicked.connect(self._on_mode_delete_clicked)
+        mode_row.addWidget(self._btn_mode_delete)
 
-        # 左侧模式/轨道面板
-        self._panel_mode_track = ModeTrackPanel(
-            notify=self._notify,
-            mark_dirty=self._mark_rotations_dirty,
-            parent=self,
-        )
-        self._panel_mode_track.modeChanged.connect(self._on_mode_changed)
-        self._panel_mode_track.trackChanged.connect(self._on_track_changed)
-        self._panel_mode_track.structureChanged.connect(self._on_structure_changed)
-        splitter.addWidget(self._panel_mode_track)
+        root.addLayout(mode_row)
 
-        # 右侧 Tab：列表编辑 + 时间轴预览
-        self._tabs = QTabWidget(self)
-
-        # Tab1：NodeListPanel
+        # 中间：仅 TimelineCanvas
+        # NodeListPanel 仅作逻辑，不显示
         self._panel_nodes = NodeListPanel(
             ctx=self._ctx,
+            edit_svc=self._edit_svc,
             notify=self._notify,
-            mark_dirty=self._mark_rotations_dirty,
             parent=self,
         )
-        self._tabs.addTab(self._panel_nodes, "列表编辑")
+        self._panel_nodes.hide()
 
-        # Tab2：TimelineCanvas
         self._timeline_canvas = TimelineCanvas(self)
         self._timeline_canvas.nodeClicked.connect(self._on_timeline_node_clicked)
         self._timeline_canvas.nodesReordered.connect(self._on_timeline_nodes_reordered)
-        self._tabs.addTab(self._timeline_canvas, "时间轴预览")
+        self._timeline_canvas.nodeContextMenuRequested.connect(self._on_timeline_node_context_menu)
+        self._timeline_canvas.trackContextMenuRequested.connect(self._on_timeline_track_context_menu)
 
-        splitter.addWidget(self._tabs)
-
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 5)
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        splitter.setSizes([360, 740])
+        root.addWidget(self._timeline_canvas, 1)
 
     # ---------- Store dirty 订阅 ----------
 
@@ -221,10 +208,10 @@ class RotationEditorPage(QWidget):
         """
         self._ctx = ctx
         self._current_preset_id = None
-        self._current_mode_id_for_timeline = None
+        self._current_mode_id = None
 
-        # 更新子面板
         self._panel_nodes.set_context(self._ctx, preset=None)
+        self._panel_nodes.set_target(None, None)
         self._timeline_canvas.set_data(self._ctx, None, None)
 
         self._rebuild_preset_combo()
@@ -236,7 +223,7 @@ class RotationEditorPage(QWidget):
         self._building = True
         try:
             self._cmb_preset.clear()
-            presets = self._svc.list_presets()
+            presets = self._preset_svc.list_presets()
             for p in presets:
                 self._cmb_preset.addItem(p.name or "(未命名)", userData=p.id)
         finally:
@@ -245,10 +232,10 @@ class RotationEditorPage(QWidget):
     def _select_first_preset_if_any(self) -> None:
         if self._cmb_preset.count() == 0:
             self._current_preset_id = None
-            self._panel_mode_track.set_preset(None)
+            self._rebuild_mode_tabs()
             self._panel_nodes.set_context(self._ctx, preset=None)
+            self._panel_nodes.set_target(None, None)
             self._timeline_canvas.set_data(self._ctx, None, None)
-            self._rebuild_entry_combos()
             return
         self._cmb_preset.setCurrentIndex(0)
         self._on_preset_changed(0)
@@ -257,7 +244,7 @@ class RotationEditorPage(QWidget):
         pid = self._current_preset_id
         if not pid:
             return None
-        return self._svc.find_preset(pid)
+        return self._preset_svc.find_preset(pid)
 
     def _on_preset_changed(self, index: int) -> None:
         if self._building:
@@ -265,180 +252,330 @@ class RotationEditorPage(QWidget):
         data = self._cmb_preset.currentData()
         if not isinstance(data, str):
             self._current_preset_id = None
-            self._panel_mode_track.set_preset(None)
+            self._current_mode_id = None
+            self._rebuild_mode_tabs()
             self._panel_nodes.set_context(self._ctx, preset=None)
+            self._panel_nodes.set_target(None, None)
             self._timeline_canvas.set_data(self._ctx, None, None)
-            self._rebuild_entry_combos()
             return
 
         self._current_preset_id = data
         preset = self._current_preset()
-        self._panel_mode_track.set_preset(preset)
-        self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id_for_timeline)
-        self._rebuild_entry_combos()
 
-    def set_current_preset(self, preset_id: str) -> None:
+        # 切换 preset 时，当前模式清空，由 _rebuild_mode_tabs 选出第一个
+        self._current_mode_id = None
+        self._rebuild_mode_tabs()
+
+        mode_id = self._tab_modes.current_mode_id()
+        self._current_mode_id = mode_id or None
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(mode_id or None, None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    # ---------- 模式标签栏 ----------
+
+    def _rebuild_mode_tabs(self) -> None:
         """
-        由外部调用：指定当前要编辑的方案 ID。
+        使用 ModeTabBar 管理模式标签。
         """
-        pid = (preset_id or "").strip()
-        if not pid:
-            return
-        self._rebuild_preset_combo()
-        for i in range(self._cmb_preset.count()):
-            data = self._cmb_preset.itemData(i)
-            if isinstance(data, str) and data == pid:
-                self._cmb_preset.setCurrentIndex(i)
-                break
-        else:
-            return
-        self._current_preset_id = pid
         preset = self._current_preset()
-        self._panel_mode_track.set_preset(preset)
-        self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id_for_timeline)
-        self._rebuild_entry_combos()
-
-    # ---------- 入口模式 / 入口轨道 ----------
-
-    def _rebuild_entry_combos(self) -> None:
-        self._building_entry = True
-        try:
-            self._cmb_entry_mode.clear()
-            self._cmb_entry_track.clear()
-
-            preset = self._current_preset()
-            if preset is None:
-                self._cmb_entry_mode.setEnabled(False)
-                self._cmb_entry_track.setEnabled(False)
-                return
-
-            self._cmb_entry_mode.setEnabled(True)
-            self._cmb_entry_track.setEnabled(True)
-
-            # 入口模式：第一个选项代表“全局”
-            self._cmb_entry_mode.addItem("（全局）", userData="")
-
-            for m in preset.modes:
-                text = m.name or "(未命名)"
-                self._cmb_entry_mode.addItem(text, userData=m.id or "")
-
-            # 选中当前 entry_mode_id
-            mode_id = preset.entry_mode_id or ""
-            idx_mode = 0
-            if mode_id:
-                for i in range(self._cmb_entry_mode.count()):
-                    data = self._cmb_entry_mode.itemData(i)
-                    if isinstance(data, str) and data == mode_id:
-                        idx_mode = i
-                        break
-            self._cmb_entry_mode.setCurrentIndex(idx_mode)
-
-            # 再根据当前入口模式构建入口轨道列表
-            self._rebuild_entry_track_combo()
-        finally:
-            self._building_entry = False
-
-    def _rebuild_entry_track_combo(self) -> None:
-        self._building_entry = True
-        try:
-            self._cmb_entry_track.clear()
-            preset = self._current_preset()
-            if preset is None:
-                return
-
-            data = self._cmb_entry_mode.currentData()
-            mode_id = data if isinstance(data, str) else ""
-
-            tracks: List[Track] = []
-            if mode_id:
-                # 某个模式下的轨道
-                m = next((m for m in preset.modes if m.id == mode_id), None)
-                if m is not None:
-                    tracks = m.tracks or []
-            else:
-                # 全局轨道
-                tracks = preset.global_tracks or []
-
-            for t in tracks:
-                text = t.name or "(未命名)"
-                self._cmb_entry_track.addItem(text, userData=t.id or "")
-
-            # 根据 preset.entry_track_id 选中入口轨道（仅在同一模式/全局下匹配）
-            tid = preset.entry_track_id or ""
-            idx_track = 0
-            if tid and self._cmb_entry_track.count() > 0:
-                for i in range(self._cmb_entry_track.count()):
-                    data = self._cmb_entry_track.itemData(i)
-                    if isinstance(data, str) and data == tid:
-                        idx_track = i
-                        break
-            if self._cmb_entry_track.count() > 0:
-                self._cmb_entry_track.setCurrentIndex(idx_track)
-        finally:
-            self._building_entry = False
-
-    def _on_entry_mode_changed(self, index: int) -> None:
-        if self._building_entry:
+        if preset is None:
+            self._tab_modes.set_modes([], None)
+            self._current_mode_id = None
             return
+
+        self._tab_modes.set_modes(preset.modes or [], self._current_mode_id)
+        self._current_mode_id = self._tab_modes.current_mode_id() or None
+
+    def _on_mode_changed_from_tab(self, mode_id: str) -> None:
+        """
+        ModeTabBar 发出的模式切换信号。
+        """
+        preset = self._current_preset()
+        if preset is None:
+            self._current_mode_id = None
+            self._timeline_canvas.set_data(self._ctx, None, None)
+            self._panel_nodes.set_target(None, None)
+            return
+
+        self._current_mode_id = (mode_id or "").strip() or None
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(self._current_mode_id, None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    def _on_mode_add_clicked(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._notify.error("请先在“循环/轨道方案”页面创建一个方案")
+            return
+
+        name, ok = QInputDialog.getText(self, "新建模式", "模式名称：", text="新模式")
+        if not ok:
+            return
+        nm = (name or "").strip() or "新模式"
+
+        m = self._edit_svc.create_mode(preset, nm)
+        self._current_mode_id = m.id
+
+        self._rebuild_mode_tabs()
+
+        # 刷新 NodeListPanel & 时间轴
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(m.id, None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    def _on_mode_rename_clicked(self) -> None:
         preset = self._current_preset()
         if preset is None:
             return
 
-        data = self._cmb_entry_mode.itemData(index)
-        mode_id = data if isinstance(data, str) else ""
-
-        preset.entry_mode_id = mode_id
-        self._rebuild_entry_track_combo()
-        self._mark_rotations_dirty()
-
-    def _on_entry_track_changed(self, index: int) -> None:
-        if self._building_entry:
+        mid = self._tab_modes.current_mode_id()
+        if not mid:
+            self._notify.error("请先选择要重命名的模式")
             return
+        mode = next((m for m in preset.modes if m.id == mid), None)
+        if mode is None:
+            return
+
+        name, ok = QInputDialog.getText(self, "重命名模式", "新名称：", text=mode.name)
+        if not ok:
+            return
+        nm = (name or "").strip()
+        if not nm or nm == mode.name:
+            self._notify.status_msg("名称未变化", ttl_ms=1500)
+            return
+
+        changed = self._edit_svc.rename_mode(preset, mid, nm)
+        if not changed:
+            return
+
+        self._rebuild_mode_tabs()
+        # 名称变化只影响标签，不影响 NodeListPanel / 时间轴结构
+
+    def _on_mode_delete_clicked(self) -> None:
         preset = self._current_preset()
         if preset is None:
             return
 
-        if self._cmb_entry_track.count() == 0:
-            preset.entry_track_id = ""
-            self._mark_rotations_dirty()
+        mid = self._tab_modes.current_mode_id()
+        if not mid:
+            self._notify.error("请先选择要删除的模式")
+            return
+        mode = next((m for m in preset.modes if m.id == mid), None)
+        if mode is None:
             return
 
-        data = self._cmb_entry_track.itemData(index)
-        tid = data if isinstance(data, str) else ""
-        preset.entry_track_id = tid
-        self._mark_rotations_dirty()
+        ok = QMessageBox.question(
+            self,
+            "删除模式",
+            f"确认删除模式：{mode.name} ？\n\n将删除该模式下的所有轨道和节点。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ok != QMessageBox.Yes:
+            return
 
-    # ---------- ModeTrackPanel 选中 / 结构变化 ----------
+        deleted = self._edit_svc.delete_mode(preset, mid)
+        if not deleted:
+            return
 
-    def _on_mode_changed(self, mode_id: str) -> None:
+        # 重新构建 Tab，并更新当前模式
+        self._current_mode_id = None
+        self._rebuild_mode_tabs()
+
+        mode_id = self._tab_modes.current_mode_id()
+        self._current_mode_id = mode_id or None
+
+        preset2 = self._current_preset()
+        self._panel_nodes.set_context(self._ctx, preset=preset2)
+        self._panel_nodes.set_target(self._current_mode_id, None)
+        self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+    # ---------- Timeline / NodeList 联动 ----------
+
+    def _on_timeline_node_clicked(self, mode_id: str, track_id: str, node_index: int) -> None:
         """
-        Mode 改变 -> 通知节点面板更新目标 + 刷新时间轴。
+        时间轴上左键点击节点块：
+        - 如有 mode_id，则同步当前模式标签
+        - NodeListPanel 切到对应轨道并选中该节点
         """
-        self._current_mode_id_for_timeline = mode_id or None
-        track_id = self._panel_mode_track.current_track_id()
         preset = self._current_preset()
+        if preset is None:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        if mode_id_s:
+            self._current_mode_id = mode_id_s
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id_s:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
         self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._panel_nodes.set_target(mode_id, track_id)
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id_for_timeline)
+        self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+        self._panel_nodes.select_node_index(node_index)
 
-    def _on_track_changed(self, track_id: str) -> None:
-        mode_id = self._panel_mode_track.current_mode_id()
+    def _on_timeline_nodes_reordered(self, mode_id: str, track_id: str, node_ids: list) -> None:
+        """
+        时间轴上某条轨道被拖拽重排后：
+        - 调用 RotationEditService.reorder_nodes_by_ids 重建 Track.nodes
+        - 刷新 NodeListPanel + TimelineCanvas
+        """
         preset = self._current_preset()
+        if preset is None or not node_ids:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        changed = self._edit_svc.reorder_nodes_by_ids(
+            preset=preset,
+            mode_id=mode_id_s or None,
+            track_id=track_id_s or None,
+            node_ids=list(node_ids),
+        )
+        if not changed:
+            return
+
         self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._panel_nodes.set_target(mode_id, track_id)
-        # 轨道改变不影响大图结构，只影响 NodeListPanel，时间轴保持当前 mode 视图
+        self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
 
-    def _on_structure_changed(self) -> None:
+    def _on_timeline_node_context_menu(
+        self,
+        mode_id: str,
+        track_id: str,
+        node_index: int,
+        gx: int,
+        gy: int,
+    ) -> None:
         """
-        模式/轨道结构发生变化（新增/删除/重命名），需要刷新入口下拉和时间轴。
+        时间轴上右键点击节点：
+        - 切换到对应模式（如有）
+        - NodeListPanel 切到该轨道并选中节点
+        - 弹出菜单：编辑节点属性 / 设置条件 / 删除
+        - 有改变时刷新时间轴
         """
         preset = self._current_preset()
-        self._rebuild_entry_combos()
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id_for_timeline)
+        if preset is None:
+            return
 
-    # ---------- 重载 / 保存 ----------
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        if mode_id_s:
+            self._current_mode_id = mode_id_s
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id_s:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        try:
+            self._panel_nodes.set_context(self._ctx, preset=preset)
+            self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+            self._panel_nodes.select_node_index(node_index)
+        except Exception:
+            pass
+
+        menu = QMenu(self)
+        act_edit = menu.addAction("编辑节点属性...")
+        act_cond = menu.addAction("设置条件...")
+        act_del = menu.addAction("删除节点")
+
+        pos = QPoint(int(gx), int(gy))
+        action = menu.exec(pos)
+        if action is None:
+            return
+
+        changed = False
+
+        if action == act_edit:
+            try:
+                self._panel_nodes.edit_current_node()
+                changed = True
+            except Exception as e:
+                self._notify.error("编辑节点失败", detail=str(e))
+        elif action == act_del:
+            try:
+                self._panel_nodes.delete_current_node()
+                changed = True
+            except Exception as e:
+                self._notify.error("删除节点失败", detail=str(e))
+        elif action == act_cond:
+            try:
+                self._panel_nodes.set_condition_for_current()
+                changed = False
+            except Exception as e:
+                self._notify.error("设置条件失败", detail=str(e))
+
+        if changed:
+            preset2 = self._current_preset()
+            self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+
+    def _on_timeline_track_context_menu(self, mode_id: str, track_id: str, gx: int, gy: int) -> None:
+        """
+        时间轴轨道空白处右键：
+        - 若有 mode_id，则同步当前模式
+        - NodeListPanel 切到该轨道
+        - 弹出菜单：新增技能节点 / 新增网关节点
+        """
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        if mode_id_s:
+            self._current_mode_id = mode_id_s
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id_s:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        try:
+            self._panel_nodes.set_context(self._ctx, preset=preset)
+            self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+        except Exception:
+            pass
+
+        menu = QMenu(self)
+        act_new_skill = menu.addAction("新增技能节点...")
+        act_new_gw = menu.addAction("新增网关节点...")
+
+        pos = QPoint(int(gx), int(gy))
+        action = menu.exec(pos)
+        if action is None:
+            return
+
+        try:
+            if action == act_new_skill:
+                self._panel_nodes.add_skill_node()
+            elif action == act_new_gw:
+                self._panel_nodes.add_gateway_node()
+        except Exception as e:
+            self._notify.error("新增节点失败", detail=str(e))
+            return
+
+        preset2 = self._current_preset()
+        self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+
+    # ---------- 保存 / 重载 ----------
 
     def _on_reload(self) -> None:
         ok = QMessageBox.question(
@@ -450,9 +587,8 @@ class RotationEditorPage(QWidget):
         )
         if ok != QMessageBox.Yes:
             return
-
         try:
-            self._svc.reload_cmd()
+            self._preset_svc.reload_cmd()
             self._rebuild_preset_combo()
             self._select_first_preset_if_any()
             self._notify.info("已重新加载循环配置")
@@ -460,13 +596,13 @@ class RotationEditorPage(QWidget):
             self._notify.error("重新加载失败", detail=str(e))
 
     def _on_save(self) -> None:
-        saved = self._svc.save_cmd()
+        saved = self._preset_svc.save_cmd()
         if saved:
             self._notify.info("rotation.json 已保存")
         else:
             self._notify.status_msg("没有需要保存的更改", ttl_ms=1500)
 
-    # ---------- flush_to_model 提供给 UnsavedGuard ----------
+    # ---------- flush_to_model ----------
 
     def flush_to_model(self) -> None:
         """
@@ -475,120 +611,15 @@ class RotationEditorPage(QWidget):
         """
         pass
 
-    # ---------- 脏标记 ----------
+    # ---------- 标记脏（已由服务统一处理） ----------
 
     def _mark_rotations_dirty(self) -> None:
+        """
+        以前用于 UI 直接标记 store.dirty('rotations')。
+        现在 RotationEditService/RotationService 已统一调用 mark_dirty，
+        此方法只保留兼容接口，不再使用。
+        """
         try:
             self._store.mark_dirty("rotations")  # type: ignore[arg-type]
         except Exception:
             pass
-
-    def select_node_index(self, index: int) -> None:
-        """
-        供外部调用：根据索引选中当前轨道上的某个节点。
-        """
-        if index < 0 or index >= self._tree.topLevelItemCount():
-            return
-        item = self._tree.topLevelItem(index)
-        if item is not None:
-            self._tree.setCurrentItem(item)
-
-    def _on_timeline_node_clicked(self, mode_id: str, track_id: str, node_index: int) -> None:
-        """
-        时间轴上点击某个节点块时：
-        - 左侧 ModeTrackPanel 选中对应模式/轨道
-        - 右侧 NodeListPanel 选中对应节点
-        """
-        preset = self._current_preset()
-        if preset is None:
-            return
-
-        # 更新左侧模式/轨道选中（会触发 modeChanged/trackChanged，从而驱动 NodeListPanel 切换轨道）
-        try:
-            self._panel_mode_track.select_location(mode_id, track_id)
-        except Exception:
-            pass
-
-        # 记录当前用于时间轴的模式 ID（方便下次 set_data）
-        self._current_mode_id_for_timeline = (mode_id or None)
-
-        # 选中右侧列表中的指定节点
-        try:
-            self._panel_nodes.select_node_index(node_index)
-        except Exception:
-            pass
-    def _on_timeline_node_clicked(self, mode_id: str, track_id: str, node_index: int) -> None:
-        """
-        时间轴上点击某个节点块时：
-        - 左侧 ModeTrackPanel 选中对应模式/轨道
-        - 右侧 NodeListPanel 选中对应节点
-        - 记录当前模式用于下一次时间轴刷新
-        """
-        preset = self._current_preset()
-        if preset is None:
-            return
-
-        # 选中左侧模式/轨道（会触发 modeChanged/trackChanged，从而驱动 NodeListPanel 切换轨道）
-        try:
-            self._panel_mode_track.select_location(mode_id, track_id)
-        except Exception:
-            pass
-
-        # 更新当前用于时间轴的模式 ID（下次 set_data 用）
-        self._current_mode_id_for_timeline = mode_id or None
-
-        # 选中右侧列表中的指定节点
-        try:
-            self._panel_nodes.select_node_index(node_index)
-        except Exception:
-            pass
-    def _on_timeline_nodes_reordered(self, mode_id: str, track_id: str, node_ids: list) -> None:
-        """
-        时间轴上某条轨道被拖拽重排后：
-        - 根据 node_ids 的顺序重建 Track.nodes
-        - 标记 rotations 脏
-        - 刷新 NodeListPanel + TimelineCanvas
-        """
-        preset = self._current_preset()
-        if preset is None or not node_ids:
-            return
-
-        # 找到对应 Track
-        mode_id = (mode_id or "").strip()
-        track_id = (track_id or "").strip()
-        track: Optional[Track] = None
-
-        if mode_id:
-            # 模式轨道
-            mode = next((m for m in preset.modes if m.id == mode_id), None)
-            if mode is not None:
-                track = next((t for t in mode.tracks if t.id == track_id), None)
-        else:
-            # 全局轨道
-            track = next((t for t in preset.global_tracks if t.id == track_id), None)
-
-        if track is None:
-            return
-
-        # 根据 node_ids 重排 nodes
-        id2node = {getattr(n, "id", ""): n for n in track.nodes}
-        new_nodes = []
-        for nid in node_ids:
-            n = id2node.get(nid)
-            if n is not None:
-                new_nodes.append(n)
-
-        # 若有剩余（不在 node_ids 里），依原顺序追加（理论上不会发生）
-        for n in track.nodes:
-            if n not in new_nodes:
-                new_nodes.append(n)
-
-        track.nodes = new_nodes
-
-        # 标记脏并刷新列表+时间轴
-        self._mark_rotations_dirty()
-        # 刷新 NodeListPanel
-        self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._panel_nodes.set_target(self._panel_mode_track.current_mode_id(), track_id)
-        # 刷新时间轴
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id_for_timeline)

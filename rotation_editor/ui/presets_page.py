@@ -25,7 +25,7 @@ from core.store.app_store import AppStore
 from qtui.notify import UiNotify
 from qtui.icons import load_icon
 
-from rotation_editor.core.services import RotationService
+from rotation_editor.core.services.rotation_service import RotationService
 
 
 class RotationPresetsPage(QWidget):

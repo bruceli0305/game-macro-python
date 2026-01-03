@@ -1,4 +1,3 @@
-# rotation_editor/services.py
 from __future__ import annotations
 
 import uuid
@@ -15,9 +14,15 @@ class RotationService:
     """
     轨道方案（RotationPreset）业务服务：
 
-    - 面向 ctx.rotations.presets 提供 CRUD
+    职责：
+    - 面向 ctx.rotations.presets 提供 CRUD（仅 preset 级别，Mode/Track/Node 由 UI 或后续服务处理）
     - 通过 AppStore 标记/提交 "rotations" 脏状态
-    - save_cmd/reload_cmd 负责与磁盘交互
+    - save_cmd / reload_cmd 负责与磁盘交互
+
+    依赖：
+    - AppStore: 提供 ctx（ProfileContext）与 dirty/commit 接口
+    - notify_dirty: 通知 UI “脏状态可能变化”
+    - notify_error: 通知 UI 错误信息 (msg, detail)
     """
 
     _store: AppStore
@@ -150,6 +155,10 @@ class RotationService:
     def save_cmd(self, *, backup: Optional[bool] = None) -> bool:
         """
         保存 rotations.json；返回是否实际执行了保存。
+
+        规则：
+        - 若当前 store.dirty_parts() 不包含 "rotations" 则直接返回 False。
+        - 若 backup 为 None，则取 ctx.base.io.backup_on_save 作为默认。
         """
         parts = self._store.dirty_parts()
         if "rotations" not in parts:
