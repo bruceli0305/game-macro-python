@@ -22,13 +22,17 @@ class NodeVisualSpec:
     - node_id: 节点 ID
     - label: 显示文字
     - kind: "skill" / "gateway" / 其它
-    - duration_ms: 持续时间（用于调试或将来展示）
+    - duration_ms: 持续时间（毫秒）
+    - start_ms: 轨道内的起始时间（毫秒）
+    - end_ms: 轨道内的结束时间（毫秒）
     - width: 在时间轴上绘制的宽度（像素）
     """
     node_id: str
     label: str
     kind: str
     duration_ms: int
+    start_ms: int
+    end_ms: int
     width: float
 
 
@@ -40,11 +44,13 @@ class TrackVisualSpec:
     - track_id: 轨道 ID
     - title: 左侧显示的轨道标题（包含前缀，如 "[全局] xxx" 或 "[模式:Foo] xxx"）
     - nodes: 本轨道上所有节点的可视化规格（可以为空列表）
+    - total_duration_ms: 该轨道顺序累加的总时长（毫秒）
     """
     mode_id: str
     track_id: str
     title: str
     nodes: List[NodeVisualSpec]
+    total_duration_ms: int
 
 
 def _collect_skills_by_id(ctx: ProfileContext) -> Dict[str, Skill]:
@@ -82,7 +88,9 @@ def build_timeline_layout(
     preset: Optional[RotationPreset],
     current_mode_id: Optional[str],
     *,
-    base_width: float = 90.0,
+    time_scale_px_per_ms: float,
+    min_node_px: float = 16.0,
+    max_node_px: float = 800.0,
 ) -> List[TrackVisualSpec]:
     """
     构建时间轴布局数据：
@@ -92,7 +100,7 @@ def build_timeline_layout(
     - current_mode_id:
         * None / "" => 仅显示全局轨道
         * 非空 => 显示全局轨道 + 对应模式下所有轨道
-    - base_width: 基准宽度，用于根据 duration 比例缩放
+    - time_scale_px_per_ms: 时间缩放比例（像素/毫秒），例如 0.06 表示 1s = 60px
 
     返回：
     - 若 ctx 或 preset 为 None，则返回空列表
@@ -104,7 +112,6 @@ def build_timeline_layout(
         return []
 
     skills_by_id = _collect_skills_by_id(ctx)
-
     rows: List[TrackVisualSpec] = []
 
     def build_row(
@@ -125,28 +132,25 @@ def build_timeline_layout(
                 track_id=track.id or "",
                 title=title,
                 nodes=[],
+                total_duration_ms=0,
             )
 
-        durations: List[int] = []
         nodes_vs: List[NodeVisualSpec] = []
-
+        cur_t = 0
         for n in track.nodes:
             d = _node_duration_ms(n, skills_by_id)
-            durations.append(d)
+            if d < 0:
+                d = 0
+            start = cur_t
+            end = cur_t + d
+            cur_t = end
 
-        max_d = max(durations) if durations else 1
-        if max_d <= 0:
-            max_d = 1
-
-        for n, d in zip(track.nodes, durations):
-            ratio = d / max_d if max_d > 0 else 1.0
-            # 缩放到 [0.6 * base, 1.6 * base]
-            scale = 0.5 + 0.5 * ratio
-            w = base_width * scale
-            if w < base_width * 0.6:
-                w = base_width * 0.6
-            if w > base_width * 1.6:
-                w = base_width * 1.6
+            # 像素宽度：duration * scale，限制在 [min_node_px, max_node_px]
+            w = float(d) * float(time_scale_px_per_ms)
+            if w < float(min_node_px):
+                w = float(min_node_px)
+            if w > float(max_node_px):
+                w = float(max_node_px)
 
             label = getattr(n, "label", "") or ""
             if not label:
@@ -165,15 +169,19 @@ def build_timeline_layout(
                     label=label,
                     kind=kind,
                     duration_ms=int(d),
-                    width=float(w),
+                    start_ms=int(start),
+                    end_ms=int(end),
+                    width=w,
                 )
             )
 
+        total_duration = int(cur_t)
         return TrackVisualSpec(
             mode_id=mode_id_for_track,
             track_id=track.id or "",
             title=title,
             nodes=nodes_vs,
+            total_duration_ms=total_duration,
         )
 
     # 全局轨道

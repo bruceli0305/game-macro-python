@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -34,9 +34,9 @@ class RotationEditorPage(QWidget):
     """
     循环编辑器页：
 
-    - 顶部：方案下拉 + 保存/重载 + 脏标记
+    - 顶部：方案下拉 + 保存/重载 + 缩放控件 + 脏标记
     - 模式：ModeTabBar + 新增/重命名/删除模式
-    - 中间：TimelineCanvas（全局 + 当前模式下轨道，行下有“+”按钮新增轨道）
+    - 中间：TimelineCanvas（全局 + 当前模式下轨道，含时间刻度线和网格）
     - NodeListPanel：隐藏逻辑组件，负责节点 CRUD / 条件编辑
     """
 
@@ -75,6 +75,8 @@ class RotationEditorPage(QWidget):
         self._rebuild_preset_combo()
         self._select_first_preset_if_any()
 
+        self._update_zoom_label()
+
     # ---------- UI 构建 ----------
 
     def _build_ui(self) -> None:
@@ -84,7 +86,7 @@ class RotationEditorPage(QWidget):
 
         style = self.style()
 
-        # 顶部：标题 + preset 下拉 + 保存/重载 + 脏标记
+        # 顶部：标题 + preset 下拉 + 保存/重载 + 缩放控件 + 脏标记
         header = QHBoxLayout()
         lbl_title = QLabel("循环编辑器", self)
         f = lbl_title.font()
@@ -114,6 +116,29 @@ class RotationEditorPage(QWidget):
         self._btn_save.setIcon(icon_save)
         self._btn_save.clicked.connect(self._on_save)
         header.addWidget(self._btn_save)
+
+        # 缩放控件 [-] 100% [+]
+        header.addSpacing(10)
+        self._btn_zoom_out = QPushButton("-", self)
+        self._btn_zoom_out.setFixedWidth(26)
+        self._btn_zoom_out.clicked.connect(self._on_zoom_out_clicked)
+        header.addWidget(self._btn_zoom_out)
+
+        self._lbl_zoom = QLabel("100%", self)
+        self._lbl_zoom.setFixedWidth(48)
+        self._lbl_zoom.setAlignment(Qt.AlignCenter)
+        header.addWidget(self._lbl_zoom)
+
+        self._btn_zoom_in = QPushButton("+", self)
+        self._btn_zoom_in.setFixedWidth(26)
+        self._btn_zoom_in.clicked.connect(self._on_zoom_in_clicked)
+        header.addWidget(self._btn_zoom_in)
+
+        header.addSpacing(4)
+        self._btn_zoom_reset = QPushButton("1x", self)
+        self._btn_zoom_reset.setFixedWidth(32)
+        self._btn_zoom_reset.clicked.connect(self._on_zoom_reset_clicked)
+        header.addWidget(self._btn_zoom_reset)
 
         header.addSpacing(10)
         self._lbl_dirty = QLabel("", self)
@@ -162,6 +187,7 @@ class RotationEditorPage(QWidget):
         self._timeline_canvas.nodeContextMenuRequested.connect(self._on_timeline_node_context_menu)
         self._timeline_canvas.trackContextMenuRequested.connect(self._on_timeline_track_context_menu)
         self._timeline_canvas.trackAddRequested.connect(self._on_timeline_track_add_requested)
+        self._timeline_canvas.zoomChanged.connect(self._on_canvas_zoom_changed)
 
         root.addWidget(self._timeline_canvas, 1)
 
@@ -188,6 +214,38 @@ class RotationEditorPage(QWidget):
         self._lbl_dirty.setText("未保存*" if self._dirty_ui else "")
         self._btn_save.setStyleSheet("color: orange;" if self._dirty_ui else "")
 
+    # ---------- 缩放 ----------
+
+    def _on_canvas_zoom_changed(self) -> None:
+        """
+        TimelineCanvas 内部缩放变化（例如 Ctrl+滚轮）时调用：
+        - 重绘时间轴
+        - 更新缩放百分比显示
+        """
+        self._refresh_timeline()
+        self._update_zoom_label()
+
+    def _on_zoom_in_clicked(self) -> None:
+        self._timeline_canvas.zoom_in()
+        # zoomChanged 信号会触发 _on_canvas_zoom_changed
+
+    def _on_zoom_out_clicked(self) -> None:
+        self._timeline_canvas.zoom_out()
+        # zoomChanged 信号会触发 _on_canvas_zoom_changed
+
+    def _on_zoom_reset_clicked(self) -> None:
+        self._timeline_canvas.reset_zoom()
+        # zoomChanged 信号会触发 _on_canvas_zoom_changed
+
+    def _update_zoom_label(self) -> None:
+        ratio = self._timeline_canvas.zoom_ratio()
+        pct = int(round(ratio * 100))
+        self._lbl_zoom.setText(f"{pct:d}%")
+
+    def _refresh_timeline(self) -> None:
+        preset = self._current_preset()
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
     # ---------- 上下文切换 ----------
 
     def set_context(self, ctx: ProfileContext) -> None:
@@ -201,6 +259,7 @@ class RotationEditorPage(QWidget):
 
         self._rebuild_preset_combo()
         self._select_first_preset_if_any()
+        self._update_zoom_label()
 
     # ---------- preset 相关 ----------
 
@@ -256,6 +315,7 @@ class RotationEditorPage(QWidget):
         self._panel_nodes.set_context(self._ctx, preset=preset)
         self._panel_nodes.set_target(self._current_mode_id, None)
         self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+        self._update_zoom_label()
 
     # ---------- 模式标签栏 ----------
 
@@ -364,7 +424,7 @@ class RotationEditorPage(QWidget):
 
     def _on_timeline_track_add_requested(self, mode_id: str) -> None:
         """
-        处理画布左侧“+”按钮的新增轨道请求：
+        处理画布左下角“+ 新增轨道”按钮：
         - mode_id 非空 => 在该模式下新增轨道
         - mode_id 为空 => 新增全局轨道
         """
@@ -384,7 +444,6 @@ class RotationEditorPage(QWidget):
             name=name,
         )
 
-        # 若是模式轨道，切到对应模式
         if mid:
             self._current_mode_id = mid
             self._tab_modes.blockSignals(True)
@@ -486,7 +545,6 @@ class RotationEditorPage(QWidget):
         self._panel_nodes.set_context(self._ctx, preset=preset)
         self._panel_nodes.set_target(dst_mid or None, dst_track_id or None)
 
-        # 选中刚移动的节点
         t = self._edit_svc.get_track(preset, dst_mid or None, dst_track_id or None)
         if t is not None:
             idx = -1
