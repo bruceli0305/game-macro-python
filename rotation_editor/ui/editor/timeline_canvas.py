@@ -74,9 +74,9 @@ class TimelineCanvas(QGraphicsView):
 
         # 顶部标尺高度
         self._ruler_height = 24
-        # 轨道行（高度 + 间距）与左侧标签宽度
-        self._row_height = 52
-        self._row_gap = 10
+        # 轨道行（高度 + 间距）与左侧标签宽度（间距调小）
+        self._row_height = 32
+        self._row_gap = 4
         self._label_width = 160
         self._node_height = 30
         self._x_gap = 8
@@ -674,6 +674,30 @@ class TimelineCanvas(QGraphicsView):
             return
         super().wheelEvent(event)
 
+    def resizeEvent(self, event) -> None:
+        """
+        视图大小变化时，根据新的 viewport 宽度重绘时间轴，
+        让刻度/网格始终铺满当前可见区域。
+        """
+        super().resizeEvent(event)
+
+        if self._ctx is None or self._preset is None:
+            return
+
+        try:
+            h = self.horizontalScrollBar().value()
+            v = self.verticalScrollBar().value()
+        except Exception:
+            h = v = 0
+
+        self.set_data(self._ctx, self._preset, self._current_mode_id)
+
+        try:
+            self.horizontalScrollBar().setValue(h)
+            self.verticalScrollBar().setValue(v)
+        except Exception:
+            pass
+
     # ---------- 工具 ----------
 
     def _node_tooltip_meta(self, nvs: NodeVisualSpec) -> str:
@@ -693,30 +717,3 @@ class TimelineCanvas(QGraphicsView):
                 f"action={n.action}, target_mode_id={n.target_mode_id or ''}"
             )
         return f"Node: {getattr(n, 'kind', '')}"
-    def resizeEvent(self, event) -> None:
-        """
-        视图大小变化时，根据新的 viewport 宽度重绘时间轴，
-        让刻度/网格始终铺满当前可见区域。
-        """
-        super().resizeEvent(event)
-
-        # 只有在已经有数据时才重绘
-        if self._ctx is None or self._preset is None:
-            return
-
-        # 记录当前滚动条位置，避免重绘后把视图“弹回”起点
-        try:
-            h = self.horizontalScrollBar().value()
-            v = self.verticalScrollBar().value()
-        except Exception:
-            h = v = 0
-
-        # 重新按照当前 viewport 宽度计算 x_extent 等，并重画
-        self.set_data(self._ctx, self._preset, self._current_mode_id)
-
-        # 恢复滚动位置（若失败就忽略）
-        try:
-            self.horizontalScrollBar().setValue(h)
-            self.verticalScrollBar().setValue(v)
-        except Exception:
-            pass

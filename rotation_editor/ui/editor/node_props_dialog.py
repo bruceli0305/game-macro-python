@@ -1,4 +1,3 @@
-# rotation_editor/ui/editor/node_props_dialog.py
 from __future__ import annotations
 
 from typing import Optional, List
@@ -6,6 +5,7 @@ from typing import Optional, List
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
+    QWidget,  # 需要 QWidget
     QVBoxLayout,
     QHBoxLayout,
     QLabel,

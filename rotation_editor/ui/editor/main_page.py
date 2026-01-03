@@ -24,7 +24,7 @@ from qtui.icons import load_icon
 
 from rotation_editor.core.services.rotation_service import RotationService
 from rotation_editor.core.services.rotation_edit_service import RotationEditService
-from rotation_editor.core.models import RotationPreset
+from rotation_editor.core.models import RotationPreset, GatewayNode
 from rotation_editor.ui.editor.node_panel import NodeListPanel
 from rotation_editor.ui.editor.timeline_canvas import TimelineCanvas
 from rotation_editor.ui.editor.mode_bar import ModeTabBar
@@ -590,9 +590,20 @@ class RotationEditorPage(QWidget):
         except Exception:
             pass
 
+        # 先获取当前节点，判断是否为网关节点
+        node = self._edit_svc.get_node(
+            preset=preset,
+            mode_id=mode_id_s or None,
+            track_id=track_id_s or None,
+            index=int(node_index),
+        )
+        is_gateway = isinstance(node, GatewayNode)
+
         menu = QMenu(self)
         act_edit = menu.addAction("编辑节点属性...")
-        act_cond = menu.addAction("设置条件...")
+        act_cond = None
+        if is_gateway:
+            act_cond = menu.addAction("设置条件...")
         act_del = menu.addAction("删除节点")
 
         pos = QPoint(int(gx), int(gy))
@@ -608,16 +619,19 @@ class RotationEditorPage(QWidget):
                 changed = True
             except Exception as e:
                 self._notify.error("编辑节点失败", detail=str(e))
+
         elif action == act_del:
             try:
                 self._panel_nodes.delete_current_node()
                 changed = True
             except Exception as e:
                 self._notify.error("删除节点失败", detail=str(e))
-        elif action == act_cond:
+
+        elif act_cond is not None and action == act_cond:
+            # 只有网关节点才会有这个菜单
             try:
                 self._panel_nodes.set_condition_for_current()
-                changed = False
+                changed = False  # 条件变化不影响时间轴布局
             except Exception as e:
                 self._notify.error("设置条件失败", detail=str(e))
 
@@ -701,4 +715,6 @@ class RotationEditorPage(QWidget):
     # ---------- flush_to_model ----------
 
     def flush_to_model(self) -> None:
+        # 当前编辑器的所有修改都是即时作用于 dataclass，
+        # 没有额外缓冲，这里保留接口以便未来扩展。
         pass
