@@ -1,7 +1,7 @@
 # rotation_editor/ui/presets_page.py
 from __future__ import annotations
 
-from typing import Optional, Callable
+from typing import Optional, Callable, List
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.profiles import ProfileContext
-from core.store.app_store import AppStore
+from core.app.session import ProfileSession
 from qtui.notify import UiNotify
 from qtui.icons import load_icon
 
@@ -53,19 +53,19 @@ class RotationPresetsPage(QWidget):
         self,
         *,
         ctx: ProfileContext,
-        store: AppStore,
+        session: ProfileSession,
         notify: UiNotify,
         open_editor: Callable[[str], None],
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._ctx = ctx
-        self._store = store
+        self._session = session
         self._notify = notify
         self._open_editor = open_editor
 
         self._svc = RotationService(
-            store=self._store,
+            session=self._session,
             notify_dirty=self._on_service_dirty,
             notify_error=lambda m, d="": self._notify.error(m, detail=d),
         )
@@ -241,7 +241,7 @@ class RotationPresetsPage(QWidget):
 
     def _subscribe_store_dirty(self) -> None:
         try:
-            self._store.subscribe_dirty(self._on_store_dirty)
+            self._session.subscribe_dirty(self._on_store_dirty)
         except Exception:
             pass
 

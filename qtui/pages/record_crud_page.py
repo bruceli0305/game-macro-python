@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from core.store.app_store import AppStore
+from core.app.session import ProfileSession
 
 from qtui.notify import UiNotify
 from qtui.icons import load_icon
@@ -41,7 +41,7 @@ class RecordCrudPage(QWidget):
     - 右侧：标题 + “未保存*” 标签 + 表单容器（right_body）
     - 中间使用 QSplitter，可调整左右宽度比例
     - 工具栏按钮放在一个固定宽度的小 QWidget 里，始终贴左上角，不随宽度漂移
-    - 脏状态指示：enable_uow_dirty_indicator(part_key, store) 订阅 AppStore.dirty
+    - 脏状态指示：enable_uow_dirty_indicator(part_key, session) 订阅 ProfileSession.dirty
     """
 
     def __init__(
@@ -207,13 +207,13 @@ class RecordCrudPage(QWidget):
 
     # ---------- 脏状态 ----------
 
-    def enable_uow_dirty_indicator(self, *, part_key: str, store: AppStore) -> None:
+    def enable_uow_dirty_indicator(self, *, part_key: str, session: ProfileSession) -> None:
         """
-        使用 AppStore.dirty 状态更新“未保存*”指示。
+        使用 ProfileSession.dirty 状态更新“未保存*”指示。
         """
         self._uow_part_key = str(part_key)
         try:
-            store.subscribe_dirty(self._on_store_dirty)
+            session.subscribe_dirty(self._on_store_dirty)
         except Exception:
             pass
 

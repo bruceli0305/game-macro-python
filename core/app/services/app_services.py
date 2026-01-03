@@ -1,9 +1,9 @@
-# File: core/app/services/app_services.py
+# core/app/services/app_services.py
 from __future__ import annotations
 
 from typing import Callable, Iterable, Optional, Set
 
-from core.store.app_store import AppStore, Part
+from core.app.session import ProfileSession, Part
 from core.profiles import ProfileContext
 
 from core.app.services.base_settings_service import BaseSettingsService
@@ -12,24 +12,40 @@ from core.app.services.points_service import PointsService
 
 
 class AppServices:
+    """
+    整个应用当前 Profile 的服务入口：
+
+    - 持有 ProfileSession（工作单元 + 脏标记）
+    - 封装 BaseSettingsService / SkillsService / PointsService
+    - 提供 “保存脏部分 / 回滚 / 通知脏状态” 等便捷方法
+    """
+
     def __init__(
         self,
         *,
         ctx: ProfileContext,
         notify_error: Optional[Callable[[str, str], None]] = None,  # (msg, detail)
     ) -> None:
-        self.store = AppStore(ctx)
+        # 统一的工作单元
+        self.session = ProfileSession(ctx)
+
+        # 为兼容旧调用（UI 里到处是 services.store），保留别名
+        self.store = self.session
+
         self._notify_error = notify_error or (lambda _m, _d="": None)
 
-        self.base = BaseSettingsService(store=self.store, notify_dirty=self.notify_dirty)
+        self.base = BaseSettingsService(
+            session=self.session,
+            notify_dirty=self.notify_dirty,
+        )
 
         self.skills = SkillsService(
-            store=self.store,
+            session=self.session,
             notify_dirty=self.notify_dirty,
             notify_error=self._notify_error,
         )
         self.points = PointsService(
-            store=self.store,
+            session=self.session,
             notify_dirty=self.notify_dirty,
             notify_error=self._notify_error,
         )
@@ -37,29 +53,36 @@ class AppServices:
         self._repair_ids_and_persist()
         self.notify_dirty()
 
+    # ---------- 当前上下文 ----------
+
     @property
     def ctx(self) -> ProfileContext:
-        return self.store.ctx
+        return self.session.ctx
 
     def set_context(self, ctx: ProfileContext) -> None:
-        self.store.set_context(ctx)
+        """
+        切换到另一个 ProfileContext（profile 切换时调用）。
+        """
+        self.session.set_context(ctx)
         self._repair_ids_and_persist()
         self.notify_dirty()
 
     # ---------- dirty facade ----------
+
     def dirty_parts(self) -> Set[Part]:
         try:
-            return set(self.store.dirty_parts())
+            return set(self.session.dirty_parts())
         except Exception:
             return set()
 
     def is_dirty(self) -> bool:
         try:
-            return bool(self.store.is_dirty())
+            return bool(self.session.is_dirty())
         except Exception:
             return False
 
     # ---------- commit/rollback ----------
+
     def commit_parts_cmd(
         self,
         *,
@@ -67,6 +90,9 @@ class AppServices:
         backup: Optional[bool] = None,
         touch_meta: bool = True,
     ) -> bool:
+        """
+        显式提交指定的部分（base/skills/points/meta/rotations）。
+        """
         valid = {"base", "skills", "points", "meta", "rotations"}
         target: Set[Part] = set()
 
@@ -87,11 +113,18 @@ class AppServices:
             except Exception:
                 backup = True
 
-        self.store.commit(parts=set(target), backup=bool(backup), touch_meta=bool(touch_meta))
+        self.session.commit(
+            parts=set(target),
+            backup=bool(backup),
+            touch_meta=bool(touch_meta),
+        )
         self.notify_dirty()
         return True
 
     def save_dirty_cmd(self, *, backup: Optional[bool] = None, touch_meta: bool = True) -> bool:
+        """
+        保存当前所有脏部分（若无脏数据返回 False）。
+        """
         parts = self.dirty_parts()
         if not parts:
             return False
@@ -102,63 +135,85 @@ class AppServices:
             except Exception:
                 backup = True
 
-        self.store.commit(parts=set(parts), backup=bool(backup), touch_meta=bool(touch_meta))
+        self.session.commit(
+            parts=set(parts),
+            backup=bool(backup),
+            touch_meta=bool(touch_meta),
+        )
         self.notify_dirty()
         return True
 
     def rollback_cmd(self) -> None:
-        self.store.rollback()
+        """
+        回滚所有部分到最近一次 snapshot（不触碰磁盘）。
+        """
+        self.session.rollback()
         self.notify_dirty()
 
     # ---------- dirty broadcast ----------
+
     def notify_dirty(self) -> None:
         """
         主动触发一次当前脏状态的广播（供 UI 初始同步等场景使用）。
         """
         try:
-            self.store.emit_dirty()
+            self.session.emit_dirty()
         except Exception:
             pass
 
     # ---------- repair ----------
+
     def _repair_ids_and_persist(self) -> None:
+        """
+        启动时/切换 profile 时，对 skills / points 的 id 进行一次性修复：
+
+        - 若缺 id 或重复 id，会重新分配新的 snowflake id
+        - 修复后尝试立即持久化（不触发 meta 更新时间）
+        """
         ctx = self.ctx
+        p = self.session.profile
         changed_parts: Set[str] = set()
 
+        # 修复 Skill.id
         seen: Set[str] = set()
-        for s in ctx.skills.skills:
+        for s in p.skills.skills:
             if (not s.id) or (s.id in seen):
                 s.id = ctx.idgen.next_id()
                 changed_parts.add("skills")
             seen.add(s.id)
 
+        # 修复 Point.id
         seen_p: Set[str] = set()
-        for p in ctx.points.points:
-            if (not p.id) or (p.id in seen_p):
-                p.id = ctx.idgen.next_id()
+        for pt in p.points.points:
+            if (not pt.id) or (pt.id in seen_p):
+                pt.id = ctx.idgen.next_id()
                 changed_parts.add("points")
-            seen_p.add(p.id)
+            seen_p.add(pt.id)
 
         if not changed_parts:
             return
 
         try:
-            backup = bool(getattr(ctx.base.io, "backup_on_save", True))
+            backup = bool(getattr(p.base.io, "backup_on_save", True))
         except Exception:
             backup = True
 
         try:
-            self.store.commit(parts=set(changed_parts), backup=backup, touch_meta=False)  # type: ignore[arg-type]
+            self.session.commit(
+                parts=set(changed_parts),  # type: ignore[arg-type]
+                backup=backup,
+                touch_meta=False,
+            )
             for part in changed_parts:
                 try:
-                    self.store.clear_dirty(part)  # type: ignore[arg-type]
+                    self.session.clear_dirty(part)  # type: ignore[arg-type]
                 except Exception:
                     pass
         except Exception as e:
             for part in changed_parts:
                 try:
-                    self.store.mark_dirty(part)  # type: ignore[arg-type]
+                    self.session.mark_dirty(part)  # type: ignore[arg-type]
                 except Exception:
                     pass
-            # 不再走 EventBus.ERROR
+            # 不再走 EventBus，直接交给 UI 的 notify_error
             self._notify_error("数据修复保存失败", str(e))

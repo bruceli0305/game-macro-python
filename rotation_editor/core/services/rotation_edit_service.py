@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Callable, List, Optional
 
-from core.store.app_store import AppStore
+from core.app.session import ProfileSession
 from rotation_editor.core.models import (
     RotationsFile,
     RotationPreset,
@@ -30,18 +30,18 @@ class RotationEditService:
             - 上移 / 下移 / 删除节点
             - 按 node_ids 顺序重排节点
             - 在轨道之间移动节点（跨轨道拖拽）
-    - 通过 AppStore 标记 "rotations" 为脏
+    - 通过 ProfileSession 标记 "rotations" 为脏
     - 不负责磁盘 I/O（保存/重载由 RotationService 完成）
     """
 
     def __init__(
         self,
         *,
-        store: AppStore,
+        session: ProfileSession,
         notify_dirty: Optional[Callable[[], None]] = None,
         notify_error: Optional[Callable[[str, str], None]] = None,
     ) -> None:
-        self._store = store
+        self._session = session
         self._notify_dirty = notify_dirty or (lambda: None)
         self._notify_error = notify_error or (lambda _m, _d="": None)
 
@@ -49,11 +49,11 @@ class RotationEditService:
 
     @property
     def ctx(self):
-        return self._store.ctx
+        return self._session.ctx
 
     @property
     def rotations(self) -> RotationsFile:
-        return self.ctx.rotations
+        return self._session.profile.rotations
 
     # ---------- 内部：工具 ----------
 
@@ -68,7 +68,7 @@ class RotationEditService:
         - 供 UI 或对话框在直接修改对象后手动调用。
         """
         try:
-            self._store.mark_dirty("rotations")  # type: ignore[arg-type]
+            self._session.mark_dirty("rotations")  # type: ignore[arg-type]
         except Exception:
             pass
         self._notify_dirty()

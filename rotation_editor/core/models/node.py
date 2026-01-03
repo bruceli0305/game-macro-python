@@ -29,7 +29,6 @@ class Node:
         """
         工厂方法：根据 kind 字段分发到具体子类。
         """
-        from rotation_editor.core.models.node import SkillNode, GatewayNode  # 避免循环
 
         d = as_dict(d)
         kind = as_str(d.get("kind", "skill"), "skill").strip().lower()

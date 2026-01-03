@@ -48,7 +48,7 @@ class PointsPage(RecordCrudPage):
     - 左侧：点位列表（使用 RecordCrudPage 通用 CRUD UI）
     - 右侧：QTabWidget（三个标签页：基本 / 颜色&采样 / 备注）
     - 使用 AppServices.points 进行数据读写
-    - 脏状态通过 AppStore.dirty（points 部分）更新“未保存*”
+    - 脏状态通过 ProfileSession.dirty（points 部分）更新“未保存*”
     """
 
     def __init__(
@@ -86,8 +86,8 @@ class PointsPage(RecordCrudPage):
             parent=parent,
         )
 
-        # 脏状态订阅（points 部分）
-        self.enable_uow_dirty_indicator(part_key="points", store=services.store)
+        # 脏状态订阅（points 部分）——改为传 session
+        self.enable_uow_dirty_indicator(part_key="points", session=services.session)
 
         # 右侧表单：Notebook
         self._tabs = QTabWidget(self.right_body)
@@ -256,6 +256,7 @@ class PointsPage(RecordCrudPage):
         vbox.addWidget(btn_pick)
 
         vbox.addStretch(1)
+
     def _build_tab_note(self, parent: QWidget) -> None:
         vbox = QVBoxLayout(parent)
         self.txt_note = QTextEdit(parent)
@@ -424,6 +425,7 @@ class PointsPage(RecordCrudPage):
             self._apply_form_to_current(auto_save=False)
         except Exception:
             pass
+
     def request_pick_current(self) -> None:
         """
         从当前点位发起取色：

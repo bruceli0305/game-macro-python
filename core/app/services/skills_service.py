@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from core.store.app_store import AppStore
+from core.app.session import ProfileSession
 from core.models.common import clamp_int
 from core.models.skill import Skill, ColorRGB
 
@@ -33,34 +33,46 @@ class SkillFormPatch:
 
 class SkillsService:
     """
-    Step 3-3-3-3-4:
-    - remove EventBus usage entirely
-    - autosave failure uses notify_error callback (UI injected)
+    技能配置编辑服务：
+
+    - 不依赖 EventBus
+    - 通过 ProfileSession 管理脏状态与提交
+    - autosave 失败通过 notify_error 回调（由 UI 注入）
     """
 
     def __init__(
         self,
         *,
-        store: AppStore,
+        session: ProfileSession,
         notify_dirty: Optional[Callable[[], None]] = None,
         notify_error: Optional[Callable[[str, str], None]] = None,  # (msg, detail)
     ) -> None:
-        self._store = store
+        self._session = session
         self._notify_dirty = notify_dirty or (lambda: None)
         self._notify_error = notify_error or (lambda _m, _d="": None)
 
+    # ---------- 便捷属性 ----------
+
     @property
     def ctx(self):
-        return self._store.ctx
+        return self._session.ctx
+
+    @property
+    def profile(self):
+        return self._session.profile
+
+    # ---------- 基本查询 ----------
 
     def find(self, sid: str) -> Optional[Skill]:
-        for s in self.ctx.skills.skills:
+        for s in self.profile.skills.skills:
             if s.id == sid:
                 return s
         return None
 
     def mark_dirty(self) -> None:
-        self._store.mark_dirty("skills")
+        self._session.mark_dirty("skills")
+
+    # ---------- 应用表单 patch ----------
 
     def _apply_patch_to_skill(self, s: Skill, patch: SkillFormPatch) -> None:
         s.name = (patch.name or "").strip()
@@ -86,6 +98,12 @@ class SkillsService:
         s.note = patch.note or ""
 
     def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
+        """
+        应用表单 patch 到指定技能：
+        返回 (applied, saved)：
+        - applied: 是否实际有变更
+        - saved  : 若 auto_save=True，是否自动保存成功
+        """
         s = self.find(sid)
         if s is None:
             return (False, False)
@@ -121,8 +139,9 @@ class SkillsService:
         b: int,
     ) -> tuple[bool, bool]:
         """
-        Used by UI on PICK_CONFIRMED.
-        Returns (applied, saved).
+        用于取色确认事件：
+        - 仅更新 pixel 位置信息和颜色，不动读条时间等。
+        返回 (applied, saved)。
         """
         s = self.find(sid)
         if s is None:
@@ -142,13 +161,14 @@ class SkillsService:
         return (True, bool(saved))
 
     # ---------- non-cmd helpers ----------
+
     def create_skill(self, *, name: str = "新技能") -> Skill:
         sid = self.ctx.idgen.next_id()
         s = Skill(id=sid, name=name, enabled=True)
         s.pixel.monitor = "primary"
         s.pixel.vx = 0
         s.pixel.vy = 0
-        self.ctx.skills.skills.append(s)
+        self.profile.skills.skills.append(s)
         self.mark_dirty()
         return s
 
@@ -160,41 +180,46 @@ class SkillsService:
         clone = Skill.from_dict(src.to_dict())
         clone.id = new_id
         clone.name = f"{src.name} (副本)"
-        self.ctx.skills.skills.append(clone)
+        self.profile.skills.skills.append(clone)
         self.mark_dirty()
         return clone
 
     def delete_skill(self, sid: str) -> bool:
-        before = len(self.ctx.skills.skills)
-        self.ctx.skills.skills = [x for x in self.ctx.skills.skills if x.id != sid]
-        after = len(self.ctx.skills.skills)
+        before = len(self.profile.skills.skills)
+        self.profile.skills.skills = [x for x in self.profile.skills.skills if x.id != sid]
+        after = len(self.profile.skills.skills)
         if after != before:
             self.mark_dirty()
             return True
         return False
 
     # ---------- autosave ----------
+
     def _maybe_autosave(self) -> bool:
+        """
+        若开启 auto_save，则只保存 skills 部分（不更新 meta）。
+        """
         try:
-            auto = bool(getattr(self.ctx.base.io, "auto_save", False))
+            auto = bool(getattr(self.profile.base.io, "auto_save", False))
         except Exception:
             auto = False
         if not auto:
             return False
 
         try:
-            backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+            backup = bool(getattr(self.profile.base.io, "backup_on_save", True))
         except Exception:
             backup = True
 
         try:
-            self._store.commit(parts={"skills"}, backup=backup, touch_meta=False)
+            self._session.commit(parts={"skills"}, backup=backup, touch_meta=False)
             return True
         except Exception as e:
             self._notify_error("自动保存失败", str(e))
             return False
 
     # ---------- cmd API ----------
+
     def create_cmd(self, *, name: str = "新技能") -> Skill:
         s = self.create_skill(name=name)
         self._notify_dirty()
@@ -221,17 +246,25 @@ class SkillsService:
         return True
 
     def save_cmd(self, *, backup: Optional[bool] = None) -> None:
-        self._store.commit(parts={"skills"}, backup=backup, touch_meta=True)
+        """
+        显式保存 skills 部分（更新 meta）。
+        """
+        self._session.commit(parts={"skills"}, backup=backup, touch_meta=True)
         self._notify_dirty()
 
     def reload_cmd(self) -> None:
-        self.ctx.skills = self.ctx.skills_repo.load_or_create()
+        """
+        从磁盘重新加载 skills.json / Profile.skills：
+        - 仍使用旧的 SkillsRepo.load_or_create
+        - 清除 skills 脏标记，刷新 snapshot
+        """
+        self.profile.skills = self.ctx.skills_repo.load_or_create()  # type: ignore[attr-defined]
         try:
-            self._store.clear_dirty("skills")
+            self._session.clear_dirty("skills")
         except Exception:
             pass
         try:
-            self._store.refresh_snapshot(parts={"skills"})
+            self._session.refresh_snapshot(parts={"skills"})
         except Exception:
             pass
         self._notify_dirty()

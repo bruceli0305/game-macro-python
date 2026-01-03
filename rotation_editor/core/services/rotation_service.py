@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from core.store.app_store import AppStore
+from core.app.session import ProfileSession
 from rotation_editor.core.models import RotationsFile, RotationPreset
 from rotation_editor.core.storage import load_or_create_rotations
 
@@ -15,28 +15,28 @@ class RotationService:
     轨道方案（RotationPreset）业务服务：
 
     职责：
-    - 面向 ctx.rotations.presets 提供 CRUD（仅 preset 级别，Mode/Track/Node 由 UI 或后续服务处理）
-    - 通过 AppStore 标记/提交 "rotations" 脏状态
+    - 面向 ctx.profile.rotations.presets 提供 CRUD（仅 preset 级别，Mode/Track/Node 由 RotationEditService 处理）
+    - 通过 ProfileSession 标记/提交 "rotations" 脏状态
     - save_cmd / reload_cmd 负责与磁盘交互
 
     依赖：
-    - AppStore: 提供 ctx（ProfileContext）与 dirty/commit 接口
+    - ProfileSession: 提供 ctx（ProfileContext）与 dirty/commit 接口
     - notify_dirty: 通知 UI “脏状态可能变化”
     - notify_error: 通知 UI 错误信息 (msg, detail)
     """
 
-    _store: AppStore
+    _session: ProfileSession
     _notify_dirty: Callable[[], None]
     _notify_error: Callable[[str, str], None]
 
     def __init__(
         self,
         *,
-        store: AppStore,
+        session: ProfileSession,
         notify_dirty: Optional[Callable[[], None]] = None,
         notify_error: Optional[Callable[[str, str], None]] = None,
     ) -> None:
-        self._store = store
+        self._session = session
         self._notify_dirty = notify_dirty or (lambda: None)
         self._notify_error = notify_error or (lambda _m, _d="": None)
 
@@ -44,11 +44,11 @@ class RotationService:
 
     @property
     def ctx(self):
-        return self._store.ctx
+        return self._session.ctx
 
     @property
     def rotations(self) -> RotationsFile:
-        return self.ctx.rotations
+        return self._session.profile.rotations
 
     # ---------- ID 生成 ----------
 
@@ -165,9 +165,9 @@ class RotationService:
 
     def _mark_dirty(self) -> None:
         try:
-            self._store.mark_dirty("rotations")  # type: ignore[arg-type]
+            self._session.mark_dirty("rotations")  # type: ignore[arg-type]
         except Exception:
-            # ignore; 但仍然调用 notify_dirty，让 UI 自行查 store.dirty_parts()
+            # ignore; 但仍然调用 notify_dirty，让 UI 自行查 session.dirty_parts()
             pass
         self._notify_dirty()
 
@@ -176,21 +176,25 @@ class RotationService:
         保存 rotations.json；返回是否实际执行了保存。
 
         规则：
-        - 若当前 store.dirty_parts() 不包含 "rotations" 则直接返回 False。
-        - 若 backup 为 None，则取 ctx.base.io.backup_on_save 作为默认。
+        - 若当前 session.dirty_parts() 不包含 "rotations" 则直接返回 False。
+        - 若 backup 为 None，则取 profile.base.io.backup_on_save 作为默认。
         """
-        parts = self._store.dirty_parts()
+        parts = self._session.dirty_parts()
         if "rotations" not in parts:
             return False
 
         if backup is None:
             try:
-                backup = bool(getattr(self.ctx.base.io, "backup_on_save", True))
+                backup = bool(getattr(self.ctx.profile.base.io, "backup_on_save", True))
             except Exception:
                 backup = True
 
         try:
-            self._store.commit(parts={"rotations"}, backup=bool(backup), touch_meta=True)  # type: ignore[arg-type]
+            self._session.commit(
+                parts={"rotations"},  # type: ignore[arg-type]
+                backup=bool(backup),
+                touch_meta=True,
+            )
             self._notify_dirty()
             return True
         except Exception as e:
@@ -200,16 +204,17 @@ class RotationService:
     def reload_cmd(self) -> None:
         """
         从磁盘重新加载 rotations.json，放弃当前内存更改。
+        目前仍使用旧的 load_or_create_rotations() 读取 rotation.json。
         """
         try:
             new_rot = load_or_create_rotations(self.ctx.profile_dir)
-            self.ctx.rotations = new_rot
+            self._session.profile.rotations = new_rot
             try:
-                self._store.clear_dirty("rotations")  # type: ignore[arg-type]
+                self._session.clear_dirty("rotations")  # type: ignore[arg-type]
             except Exception:
                 pass
             try:
-                self._store.refresh_snapshot(parts={"rotations"})  # type: ignore[arg-type]
+                self._session.refresh_snapshot(parts={"rotations"})  # type: ignore[arg-type]
             except Exception:
                 pass
             self._notify_dirty()

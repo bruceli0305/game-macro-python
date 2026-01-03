@@ -18,6 +18,7 @@ from core.repos.base_repo import BaseRepo
 from core.repos.meta_repo import MetaRepo
 from core.repos.points_repo import PointsRepo
 from core.repos.skills_repo import SkillsRepo
+from core.domain.profile import Profile
 from rotation_editor.core.models import RotationsFile
 from rotation_editor.core.storage import load_or_create_rotations
 
@@ -37,6 +38,20 @@ def sanitize_profile_name(name: str) -> str:
 
 @dataclass
 class ProfileContext:
+    """
+    单个 Profile 的上下文：
+
+    - profile_name: 逻辑名称（目录名）
+    - profile_dir : 物理目录路径
+    - idgen       : 用于生成各种 ID 的 SnowflakeGenerator
+    - *_repo      : 旧的 JSON 拆文件仓储（base/meta/skills/points），
+                    目前仍用于持久化；后续会统一替换为 ProfileRepository。
+    - profile     : 聚合后的 Profile 对象（meta/base/skills/points/rotations）
+
+    为了兼容现有调用代码，这里提供 meta/base/skills/points/rotations
+    的 property 访问与赋值。
+    """
+
     profile_name: str
     profile_dir: Path
 
@@ -47,14 +62,57 @@ class ProfileContext:
     skills_repo: SkillsRepo
     points_repo: PointsRepo
 
-    meta: ProfileMeta
-    base: BaseFile
-    skills: SkillsFile
-    points: PointsFile
-    # 新增：循环/轨道配置（rotation_editor 下的 RotationsFile）
-    rotations: RotationsFile
+    profile: Profile
+
+    # ---------- 兼容属性访问 ----------
+
+    @property
+    def meta(self) -> ProfileMeta:
+        return self.profile.meta
+
+    @meta.setter
+    def meta(self, value: ProfileMeta) -> None:
+        self.profile.meta = value
+
+    @property
+    def base(self) -> BaseFile:
+        return self.profile.base
+
+    @base.setter
+    def base(self, value: BaseFile) -> None:
+        self.profile.base = value
+
+    @property
+    def skills(self) -> SkillsFile:
+        return self.profile.skills
+
+    @skills.setter
+    def skills(self, value: SkillsFile) -> None:
+        self.profile.skills = value
+
+    @property
+    def points(self) -> PointsFile:
+        return self.profile.points
+
+    @points.setter
+    def points(self, value: PointsFile) -> None:
+        self.profile.points = value
+
+    @property
+    def rotations(self) -> RotationsFile:
+        return self.profile.rotations
+
+    @rotations.setter
+    def rotations(self, value: RotationsFile) -> None:
+        self.profile.rotations = value
+
+    # ---------- 旧的批量保存接口（仍留给少数调用使用） ----------
 
     def save_all(self, *, backup: bool = True) -> None:
+        """
+        兼容旧接口：分别保存 base / skills / points / meta。
+        目前仍依赖旧的 Repo；后续切到 ProfileRepository 时可以移除。
+        """
         self.base_repo.save(self.base, backup=backup)
         self.skills_repo.save(self.skills, backup=backup)
         self.points_repo.save(self.points, backup=backup)
@@ -62,6 +120,14 @@ class ProfileContext:
 
 
 class ProfileManager:
+    """
+    负责管理 profiles 根目录下的多个 Profile：
+
+    - 目前仍使用拆散的 JSON 文件（base.json / skills.json / points.json / meta.json / rotation.json）
+      来加载各部分，然后组装成 Profile 聚合，挂到 ProfileContext.profile 上。
+    - 后续会逐步迁移到单一的 profile.json + ProfileRepository。
+    """
+
     def __init__(
         self,
         *,
@@ -84,6 +150,8 @@ class ProfileManager:
     def profiles_root(self) -> Path:
         return self._profiles_root
 
+    # ---------- 列表 / 存在性 ----------
+
     def list_profiles(self) -> List[str]:
         if not self._profiles_root.exists():
             return []
@@ -97,6 +165,8 @@ class ProfileManager:
     def profile_exists(self, name: str) -> bool:
         name = sanitize_profile_name(name)
         return (self._profiles_root / name).exists()
+
+    # ---------- 打开 / 创建 ----------
 
     def open_last_or_fallback(self) -> ProfileContext:
         last = sanitize_profile_name(self._app_state.last_profile)
@@ -128,6 +198,8 @@ class ProfileManager:
         self.current = ctx
         return ctx
 
+    # ---------- 复制 / 删除 / 重命名 ----------
+
     def copy_profile(self, src_name: str, dst_name: str) -> ProfileContext:
         src = sanitize_profile_name(src_name)
         dst = sanitize_profile_name(dst_name)
@@ -142,7 +214,7 @@ class ProfileManager:
 
         shutil.copytree(src_dir, dst_dir)
 
-        # refresh meta
+        # refresh meta（仍通过旧的 MetaRepo）
         meta_repo = MetaRepo(dst_dir)
         meta = meta_repo.load_or_create(profile_name=dst, idgen=self._idgen)
         meta.profile_name = dst
@@ -192,11 +264,20 @@ class ProfileManager:
         self.current = ctx
         return ctx
 
+    # ---------- 内部工具 ----------
+
     def _set_last_profile(self, name: str) -> None:
         self._app_state.last_profile = sanitize_profile_name(name)
         self._app_state_repo.save(self._app_state)
 
     def _load_profile_dir(self, *, profile_dir: Path, profile_name: str) -> ProfileContext:
+        """
+        从拆散的 JSON 文件加载各部分，然后组装为 Profile 聚合，挂到 ProfileContext 上。
+
+        当前阶段：
+        - 仍按 base.json / skills.json / points.json / meta.json / rotation.json 分文件读取；
+        - Profile 聚合只是“内存视图”，方便之后统一改为 profile.json。
+        """
         meta_repo = MetaRepo(profile_dir)
         base_repo = BaseRepo(profile_dir)
         skills_repo = SkillsRepo(profile_dir)
@@ -206,8 +287,16 @@ class ProfileManager:
         base = base_repo.load_or_create()
         skills = skills_repo.load_or_create()
         points = points_repo.load_or_create()
-        # 新增：从 profile_dir 加载/创建 rotation.json
         rotations = load_or_create_rotations(profile_dir)
+
+        profile = Profile(
+            schema_version=1,
+            meta=meta,
+            base=base,
+            skills=skills,
+            points=points,
+            rotations=rotations,
+        )
 
         return ProfileContext(
             profile_name=profile_name,
@@ -217,9 +306,5 @@ class ProfileManager:
             base_repo=base_repo,
             skills_repo=skills_repo,
             points_repo=points_repo,
-            meta=meta,
-            base=base,
-            skills=skills,
-            points=points,
-            rotations=rotations,  # 新增字段
+            profile=profile,
         )

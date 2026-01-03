@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         self.status = StatusController(self)
         self.notify = UiNotify(dispatcher=self.dispatcher, status=self.status)
 
-        # 服务层
+        # 服务层（注意：AppServices 内部持有 ProfileSession）
         self.services = AppServices(
             ctx=self._ctx,
             notify_error=lambda m, d="": self.notify.error(m, detail=d),
@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
 
         # 脏状态标题“*”
         try:
-            self.services.store.subscribe_dirty(self._on_store_dirty)
+            self.services.session.subscribe_dirty(self._on_store_dirty)
         except Exception:
             pass
 
@@ -197,7 +197,7 @@ class MainWindow(QMainWindow):
         # 循环/轨道方案管理页（rotation_editor）
         self._page_rotation = RotationPresetsPage(
             ctx=self._ctx,
-            store=self.services.store,
+            session=self.services.session,
             notify=self.notify,
             open_editor=self._open_rotation_editor,
             parent=self,
@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         # 循环编辑器页（Mode/Track/Node 列表版）
         self._page_rotation_editor = RotationEditorPage(
             ctx=self._ctx,
-            store=self.services.store,
+            session=self.services.session,
             notify=self.notify,
             parent=self,
         )
