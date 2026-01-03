@@ -93,9 +93,10 @@ class NodeListPanel(QWidget):
         self._tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
 
-        headers = ["类型", "标签", "技能ID", "动作", "目标模式"]
+        # 增加“条件”这一列
+        headers = ["类型", "标签", "技能ID", "动作", "目标模式", "条件"]
         self._tree.setHeaderLabels(headers)
-        for i, w in enumerate([60, 120, 140, 80, 120]):
+        for i, w in enumerate([60, 120, 140, 80, 120, 140]):
             self._tree.setColumnWidth(i, w)
 
         root.addWidget(self._tree, 1)
@@ -210,9 +211,11 @@ class NodeListPanel(QWidget):
 
         p = self._preset
         modes_by_id = {m.id: m.name for m in (p.modes if p else [])}
+        cond_by_id = {c.id: (c.name or "(未命名条件)") for c in (p.conditions if p else [])}
 
         for n in t.nodes:
             # 列表显示
+            cond_text = ""
             if isinstance(n, SkillNode):
                 typ = "技能"
                 label = n.label or "Skill"
@@ -225,6 +228,9 @@ class NodeListPanel(QWidget):
                 skill_id = ""
                 action = n.action or ""
                 target_mode = modes_by_id.get(n.target_mode_id or "", "") if n.target_mode_id else ""
+                cid = getattr(n, "condition_id", None)
+                if cid:
+                    cond_text = cond_by_id.get(cid, f"(条件缺失: {cid[-6:]})")
             else:
                 typ = getattr(n, "kind", "") or "未知"
                 label = getattr(n, "label", "") or ""
@@ -232,7 +238,7 @@ class NodeListPanel(QWidget):
                 action = ""
                 target_mode = ""
 
-            item = QTreeWidgetItem([typ, label, skill_id, action, target_mode])
+            item = QTreeWidgetItem([typ, label, skill_id, action, target_mode, cond_text])
             item.setData(0, Qt.UserRole, getattr(n, "id", ""))
             self._tree.addTopLevelItem(item)
 
@@ -434,6 +440,7 @@ class NodeListPanel(QWidget):
             return
 
         dlg = ConditionEditorDialog(
+            ctx=self._ctx,
             preset=p,
             gateway=n,
             notify=self._notify,
@@ -498,7 +505,7 @@ class NodeListPanel(QWidget):
         ok = QMessageBox.question(
             self,
             "删除节点",
-            f"确认删除节点：{n.label or n.kind} ？",
+            f"确认删除节点：{n.label or getattr(n, 'kind', '')} ？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )

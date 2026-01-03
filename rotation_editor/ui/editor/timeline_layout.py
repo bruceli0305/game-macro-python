@@ -26,6 +26,8 @@ class NodeVisualSpec:
     - start_ms: 轨道内的起始时间（毫秒）
     - end_ms: 轨道内的结束时间（毫秒）
     - width: 在时间轴上绘制的宽度（像素）
+    - has_condition: 是否绑定了条件（仅对 gateway 有意义）
+    - condition_name: 条件名（若有）
     """
     node_id: str
     label: str
@@ -34,6 +36,8 @@ class NodeVisualSpec:
     start_ms: int
     end_ms: int
     width: float
+    has_condition: bool = False
+    condition_name: str = ""
 
 
 @dataclass
@@ -112,6 +116,11 @@ def build_timeline_layout(
         return []
 
     skills_by_id = _collect_skills_by_id(ctx)
+    # 条件名映射：供 GatewayNode 标记
+    cond_name_by_id: Dict[str, str] = {
+        c.id: (c.name or "(未命名条件)") for c in (preset.conditions or [])
+    }
+
     rows: List[TrackVisualSpec] = []
 
     def build_row(
@@ -163,6 +172,13 @@ def build_timeline_layout(
 
             kind = (getattr(n, "kind", "") or "").strip().lower() or "node"
 
+            # 条件信息（仅 GatewayNode 有）
+            cond_name = ""
+            if isinstance(n, GatewayNode):
+                cid = getattr(n, "condition_id", None)
+                if cid:
+                    cond_name = cond_name_by_id.get(cid, "")
+
             nodes_vs.append(
                 NodeVisualSpec(
                     node_id=getattr(n, "id", ""),
@@ -172,6 +188,8 @@ def build_timeline_layout(
                     start_ms=int(start),
                     end_ms=int(end),
                     width=w,
+                    has_condition=bool(cond_name),
+                    condition_name=cond_name or "",
                 )
             )
 

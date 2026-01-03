@@ -118,9 +118,20 @@ class RotationService:
             return True
         return False
 
-    def update_preset_basic(self, pid: str, *, name: str, description: str) -> bool:
+    def update_preset_basic(
+        self,
+        pid: str,
+        *,
+        name: str,
+        description: str,
+        entry_mode_id: Optional[str] = None,
+        entry_track_id: Optional[str] = None,
+    ) -> bool:
         """
-        更新 preset 的基础字段（name/description）。
+        更新 preset 的基础字段：
+        - name / description
+        - entry_mode_id / entry_track_id
+
         若有变更则标记 rotations 脏。
         """
         p = self.find_preset(pid)
@@ -129,6 +140,8 @@ class RotationService:
 
         nm = (name or "").strip()
         desc = (description or "").rstrip("\n")
+        em = (entry_mode_id or "").strip()
+        et = (entry_track_id or "").strip()
 
         changed = False
         if nm and nm != p.name:
@@ -136,6 +149,12 @@ class RotationService:
             changed = True
         if desc != p.description:
             p.description = desc
+            changed = True
+        if em != (p.entry_mode_id or ""):
+            p.entry_mode_id = em
+            changed = True
+        if et != (p.entry_track_id or ""):
+            p.entry_track_id = et
             changed = True
 
         if changed:

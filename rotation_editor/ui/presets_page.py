@@ -1,4 +1,4 @@
-# rotation_editor/qt_presets_page.py
+# rotation_editor/ui/presets_page.py
 from __future__ import annotations
 
 from typing import Optional, Callable
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QInputDialog,
     QMessageBox,
+    QComboBox,
 )
 
 from core.profiles import ProfileContext
@@ -26,6 +27,12 @@ from qtui.notify import UiNotify
 from qtui.icons import load_icon
 
 from rotation_editor.core.services.rotation_service import RotationService
+from rotation_editor.core.models import RotationPreset
+from rotation_editor.core.analysis.reference_check import (
+    analyze_preset_references,
+    ReferenceReport,
+    RefUsage,
+)
 
 
 class RotationPresetsPage(QWidget):
@@ -33,8 +40,10 @@ class RotationPresetsPage(QWidget):
     轨道方案管理页（MVP）：
 
     - 左侧：方案列表（RotationPreset）
-    - 右侧：当前选中方案的名称/描述编辑
-    - 右侧额外有“编辑此方案...”按钮，切换到循环编辑器页
+    - 右侧：当前选中方案的名称/描述/入口模式/入口轨道编辑
+    - 右侧额外有：
+        * “编辑此方案...”按钮：切换到循环编辑器页
+        * “检查引用”按钮：检查 skill/point 引用是否缺失
     - 底部：新建/复制/重命名/删除 + 重新加载/保存
 
     不编辑 Mode/Track/Node，只管理 presets。
@@ -151,6 +160,7 @@ class RotationPresetsPage(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
 
+        # 名称
         form_row1 = QHBoxLayout()
         lbl_name = QLabel("名称:", right)
         self._edit_name = QLineEdit(right)
@@ -158,20 +168,41 @@ class RotationPresetsPage(QWidget):
         form_row1.addWidget(self._edit_name, 1)
         right_layout.addLayout(form_row1)
 
+        # 描述
         lbl_desc = QLabel("描述:", right)
         right_layout.addWidget(lbl_desc)
         self._edit_desc = QTextEdit(right)
         self._edit_desc.setPlaceholderText("方案用途、备注等...")
         right_layout.addWidget(self._edit_desc, 1)
 
-        # 编辑按钮
-        edit_row = QHBoxLayout()
+        # 入口模式
+        row_entry_mode = QHBoxLayout()
+        row_entry_mode.addWidget(QLabel("入口模式:", right))
+        self._cmb_entry_mode = QComboBox(right)
+        row_entry_mode.addWidget(self._cmb_entry_mode, 1)
+        right_layout.addLayout(row_entry_mode)
+
+        # 入口轨道
+        row_entry_track = QHBoxLayout()
+        row_entry_track.addWidget(QLabel("入口轨道:", right))
+        self._cmb_entry_track = QComboBox(right)
+        row_entry_track.addWidget(self._cmb_entry_track, 1)
+        right_layout.addLayout(row_entry_track)
+
+        # 编辑 & 检查引用 按钮行
+        action_row = QHBoxLayout()
+
         self._btn_edit = QPushButton("编辑此方案...", right)
         self._btn_edit.clicked.connect(self._on_edit)
         self._btn_edit.setEnabled(False)
-        edit_row.addWidget(self._btn_edit)
-        edit_row.addStretch(1)
-        right_layout.addLayout(edit_row)
+        action_row.addWidget(self._btn_edit)
+
+        self._btn_check_refs = QPushButton("检查引用", right)
+        self._btn_check_refs.clicked.connect(self._on_check_refs)
+        action_row.addWidget(self._btn_check_refs)
+
+        action_row.addStretch(1)
+        right_layout.addLayout(action_row)
 
         # 底部：重载/保存
         btn_bottom = QHBoxLayout()
@@ -203,6 +234,8 @@ class RotationPresetsPage(QWidget):
         # 表单变更 -> 写回模型（标记 dirty）
         self._edit_name.textChanged.connect(self._on_form_changed)
         self._edit_desc.textChanged.connect(self._on_form_changed)
+        self._cmb_entry_mode.currentIndexChanged.connect(self._on_entry_mode_changed)
+        self._cmb_entry_track.currentIndexChanged.connect(self._on_form_changed)
 
     # ---------- Store dirty 订阅 ----------
 
@@ -221,8 +254,6 @@ class RotationPresetsPage(QWidget):
         self._update_dirty_ui()
 
     def _on_service_dirty(self) -> None:
-        # service 内部调用 mark_dirty 后再回调这里；
-        # 实际 UI 更新仍然走 store.subscribe_dirty 通道。
         pass
 
     def _update_dirty_ui(self) -> None:
@@ -235,17 +266,11 @@ class RotationPresetsPage(QWidget):
     # ---------- 上下文切换与刷新 ----------
 
     def set_context(self, ctx: ProfileContext) -> None:
-        """
-        当 Profile 切换时，从新的 ctx.rotations 填充 UI。
-        """
         self._ctx = ctx
         self._current_id = None
         self.refresh_list()
 
     def refresh_list(self) -> None:
-        """
-        刷新左侧方案列表，尽量保持当前选中。
-        """
         prev = self._current_id
         self._list.blockSignals(True)
         self._list.clear()
@@ -258,7 +283,6 @@ class RotationPresetsPage(QWidget):
 
         self._list.blockSignals(False)
 
-        # 恢复选中
         if prev:
             self._select_id(prev)
         else:
@@ -294,8 +318,62 @@ class RotationPresetsPage(QWidget):
             self._edit_desc.clear()
             if hasattr(self, "_btn_edit"):
                 self._btn_edit.setEnabled(False)
+            if hasattr(self, "_cmb_entry_mode"):
+                self._cmb_entry_mode.clear()
+            if hasattr(self, "_cmb_entry_track"):
+                self._cmb_entry_track.clear()
         finally:
             self._building_form = False
+
+    def _load_entry_mode_track_for_preset(self, p: RotationPreset) -> None:
+        self._cmb_entry_mode.blockSignals(True)
+        self._cmb_entry_track.blockSignals(True)
+        try:
+            self._cmb_entry_mode.clear()
+            self._cmb_entry_track.clear()
+
+            self._cmb_entry_mode.addItem("（全局）", userData="")
+            for m in (p.modes or []):
+                self._cmb_entry_mode.addItem(m.name or "(未命名)", userData=m.id or "")
+
+            em = (p.entry_mode_id or "").strip()
+            idx_mode = 0
+            if em:
+                for i in range(self._cmb_entry_mode.count()):
+                    data = self._cmb_entry_mode.itemData(i)
+                    if isinstance(data, str) and data == em:
+                        idx_mode = i
+                        break
+            self._cmb_entry_mode.setCurrentIndex(idx_mode)
+
+            self._rebuild_entry_track_combo(p, em)
+        finally:
+            self._cmb_entry_mode.blockSignals(False)
+            self._cmb_entry_track.blockSignals(False)
+
+    def _rebuild_entry_track_combo(self, p: RotationPreset, mode_id: str) -> None:
+        self._cmb_entry_track.clear()
+        self._cmb_entry_track.addItem("（未指定）", userData="")
+
+        tracks = []
+        mid = (mode_id or "").strip()
+        if not mid:
+            tracks = list(p.global_tracks or [])
+        else:
+            m = next((m for m in (p.modes or []) if m.id == mid), None)
+            if m is not None:
+                tracks = list(m.tracks or [])
+
+        for t in tracks:
+            self._cmb_entry_track.addItem(t.name or "(未命名)", userData=t.id or "")
+
+        et = (p.entry_track_id or "").strip()
+        if et:
+            for i in range(self._cmb_entry_track.count()):
+                data = self._cmb_entry_track.itemData(i)
+                if isinstance(data, str) and data == et:
+                    self._cmb_entry_track.setCurrentIndex(i)
+                    break
 
     def _load_into_form(self, pid: str) -> None:
         p = self._svc.find_preset(pid)
@@ -309,6 +387,9 @@ class RotationPresetsPage(QWidget):
             self._edit_desc.setPlainText(p.description or "")
             if hasattr(self, "_btn_edit"):
                 self._btn_edit.setEnabled(True)
+
+            self._load_entry_mode_track_for_preset(p)
+
         finally:
             self._building_form = False
 
@@ -320,9 +401,20 @@ class RotationPresetsPage(QWidget):
             return
         name = self._edit_name.text()
         desc = self._edit_desc.toPlainText()
-        changed = self._svc.update_preset_basic(pid, name=name, description=desc)
+
+        em_data = self._cmb_entry_mode.currentData() if hasattr(self, "_cmb_entry_mode") else ""
+        et_data = self._cmb_entry_track.currentData() if hasattr(self, "_cmb_entry_track") else ""
+        em = em_data if isinstance(em_data, str) else ""
+        et = et_data if isinstance(et_data, str) else ""
+
+        changed = self._svc.update_preset_basic(
+            pid,
+            name=name,
+            description=desc,
+            entry_mode_id=em,
+            entry_track_id=et,
+        )
         if changed:
-            # 更新列表显示的名称
             for i in range(self._list.count()):
                 item = self._list.item(i)
                 val = item.data(Qt.UserRole)
@@ -333,6 +425,14 @@ class RotationPresetsPage(QWidget):
     # ---------- 事件回调 ----------
 
     def _on_select(self, curr: QListWidgetItem, prev: QListWidgetItem) -> None:  # type: ignore[override]
+        if self._building_form:
+            return
+        if prev is not None:
+            try:
+                self._apply_form_to_current()
+            except Exception:
+                pass
+
         if curr is None:
             self._current_id = None
             self._clear_form()
@@ -343,13 +443,6 @@ class RotationPresetsPage(QWidget):
             self._clear_form()
             return
 
-        # 在切换前先把表单内容应用到上一个
-        if prev is not None:
-            try:
-                self._apply_form_to_current()
-            except Exception:
-                pass
-
         self._load_into_form(pid)
 
     def _on_form_changed(self) -> None:
@@ -357,11 +450,27 @@ class RotationPresetsPage(QWidget):
             return
         self._apply_form_to_current()
 
+    def _on_entry_mode_changed(self) -> None:
+        if self._building_form:
+            return
+        pid = self._current_id
+        if not pid:
+            return
+        p = self._svc.find_preset(pid)
+        if p is None:
+            return
+
+        data = self._cmb_entry_mode.currentData()
+        mid = data if isinstance(data, str) else ""
+        self._building_form = True
+        try:
+            self._rebuild_entry_track_combo(p, mid)
+        finally:
+            self._building_form = False
+
+        self._apply_form_to_current()
+
     def _on_edit(self) -> None:
-        """
-        点击“编辑此方案...”时调用外部回调，
-        由 MainWindow 切换到循环编辑器页并定位到当前方案。
-        """
         pid = self._current_id
         if not pid:
             self._notify.error("请先选择一个方案再编辑")
@@ -374,6 +483,64 @@ class RotationPresetsPage(QWidget):
             self._open_editor(pid)
         except Exception as e:
             self._notify.error("打开编辑器失败", detail=str(e))
+
+    def _on_check_refs(self) -> None:
+        """
+        点击“检查引用”：
+        - 分析当前方案中对 skills / points 的引用是否缺失
+        - 结果以 MessageBox 文本形式展示
+        """
+        pid = self._current_id
+        if not pid:
+            self._notify.error("请先选择要检查的方案")
+            return
+        p = self._svc.find_preset(pid)
+        if p is None:
+            self._notify.error("当前方案不存在")
+            return
+
+        try:
+            report = analyze_preset_references(ctx=self._ctx, preset=p)
+        except Exception as e:
+            self._notify.error("引用检查失败", detail=str(e))
+            return
+
+        text = self._format_report_text(report)
+        has_issue = bool(report.missing_skills or report.missing_points)
+
+        box = QMessageBox(self)
+        box.setWindowTitle("引用检查结果")
+        box.setText(text)
+        box.setIcon(QMessageBox.Warning if has_issue else QMessageBox.Information)
+        box.exec()
+
+    def _format_report_text(self, report: ReferenceReport) -> str:
+        lines: List[str] = []
+        name = report.preset_name or "(未命名)"
+        lines.append(f"方案：{name}")
+        lines.append("")
+
+        if not report.missing_skills and not report.missing_points:
+            lines.append("引用检查通过：未发现缺失的技能或点位引用。")
+            return "\n".join(lines)
+
+        if report.missing_skills:
+            lines.append("缺失的技能引用：")
+            for r in report.missing_skills:
+                lines.append(f"- 技能ID={r.ref_id}")
+                for loc in r.locations:
+                    lines.append(f"    · {loc}")
+            lines.append("")
+
+        if report.missing_points:
+            lines.append("缺失的点位引用：")
+            for r in report.missing_points:
+                lines.append(f"- 点位ID={r.ref_id}")
+                for loc in r.locations:
+                    lines.append(f"    · {loc}")
+            lines.append("")
+
+        return "\n".join(lines)
 
     # ---------- 按钮行为：新建/复制/重命名/删除 ----------
 
@@ -508,12 +675,9 @@ class RotationPresetsPage(QWidget):
         else:
             self._notify.status_msg("没有需要保存的更改", ttl_ms=1500)
 
-    # ---------- 提供给 UnsavedGuard 的 flush 接口 ----------
+    # ---------- flush 接口 ----------
 
     def flush_to_model(self) -> None:
-        """
-        将右侧表单内容写回 ctx.rotations（不保存到磁盘）。
-        """
         try:
             self._apply_form_to_current()
         except Exception:

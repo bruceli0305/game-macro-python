@@ -74,8 +74,8 @@ class TimelineCanvas(QGraphicsView):
 
         # 顶部标尺高度
         self._ruler_height = 24
-        # 轨道行（高度 + 间距）与左侧标签宽度（间距调小）
-        self._row_height = 32
+        # 轨道行（高度 + 间距）与左侧标签宽度（之前已调小间距）
+        self._row_height = 44
         self._row_gap = 4
         self._label_width = 160
         self._node_height = 30
@@ -122,10 +122,6 @@ class TimelineCanvas(QGraphicsView):
     # ---------- 时间缩放 API ----------
 
     def set_time_scale(self, scale: float) -> None:
-        """
-        设置时间缩放比例（像素/毫秒），并发出 zoomChanged()。
-        注意：本方法只改内部状态，不主动重绘，外部应在槽中调用 set_data。
-        """
         try:
             s = float(scale)
         except Exception:
@@ -152,10 +148,6 @@ class TimelineCanvas(QGraphicsView):
         self.set_time_scale(self._time_scale_default)
 
     def zoom_ratio(self) -> float:
-        """
-        返回当前缩放相对于默认缩放的比例，
-        例如：1.0 => 100%, 2.0 => 200%, 0.5 => 50%
-        """
         if self._time_scale_default <= 0:
             return 1.0
         return self._time_scale_px_per_ms / self._time_scale_default
@@ -168,9 +160,6 @@ class TimelineCanvas(QGraphicsView):
         preset: Optional[RotationPreset],
         current_mode_id: Optional[str],
     ) -> None:
-        """
-        设置时间轴数据并重绘。
-        """
         self._scene.clear()
         self._track_items.clear()
         self._row_keys.clear()
@@ -204,9 +193,8 @@ class TimelineCanvas(QGraphicsView):
 
         track_area_top = self._ruler_height
 
-        # 无任何轨道：提示 + 下方新增全局轨道按钮 + 标尺
+        # 无轨道：略（与之前版本一致）-------------------------
         if not rows:
-            # 根据视口宽度决定一个合适的 x_extent，避免右侧留空
             x_extent = float(self._label_width + 300)
             view = self.viewport()
             if view is not None:
@@ -263,8 +251,9 @@ class TimelineCanvas(QGraphicsView):
                 total_height,
             )
             return
+        # ----------------------------------------------------
 
-        # 有轨道：先画所有轨道，然后在最后一条轨道后画一个“新增轨道”按钮，再画标尺+网格
+        # 有轨道
         for row in rows:
             y_top = track_area_top + row_index * (self._row_height + self._row_gap)
             y_center = y_top + self._row_height / 2.0
@@ -293,10 +282,16 @@ class TimelineCanvas(QGraphicsView):
                 item.setPos(x, y_center)
 
                 kind = (nvs.kind or "").lower()
+
+                # 基础颜色
                 if kind == "skill":
-                    fill = QColor(80, 160, 230)
+                    fill = QColor(80, 160, 230)        # 蓝色
                 elif kind == "gateway":
-                    fill = QColor(240, 170, 60)
+                    # 网关节点：若有条件则高亮为紫色，否则橙色
+                    if getattr(nvs, "has_condition", False):
+                        fill = QColor(180, 100, 220)   # 紫色，高亮
+                    else:
+                        fill = QColor(240, 170, 60)    # 橙色
                 else:
                     fill = QColor(130, 130, 130)
 
@@ -387,10 +382,6 @@ class TimelineCanvas(QGraphicsView):
         x_extent: float,
         grid_bottom: float,
     ) -> None:
-        """
-        在顶部画时间刻度线和垂直网格。
-        时间 0 从 x = label_width 开始。
-        """
         if max_time_ms <= 0:
             max_time_ms = 5000
 
@@ -401,7 +392,6 @@ class TimelineCanvas(QGraphicsView):
         start_x = float(self._label_width)
         ruler_bottom = float(self._ruler_height) - 2.0
 
-        # 选一个合适的刻度步长（毫秒）
         candidates_ms = [200, 500, 1000, 2000, 5000, 10000]
         target_px = 80.0
         best_ms = candidates_ms[0]
@@ -573,7 +563,7 @@ class TimelineCanvas(QGraphicsView):
             if new_x < self._label_width:
                 new_x = self._label_width
 
-            # 纵向吸附到最近的行中心（基于轨道区域）
+            # 纵向吸附到最近的行中心
             new_y = float(self._drag_row_y)
             row_height_total = self._row_height + self._row_gap
             if self._row_keys and row_height_total > 0:
@@ -607,7 +597,6 @@ class TimelineCanvas(QGraphicsView):
                     dest_key = self._row_keys.get(row_index)
 
             if dest_key is None or dest_key == src_key:
-                # 同一轨道内：此刻调用一次重排算法得到新顺序，然后发 nodesReordered
                 if src_items:
                     new_items = reflow_row_items_for_drag(
                         items=src_items,
@@ -625,7 +614,6 @@ class TimelineCanvas(QGraphicsView):
                         mid, tid = src_key
                         self.nodesReordered.emit(mid, tid, node_ids)
             else:
-                # 跨轨道移动：根据拖拽终点计算目标轨道中的插入位置
                 dst_items = self._track_items.get(dest_key, [])
                 if dst_items:
                     drag_w = float(self._drag_item.rect().width())
@@ -659,10 +647,6 @@ class TimelineCanvas(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        """
-        Ctrl + 滚轮：缩放时间轴；
-        普通滚轮：沿用默认行为（平移视图）。
-        """
         mods = QApplication.keyboardModifiers()
         if mods & Qt.ControlModifier:
             delta = event.angleDelta().y()
@@ -675,10 +659,6 @@ class TimelineCanvas(QGraphicsView):
         super().wheelEvent(event)
 
     def resizeEvent(self, event) -> None:
-        """
-        视图大小变化时，根据新的 viewport 宽度重绘时间轴，
-        让刻度/网格始终铺满当前可见区域。
-        """
         super().resizeEvent(event)
 
         if self._ctx is None or self._preset is None:
@@ -705,7 +685,13 @@ class TimelineCanvas(QGraphicsView):
         if kind == "skill":
             return f"SkillNode: {nvs.label}\nnode_id={nvs.node_id}, duration={nvs.duration_ms}ms"
         if kind == "gateway":
-            return f"GatewayNode: {nvs.label}\nnode_id={nvs.node_id}, duration={nvs.duration_ms}ms"
+            lines = [
+                f"GatewayNode: {nvs.label}",
+                f"node_id={nvs.node_id}, duration={nvs.duration_ms}ms",
+            ]
+            if getattr(nvs, "has_condition", False) and getattr(nvs, "condition_name", ""):
+                lines.append(f"condition={nvs.condition_name}")
+            return "\n".join(lines)
         return f"Node: {nvs.label}\nnode_id={nvs.node_id}, duration={nvs.duration_ms}ms"
 
     def _node_tooltip(self, n: Node) -> str:
