@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
     QComboBox,
+    QSizePolicy,
 )
 
 from core.profiles import ProfileContext
@@ -114,7 +115,7 @@ class RotationPresetsPage(QWidget):
 
         style = self.style()
 
-        # 按钮行
+        # 按钮行（固定在左侧，不随宽度拉伸）
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(6)
@@ -126,23 +127,30 @@ class RotationPresetsPage(QWidget):
 
         self._btn_new = QPushButton("新建", self)
         self._btn_new.setIcon(icon_add)
+        self._btn_new.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._btn_new.clicked.connect(self._on_new)
         btn_row.addWidget(self._btn_new)
 
         self._btn_copy = QPushButton("复制", self)
         self._btn_copy.setIcon(icon_copy)
+        self._btn_copy.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._btn_copy.clicked.connect(self._on_copy)
         btn_row.addWidget(self._btn_copy)
 
         self._btn_rename = QPushButton("重命名", self)
         self._btn_rename.setIcon(icon_rename)
+        self._btn_rename.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._btn_rename.clicked.connect(self._on_rename)
         btn_row.addWidget(self._btn_rename)
 
         self._btn_delete = QPushButton("删除", self)
         self._btn_delete.setIcon(icon_del)
+        self._btn_delete.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._btn_delete.clicked.connect(self._on_delete)
         btn_row.addWidget(self._btn_delete)
+
+        # 剩余空间用 stretch 吃掉，按钮整体固定在左侧
+        btn_row.addStretch(1)
 
         left_layout.addLayout(btn_row)
 
@@ -225,11 +233,14 @@ class RotationPresetsPage(QWidget):
 
         splitter.addWidget(right)
 
+        # 调整左右比例：
+        # - 左侧方案列表更大一些（初始 600）
+        # - 右侧编辑区缩小（初始 400）
         splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 5)
+        splitter.setStretchFactor(1, 2)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
-        splitter.setSizes([320, 780])
+        splitter.setSizes([600, 400])
 
         # 表单变更 -> 写回模型（标记 dirty）
         self._edit_name.textChanged.connect(self._on_form_changed)
@@ -648,7 +659,7 @@ class RotationPresetsPage(QWidget):
         ok = QMessageBox.question(
             self,
             "重新加载",
-            "将从磁盘重新加载 rotation.json，放弃当前未保存更改。\n\n确认继续？",
+            "将从磁盘重新加载 rotation.json（实际从 profile.json 的 rotations 部分），放弃当前未保存更改。\n\n确认继续？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -671,7 +682,7 @@ class RotationPresetsPage(QWidget):
 
         saved = self._svc.save_cmd()
         if saved:
-            self._notify.info("rotation.json 已保存")
+            self._notify.info("循环配置已保存（写入 profile.json）")
         else:
             self._notify.status_msg("没有需要保存的更改", ttl_ms=1500)
 
