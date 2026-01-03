@@ -19,7 +19,10 @@ from rotation_editor.ui.editor.timeline_layout import (
     TrackVisualSpec,
     build_timeline_layout,
 )
-from rotation_editor.ui.editor.timeline_reflow import reflow_row_items_for_drag
+from rotation_editor.ui.editor.timeline_reflow import (
+    reflow_row_items_for_drag,
+    compute_insert_index_for_cross_track,
+)
 
 
 class TimelineCanvas(QGraphicsView):
@@ -35,24 +38,30 @@ class TimelineCanvas(QGraphicsView):
 
     功能：
     - 左键点击节点块 -> nodeClicked(mode_id, track_id, node_index)
-    - 左键拖拽节点块（同一轨道内）：
-        * 拖动过程中当前块紧贴鼠标，其他块“主动避让”、按插槽重新排布
-        * 松开时发出 nodesReordered(mode_id, track_id, node_ids)
+    - 左键拖拽节点块：
+        * 同一轨道内：拖拽过程中只有该节点移动，松开后发 nodesReordered(mode_id, track_id, node_ids)
+        * 跨轨道：拖拽节点在视觉上跟着鼠标移动，松开后发 nodeCrossMoved(...)，由上层完成数据迁移并重绘
     - 右键节点 -> nodeContextMenuRequested(mode_id, track_id, node_index, global_x, global_y)
     - 右键轨道空白 -> trackContextMenuRequested(mode_id, track_id, global_x, global_y)
+    - 在最后一条轨道之后（或无轨道时）画一个“新增轨道”按钮，下方 -> trackAddRequested(mode_id)
+      * mode_id == "" 表示新增全局轨道
     """
 
     nodeClicked = Signal(str, str, int)
     nodesReordered = Signal(str, str, list)
+    nodeCrossMoved = Signal(str, str, str, str, int, str)
+
     nodeContextMenuRequested = Signal(str, str, int, int, int)
     trackContextMenuRequested = Signal(str, str, int, int)
+
+    trackAddRequested = Signal(str)  # mode_id（空串表示全局轨道）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
 
-        # 轨道和节点尺寸
+        # 行高 / 间距 / 左侧标签区宽度
         self._row_height = 52
         self._row_gap = 10
         self._label_width = 160
@@ -61,7 +70,7 @@ class TimelineCanvas(QGraphicsView):
         self._base_width = 90
         self._row_keys: Dict[int, Tuple[str, str]] = {}
 
-        # 抗锯齿、拖动、更新策略
+        # 渲染参数
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
@@ -112,7 +121,6 @@ class TimelineCanvas(QGraphicsView):
         if ctx is None or preset is None:
             return
 
-        # 布局引擎负责计算节点持续时间和宽度、行顺序
         rows: List[TrackVisualSpec] = build_timeline_layout(
             ctx,
             preset,
@@ -126,6 +134,48 @@ class TimelineCanvas(QGraphicsView):
         row_index = 0
         x_max = 0.0
 
+        # 无任何轨道：提示 + 下方新增全局轨道按钮
+        if not rows:
+            y_top = 0
+            y_center = y_top + self._row_height / 2.0
+
+            hint = QGraphicsSimpleTextItem("（当前无轨道，点击下方 + 新建全局轨道）")
+            hint.setFont(font)
+            hint.setBrush(QColor(200, 200, 200))
+            hint.setPos(
+                4,
+                y_top + (self._row_height - hint.boundingRect().height()) / 2.0,
+            )
+            self._scene.addItem(hint)
+
+            btn_w, btn_h = 44.0, 20.0
+            btn_x = 6.0
+            btn_y = y_top + self._row_height + self._row_gap / 2.0 - btn_h / 2.0
+            plus_rect = QGraphicsRectItem(0, 0, btn_w, btn_h)
+            plus_rect.setPos(btn_x, btn_y)
+            plus_rect.setBrush(QBrush(QColor(80, 160, 80)))
+            plus_rect.setPen(QPen(QColor(30, 80, 30), 1.0))
+            plus_rect.setData(0, "add_track_button")
+            plus_rect.setData(1, "")  # 空串 => 全局轨道
+            self._scene.addItem(plus_rect)
+
+            text_item = QGraphicsSimpleTextItem("+", plus_rect)
+            text_item.setFont(font)
+            tb = text_item.boundingRect()
+            text_x = (btn_w - tb.width()) / 2.0
+            text_y = (btn_h - tb.height()) / 2.0
+            text_item.setPos(text_x, text_y)
+            text_item.setBrush(QColor(255, 255, 255))
+
+            self._scene.setSceneRect(
+                0,
+                0,
+                max(self._label_width + 300, 320),
+                max(self._row_height + self._row_gap + btn_h + 20, 240),
+            )
+            return
+
+        # 有轨道：画所有轨道，并在最后一条轨道之后画一个“新增轨道”按钮
         for row in rows:
             y_top = row_index * (self._row_height + self._row_gap)
             y_center = y_top + self._row_height / 2.0
@@ -153,7 +203,6 @@ class TimelineCanvas(QGraphicsView):
                 item = QGraphicsRectItem(rect)
                 item.setPos(x, y_center)
 
-                # 颜色区分类型
                 kind = (nvs.kind or "").lower()
                 if kind == "skill":
                     fill = QColor(80, 160, 230)
@@ -167,22 +216,20 @@ class TimelineCanvas(QGraphicsView):
                 item.setBrush(QBrush(fill))
                 item.setToolTip(self._node_tooltip_meta(nvs))
 
-                # 元数据：mode_id / track_id / node_index / node_id
-                item.setData(0, row.mode_id)
-                item.setData(1, row.track_id)
-                item.setData(2, idx)
-                item.setData(3, nvs.node_id)
+                item.setData(0, row.mode_id)   # mode_id
+                item.setData(1, row.track_id)  # track_id
+                item.setData(2, idx)           # node_index
+                item.setData(3, nvs.node_id)   # node_id
 
                 self._scene.addItem(item)
 
-                # 文本作为子项，局部坐标内居中
-                text_item = QGraphicsSimpleTextItem(nvs.label, parent=item)
-                text_item.setFont(font)
-                tb = text_item.boundingRect()
-                text_x = (w - tb.width()) / 2.0
-                text_y = (-self._node_height / 2.0) + (self._node_height - tb.height()) / 2.0
-                text_item.setPos(text_x, text_y)
-                text_item.setBrush(QColor(255, 255, 255))
+                text_item2 = QGraphicsSimpleTextItem(nvs.label, parent=item)
+                text_item2.setFont(font)
+                tb2 = text_item2.boundingRect()
+                text_x2 = (w - tb2.width()) / 2.0
+                text_y2 = (-self._node_height / 2.0) + (self._node_height - tb2.height()) / 2.0
+                text_item2.setPos(text_x2, text_y2)
+                text_item2.setBrush(QColor(255, 255, 255))
 
                 rect_items.append(item)
                 x += w + self._x_gap
@@ -191,7 +238,37 @@ class TimelineCanvas(QGraphicsView):
             x_max = max(x_max, x)
             row_index += 1
 
-        total_height = row_index * (self._row_height + self._row_gap)
+        # 最后一条轨道之后的“新增轨道”按钮
+        last_row_index = len(rows) - 1
+        last_y_top = last_row_index * (self._row_height + self._row_gap)
+
+        btn_w, btn_h = 64.0, 22.0
+        btn_x = 6.0
+        btn_y = last_y_top + self._row_height + self._row_gap / 2.0 - btn_h / 2.0
+        plus_rect = QGraphicsRectItem(0, 0, btn_w, btn_h)
+        plus_rect.setPos(btn_x, btn_y)
+        plus_rect.setBrush(QBrush(QColor(80, 160, 80)))
+        plus_rect.setPen(QPen(QColor(30, 80, 30), 1.0))
+        plus_rect.setData(0, "add_track_button")
+
+        # mode_id 用 current_mode_id（若存在）；否则用最后一条轨道的 mode_id（全局/模式）
+        if self._current_mode_id:
+            mid_for_plus = self._current_mode_id
+        else:
+            mid_for_plus = rows[-1].mode_id or ""
+        plus_rect.setData(1, mid_for_plus)
+
+        self._scene.addItem(plus_rect)
+
+        text_item = QGraphicsSimpleTextItem("+ 新增轨道", plus_rect)
+        text_item.setFont(font)
+        tb = text_item.boundingRect()
+        text_x = (btn_w - tb.width()) / 2.0
+        text_y = (btn_h - tb.height()) / 2.0
+        text_item.setPos(text_x, text_y)
+        text_item.setBrush(QColor(255, 255, 255))
+
+        total_height = (len(rows)) * (self._row_height + self._row_gap) + self._row_gap + btn_h
         self._scene.setSceneRect(
             0,
             0,
@@ -205,10 +282,19 @@ class TimelineCanvas(QGraphicsView):
         scene_pos = self.mapToScene(event.pos())
         item = self._scene.itemAt(scene_pos, self.transform())
 
-        # 如果点到了文字，取父 rect
+        # 先处理“新增轨道”按钮：可能点到文字，也可能点到矩形
         if isinstance(item, QGraphicsSimpleTextItem) and isinstance(item.parentItem(), QGraphicsRectItem):
             item = item.parentItem()
 
+        if isinstance(item, QGraphicsRectItem):
+            tag = item.data(0)
+            if tag == "add_track_button":
+                mid = item.data(1)
+                if isinstance(mid, str):
+                    self.trackAddRequested.emit(mid)  # mid 为空串 => 全局轨道
+                return
+
+        # 节点拖拽/右键逻辑
         if event.button() == Qt.LeftButton:
             if isinstance(item, QGraphicsRectItem):
                 self._drag_item = item
@@ -228,7 +314,6 @@ class TimelineCanvas(QGraphicsView):
                 self._drag_row_key = None
 
         elif event.button() == Qt.RightButton:
-            # 右键：节点块 -> 节点菜单；否则尝试轨道空白菜单
             if isinstance(item, QGraphicsRectItem):
                 mid = item.data(0)
                 tid = item.data(1)
@@ -267,41 +352,90 @@ class TimelineCanvas(QGraphicsView):
             scene_pos = self.mapToScene(event.pos())
             dx = scene_pos.x() - self._drag_start_scene_pos.x()
 
+            # 只更新拖拽节点的 X/Y，其它节点保持不动
             new_x = self._drag_start_pos.x() + dx
             if new_x < self._label_width:
                 new_x = self._label_width
-            # 更新拖拽块的 X，Y 固定在该行
-            self._drag_item.setPos(new_x, self._drag_row_y)
 
-            # 行内重排交给独立函数处理
-            key = self._drag_row_key
-            items = self._track_items.get(key, [])
-            if items:
-                new_items = reflow_row_items_for_drag(
-                    items=items,
-                    drag_item=self._drag_item,
-                    label_width=float(self._label_width),
-                    x_gap=float(self._x_gap),
-                )
-                self._track_items[key] = new_items
+            # 纵向吸附到最近的行中心
+            new_y = float(self._drag_row_y)
+            row_height_total = self._row_height + self._row_gap
+            if self._row_keys and row_height_total > 0:
+                y = scene_pos.y()
+                max_row_index = max(self._row_keys.keys())
+                row_index = int(y // row_height_total)
+                if row_index < 0:
+                    row_index = 0
+                if row_index > max_row_index:
+                    row_index = max_row_index
+                new_y = row_index * row_height_total + self._row_height / 2.0
+
+            self._drag_item.setPos(new_x, new_y)
             return
 
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self._drag_item is not None and self._drag_row_key is not None:
-            key = self._drag_row_key
-            items = self._track_items.get(key, [])
-            if items:
-                node_ids: List[str] = []
-                for it in items:
-                    nid = it.data(3)
-                    if isinstance(nid, str):
-                        node_ids.append(nid)
+            src_key = self._drag_row_key
+            src_items = self._track_items.get(src_key, [])
 
-                if len(node_ids) >= 2:
-                    mid, tid = key
-                    self.nodesReordered.emit(mid, tid, node_ids)
+            scene_pos = self.mapToScene(event.pos())
+            dest_key: Optional[Tuple[str, str]] = None
+            row_height_total = self._row_height + self._row_gap
+            if row_height_total > 0:
+                y = scene_pos.y()
+                row_index = int(y // row_height_total)
+                row_top = row_index * row_height_total
+                if row_top <= y <= row_top + self._row_height:
+                    dest_key = self._row_keys.get(row_index)
+
+            if dest_key is None or dest_key == src_key:
+                # 同一轨道内：在此刻调用一次重排算法得到新顺序，然后发 nodesReordered
+                if src_items:
+                    new_items = reflow_row_items_for_drag(
+                        items=src_items,
+                        drag_item=self._drag_item,
+                        label_width=float(self._label_width),
+                        x_gap=float(self._x_gap),
+                    )
+                    self._track_items[src_key] = new_items
+                    node_ids: List[str] = []
+                    for it in new_items:
+                        nid = it.data(3)
+                        if isinstance(nid, str):
+                            node_ids.append(nid)
+                    if len(node_ids) >= 2:
+                        mid, tid = src_key
+                        self.nodesReordered.emit(mid, tid, node_ids)
+            else:
+                # 跨轨道移动：根据拖拽终点计算目标轨道中的插入位置
+                dst_items = self._track_items.get(dest_key, [])
+                if dst_items:
+                    drag_w = float(self._drag_item.rect().width())
+                    drag_center_x = float(self._drag_item.pos().x()) + drag_w / 2.0
+                    dst_index = compute_insert_index_for_cross_track(
+                        dst_items,
+                        drag_w,
+                        drag_center_x,
+                        float(self._label_width),
+                        float(self._x_gap),
+                    )
+                else:
+                    dst_index = 0
+
+                src_mid, src_tid = src_key
+                dst_mid, dst_tid = dest_key
+                nid = self._drag_item.data(3)
+                if isinstance(nid, str):
+                    self.nodeCrossMoved.emit(
+                        src_mid or "",
+                        src_tid or "",
+                        dst_mid or "",
+                        dst_tid or "",
+                        int(dst_index),
+                        nid,
+                    )
 
             self._drag_item = None
             self._drag_row_key = None
@@ -311,9 +445,6 @@ class TimelineCanvas(QGraphicsView):
     # ---------- 工具 ----------
 
     def _node_tooltip_meta(self, nvs: NodeVisualSpec) -> str:
-        """
-        根据 NodeVisualSpec 构造 tooltip 文本。
-        """
         kind = (nvs.kind or "").lower()
         if kind == "skill":
             return f"SkillNode: {nvs.label}\nnode_id={nvs.node_id}, duration={nvs.duration_ms}ms"
@@ -322,9 +453,6 @@ class TimelineCanvas(QGraphicsView):
         return f"Node: {nvs.label}\nnode_id={nvs.node_id}, duration={nvs.duration_ms}ms"
 
     def _node_tooltip(self, n: Node) -> str:
-        """
-        保留原始 Node 对象 tooltip 的实现（目前未直接使用，只保留兼容）。
-        """
         if isinstance(n, SkillNode):
             return f"SkillNode: {n.label or ''}\nskill_id={n.skill_id}"
         if isinstance(n, GatewayNode):

@@ -22,12 +22,14 @@ class RotationEditService:
     职责：
     - 在指定 RotationPreset 范围内：
         * 模式操作：新增 / 重命名 / 删除 Mode
+        * 轨道操作：在指定模式或全局下新增 Track
         * 在指定 (mode_id, track_id) 轨道下：
             - 查找轨道
             - 列出节点
             - 新增技能节点 / 网关节点
             - 上移 / 下移 / 删除节点
             - 按 node_ids 顺序重排节点
+            - 在轨道之间移动节点（跨轨道拖拽）
     - 通过 AppStore 标记 "rotations" 为脏
     - 不负责磁盘 I/O（保存/重载由 RotationService 完成）
     """
@@ -180,8 +182,8 @@ class RotationEditService:
         删除指定 mode_id 的模式及其下所有轨道/节点。
 
         当前实现：
-        - 简单从 preset.modes 列表中移除，不自动修复 entry_mode_id/entry_track_id。
-          如需更严格的一致性检查，可以在此处扩展。
+        - 简单从 preset.modes 列表中移除；
+        - 若 entry_mode_id 指向被删模式，则清空 entry_mode_id/entry_track_id。
         """
         mid = (mode_id or "").strip()
         if not mid:
@@ -192,13 +194,42 @@ class RotationEditService:
         if after == before:
             return False
 
-        # 如果入口模式刚好指向被删的模式，简单清空入口设置
         if preset.entry_mode_id == mid:
             preset.entry_mode_id = ""
             preset.entry_track_id = ""
 
         self._mark_dirty()
         return True
+
+    # ---------- 轨道操作 ----------
+
+    def create_track(
+        self,
+        preset: RotationPreset,
+        mode_id: Optional[str],
+        name: str,
+    ) -> Optional[Track]:
+        """
+        在给定 preset 下创建一个轨道：
+
+        - mode_id 非空 => 在对应 Mode.tracks 下追加新轨道
+        - mode_id 为空 => 在 preset.global_tracks 下追加新轨道
+        """
+        nm = (name or "").strip() or "新轨道"
+        tid = self._new_id()
+        track = Track(id=tid, name=nm, nodes=[])
+
+        mid = (mode_id or "").strip()
+        if mid:
+            mode = self._find_mode(preset, mid)
+            if mode is None:
+                return None
+            mode.tracks.append(track)
+        else:
+            preset.global_tracks.append(track)
+
+        self._mark_dirty()
+        return track
 
     # ---------- 节点操作：新增 ----------
 
@@ -374,5 +405,54 @@ class RotationEditService:
             return False
 
         t.nodes = new_nodes
+        self._mark_dirty()
+        return True
+
+    # ---------- 节点跨轨道移动 ----------
+
+    def move_node_between_tracks(
+        self,
+        *,
+        preset: RotationPreset,
+        src_mode_id: Optional[str],
+        src_track_id: Optional[str],
+        dst_mode_id: Optional[str],
+        dst_track_id: Optional[str],
+        node_id: str,
+        dst_index: int,
+    ) -> bool:
+        """
+        将指定 node_id 的节点从 (src_mode_id, src_track_id) 移动到
+        (dst_mode_id, dst_track_id) 的 dst_index 位置。
+
+        规则：
+        - 如果 src/dst 轨道不存在，返回 False；
+        - 如果源轨道中找不到该节点，返回 False；
+        - dst_index 会被裁剪到 [0, len(dst_track.nodes)]。
+        """
+        src_t = self.get_track(preset, src_mode_id, src_track_id)
+        dst_t = self.get_track(preset, dst_mode_id, dst_track_id)
+        if src_t is None or dst_t is None:
+            return False
+
+        nid = (node_id or "").strip()
+        if not nid:
+            return False
+
+        node: Optional[Node] = None
+        for i, n in enumerate(src_t.nodes):
+            if getattr(n, "id", "") == nid:
+                node = n
+                del src_t.nodes[i]
+                break
+        if node is None:
+            return False
+
+        if dst_index < 0:
+            dst_index = 0
+        if dst_index > len(dst_t.nodes):
+            dst_index = len(dst_t.nodes)
+
+        dst_t.nodes.insert(dst_index, node)
         self._mark_dirty()
         return True
