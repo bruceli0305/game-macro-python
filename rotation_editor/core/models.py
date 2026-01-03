@@ -301,18 +301,14 @@ class Mode:
 
 @dataclass
 class RotationPreset:
-    """
-    轨道方案（一个 Profile 下可以有多个）：
-    - id: 方案 ID
-    - name: 名称（如 "输出循环"）
-    - description: 描述
-    - global_tracks: 全局轨道（不区分 Mode）
-    - modes: 模式列表（武器A/武器B/变身/...）
-    - conditions: 本方案下定义的条件集合（供网关等引用）
-    """
     id: str = ""
     name: str = ""
     description: str = ""
+
+    # 入口配置：executor 将从这里开始运行
+    entry_mode_id: str = ""   # 为空表示从全局轨道入口
+    entry_track_id: str = ""  # 可为空，表示不指定轨道
+
     global_tracks: List[Track] = field(default_factory=list)
     modes: List[Mode] = field(default_factory=list)
     conditions: List[Condition] = field(default_factory=list)
@@ -323,7 +319,8 @@ class RotationPreset:
         pid = as_str(d.get("id", ""))
         name = as_str(d.get("name", ""))
         desc = as_str(d.get("description", ""))
-
+        entry_mode_id = as_str(d.get("entry_mode_id", ""))
+        entry_track_id = as_str(d.get("entry_track_id", ""))
         gtracks_raw = as_list(d.get("global_tracks", []))
         gtracks: List[Track] = []
         for item in gtracks_raw:
@@ -355,6 +352,8 @@ class RotationPreset:
             id=pid,
             name=name,
             description=desc,
+            entry_mode_id=entry_mode_id,
+            entry_track_id=entry_track_id,
             global_tracks=gtracks,
             modes=modes,
             conditions=conds,
@@ -365,6 +364,8 @@ class RotationPreset:
             "id": self.id,
             "name": self.name,
             "description": self.description,
+            "entry_mode_id": self.entry_mode_id,
+            "entry_track_id": self.entry_track_id,
             "global_tracks": [t.to_dict() for t in self.global_tracks],
             "modes": [m.to_dict() for m in self.modes],
             "conditions": [c.to_dict() for c in self.conditions],
