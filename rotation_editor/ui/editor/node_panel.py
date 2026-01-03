@@ -1,6 +1,8 @@
+# rotation_editor/ui/editor/node_panel.py
 from __future__ import annotations
 
 import uuid
+import logging
 from typing import Optional, List
 
 from PySide6.QtCore import Qt
@@ -34,6 +36,8 @@ from rotation_editor.core.models import (
 from rotation_editor.core.services.rotation_edit_service import RotationEditService
 from rotation_editor.ui.editor.node_props_dialog import NodePropertiesDialog
 from rotation_editor.ui.editor.condition_dialog import ConditionEditorDialog
+
+log = logging.getLogger(__name__)
 
 
 class NodeListPanel(QWidget):
@@ -563,4 +567,4 @@ class NodeListPanel(QWidget):
         try:
             self._edit_svc.mark_dirty()
         except Exception:
-            pass
+            log.exception("NodeListPanel._mark_dirty: edit_svc.mark_dirty failed")

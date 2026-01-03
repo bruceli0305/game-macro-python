@@ -1,4 +1,4 @@
-# File: core/app/services/skills_service.py
+# core/app/services/skills_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,8 +51,6 @@ class SkillsService:
         self._notify_dirty = notify_dirty or (lambda: None)
         self._notify_error = notify_error or (lambda _m, _d="": None)
 
-    # ---------- 便捷属性 ----------
-
     @property
     def ctx(self):
         return self._session.ctx
@@ -60,8 +58,6 @@ class SkillsService:
     @property
     def profile(self):
         return self._session.profile
-
-    # ---------- 基本查询 ----------
 
     def find(self, sid: str) -> Optional[Skill]:
         for s in self.profile.skills.skills:
@@ -71,8 +67,6 @@ class SkillsService:
 
     def mark_dirty(self) -> None:
         self._session.mark_dirty("skills")
-
-    # ---------- 应用表单 patch ----------
 
     def _apply_patch_to_skill(self, s: Skill, patch: SkillFormPatch) -> None:
         s.name = (patch.name or "").strip()
@@ -98,12 +92,6 @@ class SkillsService:
         s.note = patch.note or ""
 
     def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
-        """
-        应用表单 patch 到指定技能：
-        返回 (applied, saved)：
-        - applied: 是否实际有变更
-        - saved  : 若 auto_save=True，是否自动保存成功
-        """
         s = self.find(sid)
         if s is None:
             return (False, False)
@@ -138,11 +126,6 @@ class SkillsService:
         g: int,
         b: int,
     ) -> tuple[bool, bool]:
-        """
-        用于取色确认事件：
-        - 仅更新 pixel 位置信息和颜色，不动读条时间等。
-        返回 (applied, saved)。
-        """
         s = self.find(sid)
         if s is None:
             return (False, False)
@@ -196,9 +179,6 @@ class SkillsService:
     # ---------- autosave ----------
 
     def _maybe_autosave(self) -> bool:
-        """
-        若开启 auto_save，则只保存 skills 部分（不更新 meta）。
-        """
         try:
             auto = bool(getattr(self.profile.base.io, "auto_save", False))
         except Exception:
@@ -246,25 +226,15 @@ class SkillsService:
         return True
 
     def save_cmd(self, *, backup: Optional[bool] = None) -> None:
-        """
-        显式保存 skills 部分（更新 meta）。
-        """
         self._session.commit(parts={"skills"}, backup=backup, touch_meta=True)
         self._notify_dirty()
 
     def reload_cmd(self) -> None:
         """
-        从磁盘重新加载 skills.json / Profile.skills：
-        - 仍使用旧的 SkillsRepo.load_or_create
-        - 清除 skills 脏标记，刷新 snapshot
+        从 profile.json 重新加载 skills 部分。
         """
-        self.profile.skills = self.ctx.skills_repo.load_or_create()  # type: ignore[attr-defined]
         try:
-            self._session.clear_dirty("skills")
-        except Exception:
-            pass
-        try:
-            self._session.refresh_snapshot(parts={"skills"})
+            self._session.reload_parts({"skills"})
         except Exception:
             pass
         self._notify_dirty()

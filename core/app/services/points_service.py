@@ -1,4 +1,4 @@
-# File: core/app/services/points_service.py
+# core/app/services/points_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,8 +34,6 @@ class PointFormPatch:
 class PointsService:
     """
     取色点位配置编辑服务：
-
-    - 不依赖 EventBus
     - 通过 ProfileSession 管理脏状态与提交
     - autosave 失败通过 notify_error 回调（由 UI 注入）
     """
@@ -45,13 +43,11 @@ class PointsService:
         *,
         session: ProfileSession,
         notify_dirty: Optional[Callable[[], None]] = None,
-        notify_error: Optional[Callable[[str, str], None]] = None,  # (msg, detail)
+        notify_error: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self._session = session
         self._notify_dirty = notify_dirty or (lambda: None)
         self._notify_error = notify_error or (lambda _m, _d="": None)
-
-    # ---------- 便捷属性 ----------
 
     @property
     def ctx(self):
@@ -60,8 +56,6 @@ class PointsService:
     @property
     def profile(self):
         return self._session.profile
-
-    # ---------- 查询 ----------
 
     def find(self, pid: str) -> Optional[Point]:
         for p in self.profile.points.points:
@@ -72,13 +66,11 @@ class PointsService:
     def mark_dirty(self) -> None:
         self._session.mark_dirty("points")
 
-    # ---------- 应用表单 patch ----------
-
     def _apply_patch_to_point(self, p: Point, patch: PointFormPatch) -> None:
         p.name = (patch.name or "").strip()
         p.monitor = (patch.monitor or "primary").strip() or "primary"
-        p.vx = clamp_int(int(p.vx), -10**9, 10**9)
-        p.vy = clamp_int(int(p.vy), -10**9, 10**9)
+        p.vx = clamp_int(int(patch.vx), -10**9, 10**9)
+        p.vy = clamp_int(int(patch.vy), -10**9, 10**9)
 
         r = clamp_int(int(patch.r), 0, 255)
         g = clamp_int(int(patch.g), 0, 255)
@@ -94,10 +86,6 @@ class PointsService:
         p.note = patch.note or ""
 
     def apply_form_patch(self, pid: str, patch: PointFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
-        """
-        应用表单 patch 到指定点位：
-        返回 (applied, saved)。
-        """
         p = self.find(pid)
         if p is None:
             return (False, False)
@@ -132,10 +120,6 @@ class PointsService:
         g: int,
         b: int,
     ) -> tuple[bool, bool]:
-        """
-        Pick only updates coords/color/time; tolerance is user-config.
-        Returns (applied, saved).
-        """
         p = self.find(pid)
         if p is None:
             return (False, False)
@@ -154,7 +138,7 @@ class PointsService:
         self._notify_dirty()
         return (True, bool(saved))
 
-    # ---------- non-cmd helpers ----------
+    # ---------- helpers ----------
 
     def create_point(self, *, name: str = "新点位") -> Point:
         pid = self.ctx.idgen.next_id()
@@ -199,9 +183,6 @@ class PointsService:
     # ---------- autosave ----------
 
     def _maybe_autosave(self) -> bool:
-        """
-        若开启 auto_save，则只保存 points 部分（不更新 meta）。
-        """
         try:
             auto = bool(getattr(self.profile.base.io, "auto_save", False))
         except Exception:
@@ -249,25 +230,15 @@ class PointsService:
         return True
 
     def save_cmd(self, *, backup: Optional[bool] = None) -> None:
-        """
-        显式保存 points 部分（更新 meta）。
-        """
         self._session.commit(parts={"points"}, backup=backup, touch_meta=True)
         self._notify_dirty()
 
     def reload_cmd(self) -> None:
         """
-        从磁盘重新加载 points.json / Profile.points：
-        - 仍使用旧的 PointsRepo.load_or_create
-        - 清除 points 脏标记，刷新 snapshot
+        从 profile.json 重新加载 points 部分。
         """
-        self.profile.points = self.ctx.points_repo.load_or_create()  # type: ignore[attr-defined]
         try:
-            self._session.clear_dirty("points")
-        except Exception:
-            pass
-        try:
-            self._session.refresh_snapshot(parts={"points"})
+            self._session.reload_parts({"points"})
         except Exception:
             pass
         self._notify_dirty()

@@ -1,4 +1,4 @@
-# core/app/services/app_services.py
+# File: core/app/services/app_services.py
 from __future__ import annotations
 
 from typing import Callable, Iterable, Optional, Set
@@ -28,9 +28,6 @@ class AppServices:
     ) -> None:
         # 统一的工作单元
         self.session = ProfileSession(ctx)
-
-        # 为兼容旧调用（UI 里到处是 services.store），保留别名
-        self.store = self.session
 
         self._notify_error = notify_error or (lambda _m, _d="": None)
 

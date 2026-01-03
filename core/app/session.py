@@ -12,7 +12,7 @@ from core.models.point import PointsFile
 from core.models.skill import SkillsFile
 from core.profiles import ProfileContext
 from rotation_editor.core.models import RotationsFile
-from rotation_editor.core.storage import save_rotations
+from core.io.json_store import now_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -35,10 +35,10 @@ class ProfileSession:
     """
     Profile 工作单元 + 脏标记：
 
-    - 持有 ProfileContext（其中包含 Profile 聚合和旧的 repo）
+    - 持有 ProfileContext（其中包含 Profile 聚合和 ProfileRepository）
     - 维护 dirty_parts / snapshot
-    - commit() 仍按旧逻辑分别调用 BaseRepo/SkillsRepo/PointsRepo/MetaRepo/save_rotations
-      ——后续会统一改为 ProfileRepository + 单一 profile.json。
+    - commit() 统一写入 profile.json
+    - reload_parts() 按需从 profile.json 局部刷新
     - subscribe_dirty(fn)：供 UI 订阅脏状态变更。
     """
 
@@ -57,6 +57,10 @@ class ProfileSession:
     @property
     def profile(self):
         return self._ctx.profile
+
+    @property
+    def repo(self):
+        return self._ctx.repo
 
     # ---------- 上下文切换 ----------
 
@@ -161,7 +165,6 @@ class ProfileSession:
         """
         回滚到最近一次 snapshot（仅内存，不触碰磁盘）。
         """
-        ctx = self._ctx
         p = self.profile
         s = self._snap
 
@@ -189,6 +192,36 @@ class ProfileSession:
         self._dirty.clear()
         self._emit_dirty()
 
+    # ---------- reload parts ----------
+
+    def reload_parts(self, parts: Set[Part]) -> None:
+        """
+        从 profile.json 重新加载指定部分（base/skills/points/meta/rotations）：
+        - 其它部分保持不变
+        - 被 reload 的部分从 dirty 集合中移除
+        """
+        fresh = self.repo.load_or_create(self.ctx.profile_name, self.ctx.idgen)
+        p = self.profile
+
+        if "base" in parts:
+            p.base = fresh.base
+            self._dirty.discard("base")
+        if "skills" in parts:
+            p.skills = fresh.skills
+            self._dirty.discard("skills")
+        if "points" in parts:
+            p.points = fresh.points
+            self._dirty.discard("points")
+        if "rotations" in parts:
+            p.rotations = fresh.rotations
+            self._dirty.discard("rotations")
+        if "meta" in parts:
+            p.meta = fresh.meta
+            self._dirty.discard("meta")
+
+        self._snap = self._take_snapshot()
+        self._emit_dirty()
+
     # ---------- commit ----------
 
     def commit(
@@ -201,20 +234,14 @@ class ProfileSession:
         """
         提交变更到磁盘。
 
-        当前阶段（兼容旧结构）：
-        - 分别触发：
-          * base_repo.save  -> base.json
-          * skills_repo.save -> skills.json
-          * points_repo.save -> points.json
-          * save_rotations   -> rotation.json
-          * meta_repo.save   -> meta.json (若 touch_meta=True)
-        - 后续会统一改写为 ProfileRepository.save(profile.json)。
+        现在统一写入 profile.json：
+        - parts 仍用于控制 dirty 标记（以及 UI 显示），但 IO 层始终写整个 Profile。
+        - touch_meta=True 时会更新 meta.updated_at（meta.created_at 为空时一并填充）。
         """
         target: Set[Part] = set(self._dirty) if parts is None else set(parts)
         if not target:
             return
 
-        ctx = self._ctx
         p = self.profile
 
         if backup is None:
@@ -223,26 +250,19 @@ class ProfileSession:
             except Exception:
                 backup = True
 
-        # 仍依赖旧的 repo 字段；稍后会整体替换为 ProfileRepository
-        if "base" in target:
-            ctx.base_repo.save(p.base, backup=bool(backup))  # type: ignore[attr-defined]
-            self._dirty.discard("base")
-
-        if "skills" in target:
-            ctx.skills_repo.save(p.skills, backup=bool(backup))  # type: ignore[attr-defined]
-            self._dirty.discard("skills")
-
-        if "points" in target:
-            ctx.points_repo.save(p.points, backup=bool(backup))  # type: ignore[attr-defined]
-            self._dirty.discard("points")
-
-        if "rotations" in target:
-            save_rotations(ctx.profile_dir, p.rotations, backup=bool(backup))
-            self._dirty.discard("rotations")
-
+        # 更新 meta.updated_at（仅在 touch_meta=True 时）
         if touch_meta:
-            ctx.meta_repo.save(p.meta, backup=bool(backup))  # type: ignore[attr-defined]
-            self._dirty.discard("meta")
+            now = now_iso_utc()
+            if not p.meta.created_at:
+                p.meta.created_at = now
+            p.meta.updated_at = now
+
+        # 一次性写整个 Profile
+        self.repo.save(self.ctx.profile_name, p, backup=bool(backup))
+
+        # 清理对应 dirty 标记（其它未提交部分仍保留）
+        for part in target:
+            self._dirty.discard(part)
 
         self._snap = self._take_snapshot()
         self._emit_dirty()

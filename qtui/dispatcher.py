@@ -1,8 +1,13 @@
 # qtui/dispatcher.py
 from __future__ import annotations
 
+import logging
 from typing import Callable
+
 from PySide6.QtCore import QObject, Signal, Slot
+
+
+log = logging.getLogger(__name__)
 
 
 class QtDispatcher(QObject):
@@ -10,6 +15,9 @@ class QtDispatcher(QObject):
     简单的 UI 线程调度器：
     - 其他线程调用 call_soon(fn)
     - fn 会被排队到 Qt 主线程执行
+
+    任何在回调中抛出的异常：
+    - 会被捕获并记录到日志（不让异常终止事件循环）
     """
 
     _sig_call = Signal(object)  # fn: Callable[[], None]
@@ -29,5 +37,5 @@ class QtDispatcher(QObject):
         try:
             fn()
         except Exception:
-            # 不让异常终止事件循环
-            pass
+            # 记录异常，但不让 Qt 事件循环崩溃
+            log.exception("QtDispatcher call failed")

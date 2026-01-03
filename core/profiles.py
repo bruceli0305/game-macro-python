@@ -5,6 +5,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+from copy import deepcopy
 
 from core.idgen.snowflake import SnowflakeGenerator
 from core.io.json_store import ensure_dir, now_iso_utc
@@ -14,13 +15,9 @@ from core.models.meta import ProfileMeta
 from core.models.point import PointsFile
 from core.models.skill import SkillsFile
 from core.repos.app_state_repo import AppStateRepo
-from core.repos.base_repo import BaseRepo
-from core.repos.meta_repo import MetaRepo
-from core.repos.points_repo import PointsRepo
-from core.repos.skills_repo import SkillsRepo
 from core.domain.profile import Profile
+from core.repos.profile_repo import ProfileRepository
 from rotation_editor.core.models import RotationsFile
-from rotation_editor.core.storage import load_or_create_rotations
 
 _ILLEGAL_FS_CHARS = r'<>:"/\\|?*'
 _ILLEGAL_FS_RE = re.compile(f"[{re.escape(_ILLEGAL_FS_CHARS)}]")
@@ -44,8 +41,7 @@ class ProfileContext:
     - profile_name: 逻辑名称（目录名）
     - profile_dir : 物理目录路径
     - idgen       : 用于生成各种 ID 的 SnowflakeGenerator
-    - *_repo      : 旧的 JSON 拆文件仓储（base/meta/skills/points），
-                    目前仍用于持久化；后续会统一替换为 ProfileRepository。
+    - repo        : ProfileRepository（负责 profile.json 的读写）
     - profile     : 聚合后的 Profile 对象（meta/base/skills/points/rotations）
 
     为了兼容现有调用代码，这里提供 meta/base/skills/points/rotations
@@ -56,11 +52,7 @@ class ProfileContext:
     profile_dir: Path
 
     idgen: SnowflakeGenerator
-
-    meta_repo: MetaRepo
-    base_repo: BaseRepo
-    skills_repo: SkillsRepo
-    points_repo: PointsRepo
+    repo: ProfileRepository
 
     profile: Profile
 
@@ -106,26 +98,21 @@ class ProfileContext:
     def rotations(self, value: RotationsFile) -> None:
         self.profile.rotations = value
 
-    # ---------- 旧的批量保存接口（仍留给少数调用使用） ----------
+    # ---------- 旧的批量保存接口（现在用 profile.json） ----------
 
     def save_all(self, *, backup: bool = True) -> None:
         """
-        兼容旧接口：分别保存 base / skills / points / meta。
-        目前仍依赖旧的 Repo；后续切到 ProfileRepository 时可以移除。
+        兼容旧接口：统一保存整个 Profile 到 profile.json。
         """
-        self.base_repo.save(self.base, backup=backup)
-        self.skills_repo.save(self.skills, backup=backup)
-        self.points_repo.save(self.points, backup=backup)
-        self.meta_repo.save(self.meta, backup=backup)  # 内部会更新 updated_at
+        self.repo.save(self.profile_name, self.profile, backup=backup)
 
 
 class ProfileManager:
     """
     负责管理 profiles 根目录下的多个 Profile：
 
-    - 目前仍使用拆散的 JSON 文件（base.json / skills.json / points.json / meta.json / rotation.json）
-      来加载各部分，然后组装成 Profile 聚合，挂到 ProfileContext.profile 上。
-    - 后续会逐步迁移到单一的 profile.json + ProfileRepository。
+    - 现在使用单一的 profiles/<name>/profile.json 存储：
+        * meta/base/skills/points/rotations 全部在一个文件中
     """
 
     def __init__(
@@ -144,11 +131,18 @@ class ProfileManager:
         self._app_state = app_state
         self._idgen = idgen
 
+        # 聚合仓储
+        self._repo = ProfileRepository(self._profiles_root)
+
         self.current: Optional[ProfileContext] = None
 
     @property
     def profiles_root(self) -> Path:
         return self._profiles_root
+
+    @property
+    def repo(self) -> ProfileRepository:
+        return self._repo
 
     # ---------- 列表 / 存在性 ----------
 
@@ -183,6 +177,8 @@ class ProfileManager:
         name = sanitize_profile_name(name)
         profile_dir = self._profiles_root / name
         ensure_dir(profile_dir)
+
+        # 若 profile.json 不存在，ProfileRepository 会创建新的 Profile
         ctx = self._load_profile_dir(profile_dir=profile_dir, profile_name=name)
         self._set_last_profile(name)
         self.current = ctx
@@ -212,16 +208,19 @@ class ProfileManager:
         if dst_dir.exists():
             return self.open_profile(dst)
 
-        shutil.copytree(src_dir, dst_dir)
+        ensure_dir(dst_dir)
 
-        # refresh meta（仍通过旧的 MetaRepo）
-        meta_repo = MetaRepo(dst_dir)
-        meta = meta_repo.load_or_create(profile_name=dst, idgen=self._idgen)
-        meta.profile_name = dst
-        meta.profile_id = self._idgen.next_id()
-        meta.created_at = now_iso_utc()
-        meta.updated_at = now_iso_utc()
-        meta_repo.save(meta, backup=False)
+        # 通过聚合复制：避免直接拷贝旧 JSON 结构
+        src_profile = self._repo.load_or_create(src, self._idgen)
+        new_profile = deepcopy(src_profile)
+
+        now = now_iso_utc()
+        new_profile.meta.profile_name = dst
+        new_profile.meta.profile_id = self._idgen.next_id()
+        new_profile.meta.created_at = now
+        new_profile.meta.updated_at = now
+
+        self._repo.save(dst, new_profile, backup=False)
 
         ctx = self._load_profile_dir(profile_dir=dst_dir, profile_name=dst)
         self._set_last_profile(dst)
@@ -254,10 +253,10 @@ class ProfileManager:
 
         old_dir.rename(new_dir)
 
-        meta_repo = MetaRepo(new_dir)
-        meta = meta_repo.load_or_create(profile_name=new_name, idgen=self._idgen)
-        meta.profile_name = new_name
-        meta_repo.save(meta, backup=False)
+        # 通过聚合更新 meta.profile_name
+        prof = self._repo.load_or_create(new_name, self._idgen)
+        prof.meta.profile_name = new_name
+        self._repo.save(new_name, prof, backup=False)
 
         ctx = self._load_profile_dir(profile_dir=new_dir, profile_name=new_name)
         self._set_last_profile(new_name)
@@ -272,39 +271,14 @@ class ProfileManager:
 
     def _load_profile_dir(self, *, profile_dir: Path, profile_name: str) -> ProfileContext:
         """
-        从拆散的 JSON 文件加载各部分，然后组装为 Profile 聚合，挂到 ProfileContext 上。
-
-        当前阶段：
-        - 仍按 base.json / skills.json / points.json / meta.json / rotation.json 分文件读取；
-        - Profile 聚合只是“内存视图”，方便之后统一改为 profile.json。
+        使用 ProfileRepository 从 profile.json 加载 Profile 聚合。
         """
-        meta_repo = MetaRepo(profile_dir)
-        base_repo = BaseRepo(profile_dir)
-        skills_repo = SkillsRepo(profile_dir)
-        points_repo = PointsRepo(profile_dir)
-
-        meta = meta_repo.load_or_create(profile_name=profile_name, idgen=self._idgen)
-        base = base_repo.load_or_create()
-        skills = skills_repo.load_or_create()
-        points = points_repo.load_or_create()
-        rotations = load_or_create_rotations(profile_dir)
-
-        profile = Profile(
-            schema_version=1,
-            meta=meta,
-            base=base,
-            skills=skills,
-            points=points,
-            rotations=rotations,
-        )
+        profile = self._repo.load_or_create(profile_name, self._idgen)
 
         return ProfileContext(
             profile_name=profile_name,
             profile_dir=profile_dir,
             idgen=self._idgen,
-            meta_repo=meta_repo,
-            base_repo=base_repo,
-            skills_repo=skills_repo,
-            points_repo=points_repo,
+            repo=self._repo,
             profile=profile,
         )

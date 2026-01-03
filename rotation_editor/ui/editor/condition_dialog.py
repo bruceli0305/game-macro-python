@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import uuid
 import json
+import logging
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 
@@ -32,6 +33,8 @@ from core.models.skill import Skill
 from qtui.icons import load_icon
 from qtui.notify import UiNotify
 from rotation_editor.core.models import RotationPreset, Condition, GatewayNode, Track, Mode
+
+log = logging.getLogger(__name__)
 
 
 # ---------- 内部：原子条件结构 ----------
@@ -426,7 +429,7 @@ class ConditionEditorDialog(QDialog):
             try:
                 self._apply_form_to_current()
             except Exception:
-                pass
+                log.exception("ConditionEditorDialog._on_select: apply_form_to_current failed")
 
         if curr is None:
             self._current_cond_id = None
@@ -808,4 +811,4 @@ class ConditionEditorDialog(QDialog):
         try:
             self._mark_dirty_cb()
         except Exception:
-            pass
+            log.exception("ConditionEditorDialog._mark_dirty: mark_dirty_cb failed")

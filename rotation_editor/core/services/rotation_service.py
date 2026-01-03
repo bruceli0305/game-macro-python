@@ -1,3 +1,4 @@
+# rotation_editor/core/services/rotation_service.py
 from __future__ import annotations
 
 import uuid
@@ -6,7 +7,6 @@ from typing import Callable, List, Optional
 
 from core.app.session import ProfileSession
 from rotation_editor.core.models import RotationsFile, RotationPreset
-from rotation_editor.core.storage import load_or_create_rotations
 
 
 @dataclass
@@ -15,12 +15,12 @@ class RotationService:
     轨道方案（RotationPreset）业务服务：
 
     职责：
-    - 面向 ctx.profile.rotations.presets 提供 CRUD（仅 preset 级别，Mode/Track/Node 由 RotationEditService 处理）
+    - 面向 session.profile.rotations.presets 提供 CRUD（仅 preset 级别，Mode/Track/Node 由 RotationEditService 处理）
     - 通过 ProfileSession 标记/提交 "rotations" 脏状态
-    - save_cmd / reload_cmd 负责与磁盘交互
+    - save_cmd / reload_cmd 负责与 profile.json 交互
 
     依赖：
-    - ProfileSession: 提供 ctx（ProfileContext）与 dirty/commit 接口
+    - ProfileSession: 提供 ctx（ProfileContext）与 dirty/commit/reload_parts 接口
     - notify_dirty: 通知 UI “脏状态可能变化”
     - notify_error: 通知 UI 错误信息 (msg, detail)
     """
@@ -173,7 +173,7 @@ class RotationService:
 
     def save_cmd(self, *, backup: Optional[bool] = None) -> bool:
         """
-        保存 rotations.json；返回是否实际执行了保存。
+        保存 profile.json 中的 rotations；返回是否实际执行了保存。
 
         规则：
         - 若当前 session.dirty_parts() 不包含 "rotations" 则直接返回 False。
@@ -203,20 +203,10 @@ class RotationService:
 
     def reload_cmd(self) -> None:
         """
-        从磁盘重新加载 rotations.json，放弃当前内存更改。
-        目前仍使用旧的 load_or_create_rotations() 读取 rotation.json。
+        从 profile.json 重新加载 rotations 部分，放弃当前内存更改。
         """
         try:
-            new_rot = load_or_create_rotations(self.ctx.profile_dir)
-            self._session.profile.rotations = new_rot
-            try:
-                self._session.clear_dirty("rotations")  # type: ignore[arg-type]
-            except Exception:
-                pass
-            try:
-                self._session.refresh_snapshot(parts={"rotations"})  # type: ignore[arg-type]
-            except Exception:
-                pass
+            self._session.reload_parts({"rotations"})
             self._notify_dirty()
         except Exception as e:
             self._notify_error("重新加载循环配置失败", str(e))

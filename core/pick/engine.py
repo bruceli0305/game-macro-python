@@ -1,6 +1,7 @@
 # File: core/pick/engine.py
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from pynput import keyboard, mouse
 from core.input.hotkey import MOD_KEYS, MOD_NAME, normalize, compose, key_to_name
 from core.pick.capture import ScreenCapture
 from core.pick.models import PickSessionConfig, PickPreview, PickConfirmed
+
+log = logging.getLogger(__name__)
 
 
 class Scheduler(Protocol):
@@ -38,9 +41,14 @@ class PickCallbacks:
 class PickEngine:
     """
     Pick engine:
-    - no EventBus
-    - background threads schedule UI callbacks via Scheduler.call_soon
-    - config is per-session immutable snapshot (PickSessionConfig)
+    - 无 EventBus
+    - 后台线程通过 Scheduler.call_soon 调度 UI 回调
+    - config 是每次会话的不可变快照（PickSessionConfig）
+
+    注意：
+    - 任何后台线程中的异常都会：
+        * 写入日志（log.exception）
+        * 尝试通过 on_error 回调通知 UI（节流）
     """
 
     def __init__(self, *, scheduler: Scheduler) -> None:
@@ -61,17 +69,24 @@ class PickEngine:
         self._last_err_t = 0.0
 
     def close(self) -> None:
+        """
+        停止当前会话并关闭截图资源。
+        """
         self.stop(reason="shutdown")
         try:
             self._cap.close()
         except Exception:
-            pass
+            log.exception("ScreenCapture.close failed in PickEngine.close")
 
     def is_active(self) -> bool:
         with self._lock:
             return bool(self._active)
 
     def start(self, cfg: PickSessionConfig, cbs: PickCallbacks) -> None:
+        """
+        启动一次新的取色会话：
+        - 若已有会话，会先调用 stop("restart")
+        """
         self.stop(reason="restart")
 
         cfg2 = PickSessionConfig(
@@ -99,20 +114,27 @@ class PickEngine:
 
         self._sch.call_soon(lambda: cbs.on_enter(cfg2))
 
-        # keyboard listener thread
+        # keyboard listener 线程
         try:
-            self._kbd_listener = keyboard.Listener(on_press=self._on_key_press, on_release=self._on_key_release)
+            self._kbd_listener = keyboard.Listener(
+                on_press=self._on_key_press,
+                on_release=self._on_key_release,
+            )
             self._kbd_listener.start()
         except Exception as e:
+            log.exception("keyboard.Listener start failed in PickEngine.start")
             self._sch.call_soon(lambda: cbs.on_error(f"键盘监听启动失败: {e}"))
             self.stop(reason="kbd_listener_failed")
             return
 
-        # preview thread
+        # preview 线程
         self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._preview_thread.start()
 
     def cancel(self) -> None:
+        """
+        由 UI 主线程调用，取消当前取色会话。
+        """
         with self._lock:
             if not self._active:
                 return
@@ -122,6 +144,9 @@ class PickEngine:
         self.stop(reason="canceled")
 
     def stop(self, *, reason: str) -> None:
+        """
+        内部/外部结束会话。
+        """
         with self._lock:
             if not self._active:
                 return
@@ -142,18 +167,19 @@ class PickEngine:
             try:
                 kbd.stop()
             except Exception:
-                pass
+                log.exception("keyboard.Listener.stop failed in PickEngine.stop")
 
         if th is not None:
             try:
                 th.join(timeout=0.25)
             except Exception:
-                pass
+                log.exception("preview_thread.join failed in PickEngine.stop")
 
         if cbs is not None:
             self._sch.call_soon(lambda: cbs.on_exit(reason))
 
-    # ---------- keyboard listener callbacks (non-UI threads) ----------
+    # ---------- keyboard listener callbacks (非 UI 线程) ----------
+
     def _on_key_press(self, key) -> None:
         try:
             with self._lock:
@@ -182,7 +208,7 @@ class PickEngine:
             if got == cfg.confirm_hotkey:
                 self._confirm_at_current_mouse(cfg, cbs)
         except Exception:
-            pass
+            log.exception("exception in PickEngine._on_key_press")
 
     def _on_key_release(self, key) -> None:
         try:
@@ -194,9 +220,10 @@ class PickEngine:
                 if name and name in self._mods:
                     self._mods.remove(name)
         except Exception:
-            pass
+            log.exception("exception in PickEngine._on_key_release")
 
     # ---------- confirm ----------
+
     def _confirm_at_current_mouse(self, cfg: PickSessionConfig, cbs: PickCallbacks) -> None:
         ctrl = mouse.Controller()
         try:
@@ -219,12 +246,12 @@ class PickEngine:
                         try:
                             ctrl.position = (int(x0), int(y1))
                         except Exception:
-                            pass
+                            log.exception("mouse.Controller.position set failed in _confirm_at_current_mouse")
                         settle = int(cfg.mouse_avoid_settle_ms)
                         if settle > 0:
                             time.sleep(float(settle) / 1000.0)
                     except Exception:
-                        pass
+                        log.exception("mouse avoidance failed in _confirm_at_current_mouse")
 
             r, g, b = self._cap.get_rgb_scoped_abs(x0, y0, cfg.sample, mon_used, require_inside=False)
             rel_x, rel_y = self._cap.abs_to_rel(x0, y0, mon_used)
@@ -249,6 +276,7 @@ class PickEngine:
             self.stop(reason="confirmed")
 
         except Exception as e:
+            log.exception("exception in PickEngine._confirm_at_current_mouse")
             now = time.monotonic()
             if (now - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                 self._last_err_t = now
@@ -257,9 +285,10 @@ class PickEngine:
             try:
                 self._cap.close_current_thread()
             except Exception:
-                pass
+                log.exception("ScreenCapture.close_current_thread failed in _confirm_at_current_mouse")
 
     # ---------- preview loop ----------
+
     def _preview_loop(self) -> None:
         ctrl = mouse.Controller()
         try:
@@ -307,6 +336,7 @@ class PickEngine:
                     self._sch.call_soon(lambda: cbs.on_preview(preview))
 
                 except Exception as e:
+                    log.exception("exception in PickEngine._preview_loop sampling")
                     now2 = time.monotonic()
                     if (now2 - self._last_err_t) * 1000.0 >= float(cfg.error_throttle_ms):
                         self._last_err_t = now2
@@ -317,15 +347,17 @@ class PickEngine:
             try:
                 self._cap.close_current_thread()
             except Exception:
-                pass
+                log.exception("ScreenCapture.close_current_thread failed in _preview_loop")
 
     # ---------- monitor selection ----------
+
     def _resolve_monitor(self, abs_x: int, abs_y: int, requested: str) -> tuple[str, bool]:
         req = (requested or "primary").strip().lower() or "primary"
         try:
             rect_req = self._cap.get_monitor_rect(req)
             inside = rect_req.contains_abs(int(abs_x), int(abs_y))
         except Exception:
+            log.exception("get_monitor_rect failed in _resolve_monitor")
             inside = True
 
         if req == "all":
