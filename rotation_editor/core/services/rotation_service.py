@@ -1,4 +1,3 @@
-# rotation_editor/core/services/rotation_service.py
 from __future__ import annotations
 
 import uuid
@@ -126,11 +125,14 @@ class RotationService:
         description: str,
         entry_mode_id: Optional[str] = None,
         entry_track_id: Optional[str] = None,
+        max_exec_nodes: Optional[int] = None,
+        max_run_seconds: Optional[int] = None,
     ) -> bool:
         """
         更新 preset 的基础字段：
         - name / description
         - entry_mode_id / entry_track_id
+        - max_exec_nodes / max_run_seconds （0 表示无限制）
 
         若有变更则标记 rotations 脏。
         """
@@ -156,6 +158,22 @@ class RotationService:
         if et != (p.entry_track_id or ""):
             p.entry_track_id = et
             changed = True
+
+        if max_exec_nodes is not None:
+            val = int(max_exec_nodes)
+            if val < 0:
+                val = 0
+            if val != (p.max_exec_nodes or 0):
+                p.max_exec_nodes = val
+                changed = True
+
+        if max_run_seconds is not None:
+            val = int(max_run_seconds)
+            if val < 0:
+                val = 0
+            if val != (p.max_run_seconds or 0):
+                p.max_run_seconds = val
+                changed = True
 
         if changed:
             self._mark_dirty()

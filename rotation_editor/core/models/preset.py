@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from core.models.common import as_dict, as_list, as_str
+from core.models.common import as_dict, as_list, as_str, as_int
 from .track import Track
 from .mode import Mode
 from .condition import Condition
@@ -22,6 +22,10 @@ class RotationPreset:
     - global_tracks: 全局轨道列表
     - modes: 模式列表，每个模式下有自己的 tracks
     - conditions: 条件列表，供 GatewayNode.condition_id 引用
+
+    新增：
+    - max_exec_nodes: 最大执行节点次数（0 表示无限制）
+    - max_run_seconds: 最长运行时间（秒，0 表示无限制）
     """
     id: str = ""
     name: str = ""
@@ -34,6 +38,9 @@ class RotationPreset:
     modes: List[Mode] = field(default_factory=list)
     conditions: List[Condition] = field(default_factory=list)
 
+    max_exec_nodes: int = 0
+    max_run_seconds: int = 0
+
     # ---------- 反序列化 ----------
 
     @staticmethod
@@ -44,6 +51,9 @@ class RotationPreset:
         desc = as_str(d.get("description", ""))
         entry_mode_id = as_str(d.get("entry_mode_id", ""))
         entry_track_id = as_str(d.get("entry_track_id", ""))
+
+        max_exec_nodes = as_int(d.get("max_exec_nodes", 0), 0)
+        max_run_seconds = as_int(d.get("max_run_seconds", 0), 0)
 
         gtracks_raw = as_list(d.get("global_tracks", []))
         gtracks: List[Track] = []
@@ -81,6 +91,8 @@ class RotationPreset:
             global_tracks=gtracks,
             modes=modes,
             conditions=conds,
+            max_exec_nodes=max_exec_nodes,
+            max_run_seconds=max_run_seconds,
         )
 
     # ---------- 序列化 ----------
@@ -95,4 +107,6 @@ class RotationPreset:
             "global_tracks": [t.to_dict() for t in self.global_tracks],
             "modes": [m.to_dict() for m in self.modes],
             "conditions": [c.to_dict() for c in self.conditions],
+            "max_exec_nodes": int(self.max_exec_nodes),
+            "max_run_seconds": int(self.max_run_seconds),
         }

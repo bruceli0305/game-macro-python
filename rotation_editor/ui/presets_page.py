@@ -1,4 +1,3 @@
-# rotation_editor/ui/presets_page.py
 from __future__ import annotations
 
 from typing import Optional, Callable, List
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QComboBox,
     QSizePolicy,
+    QSpinBox,
 )
 
 from core.profiles import ProfileContext
@@ -45,9 +45,7 @@ class RotationPresetsPage(QWidget):
     - 右侧额外有：
         * “编辑此方案...”按钮：切换到循环编辑器页
         * “检查引用”按钮：检查 skill/point 引用是否缺失
-    - 底部：新建/复制/重命名/删除 + 重新加载/保存
-
-    不编辑 Mode/Track/Node，只管理 presets。
+        * “最大执行节点数 / 最长运行时间” 安全限制配置
     """
 
     def __init__(
@@ -115,7 +113,7 @@ class RotationPresetsPage(QWidget):
 
         style = self.style()
 
-        # 按钮行（固定在左侧，不随宽度拉伸）
+        # 按钮行
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(6)
@@ -149,9 +147,7 @@ class RotationPresetsPage(QWidget):
         self._btn_delete.clicked.connect(self._on_delete)
         btn_row.addWidget(self._btn_delete)
 
-        # 剩余空间用 stretch 吃掉，按钮整体固定在左侧
         btn_row.addStretch(1)
-
         left_layout.addLayout(btn_row)
 
         # 列表
@@ -197,6 +193,23 @@ class RotationPresetsPage(QWidget):
         row_entry_track.addWidget(self._cmb_entry_track, 1)
         right_layout.addLayout(row_entry_track)
 
+        # 安全限制：最大执行节点数 / 最长运行时间
+        row_max_exec = QHBoxLayout()
+        row_max_exec.addWidget(QLabel("最大执行节点数(0=无限):", right))
+        self._spin_max_exec_nodes = QSpinBox(right)
+        self._spin_max_exec_nodes.setRange(0, 10**9)
+        self._spin_max_exec_nodes.setSingleStep(100)
+        row_max_exec.addWidget(self._spin_max_exec_nodes)
+        right_layout.addLayout(row_max_exec)
+
+        row_max_time = QHBoxLayout()
+        row_max_time.addWidget(QLabel("最长运行时间(秒,0=无限):", right))
+        self._spin_max_run_secs = QSpinBox(right)
+        self._spin_max_run_secs.setRange(0, 10**7)
+        self._spin_max_run_secs.setSingleStep(10)
+        row_max_time.addWidget(self._spin_max_run_secs)
+        right_layout.addLayout(row_max_time)
+
         # 编辑 & 检查引用 按钮行
         action_row = QHBoxLayout()
 
@@ -233,9 +246,7 @@ class RotationPresetsPage(QWidget):
 
         splitter.addWidget(right)
 
-        # 调整左右比例：
-        # - 左侧方案列表更大一些（初始 600）
-        # - 右侧编辑区缩小（初始 400）
+        # 调整左右比例
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setCollapsible(0, False)
@@ -247,6 +258,8 @@ class RotationPresetsPage(QWidget):
         self._edit_desc.textChanged.connect(self._on_form_changed)
         self._cmb_entry_mode.currentIndexChanged.connect(self._on_entry_mode_changed)
         self._cmb_entry_track.currentIndexChanged.connect(self._on_form_changed)
+        self._spin_max_exec_nodes.valueChanged.connect(self._on_form_changed)
+        self._spin_max_run_secs.valueChanged.connect(self._on_form_changed)
 
     # ---------- Store dirty 订阅 ----------
 
@@ -333,6 +346,10 @@ class RotationPresetsPage(QWidget):
                 self._cmb_entry_mode.clear()
             if hasattr(self, "_cmb_entry_track"):
                 self._cmb_entry_track.clear()
+            if hasattr(self, "_spin_max_exec_nodes"):
+                self._spin_max_exec_nodes.setValue(0)
+            if hasattr(self, "_spin_max_run_secs"):
+                self._spin_max_run_secs.setValue(0)
         finally:
             self._building_form = False
 
@@ -401,6 +418,10 @@ class RotationPresetsPage(QWidget):
 
             self._load_entry_mode_track_for_preset(p)
 
+            # 安全限制
+            self._spin_max_exec_nodes.setValue(int(getattr(p, "max_exec_nodes", 0) or 0))
+            self._spin_max_run_secs.setValue(int(getattr(p, "max_run_seconds", 0) or 0))
+
         finally:
             self._building_form = False
 
@@ -418,12 +439,17 @@ class RotationPresetsPage(QWidget):
         em = em_data if isinstance(em_data, str) else ""
         et = et_data if isinstance(et_data, str) else ""
 
+        max_exec = int(self._spin_max_exec_nodes.value()) if hasattr(self, "_spin_max_exec_nodes") else 0
+        max_secs = int(self._spin_max_run_secs.value()) if hasattr(self, "_spin_max_run_secs") else 0
+
         changed = self._svc.update_preset_basic(
             pid,
             name=name,
             description=desc,
             entry_mode_id=em,
             entry_track_id=et,
+            max_exec_nodes=max_exec,
+            max_run_seconds=max_secs,
         )
         if changed:
             for i in range(self._list.count()):
@@ -496,11 +522,6 @@ class RotationPresetsPage(QWidget):
             self._notify.error("打开编辑器失败", detail=str(e))
 
     def _on_check_refs(self) -> None:
-        """
-        点击“检查引用”：
-        - 分析当前方案中对 skills / points 的引用是否缺失
-        - 结果以 MessageBox 文本形式展示
-        """
         pid = self._current_id
         if not pid:
             self._notify.error("请先选择要检查的方案")
@@ -667,12 +688,19 @@ class RotationPresetsPage(QWidget):
             return
 
         try:
+            self._apply_form_to_current()
+        except Exception:
+            pass
+
+        try:
             self._svc.reload_cmd()
-            self._current_id = None
-            self.refresh_list()
-            self._notify.info("已重新加载循环配置")
         except Exception as e:
             self._notify.error("重新加载失败", detail=str(e))
+            return
+
+        self._current_id = None
+        self.refresh_list()
+        self._notify.info("已重新加载循环配置")
 
     def _on_save(self) -> None:
         try:

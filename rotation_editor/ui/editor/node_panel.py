@@ -97,10 +97,10 @@ class NodeListPanel(QWidget):
         self._tree.itemSelectionChanged.connect(self._on_tree_selection_changed)
         self._tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
 
-        # 增加“条件”这一列
-        headers = ["类型", "标签", "技能ID", "动作", "目标模式", "条件"]
+        # 增加“步骤(step_index)”这一列
+        headers = ["类型", "步骤", "标签", "技能ID", "动作", "目标模式", "条件"]
         self._tree.setHeaderLabels(headers)
-        for i, w in enumerate([60, 120, 140, 80, 120, 140]):
+        for i, w in enumerate([60, 60, 120, 140, 80, 120, 140]):
             self._tree.setColumnWidth(i, w)
 
         root.addWidget(self._tree, 1)
@@ -242,12 +242,18 @@ class NodeListPanel(QWidget):
                 action = ""
                 target_mode = ""
 
-            item = QTreeWidgetItem([typ, label, skill_id, action, target_mode, cond_text])
+            # 步骤字段
+            try:
+                step_txt = str(int(getattr(n, "step_index", 0) or 0))
+            except Exception:
+                step_txt = "0"
+
+            item = QTreeWidgetItem([typ, step_txt, label, skill_id, action, target_mode, cond_text])
             item.setData(0, Qt.UserRole, getattr(n, "id", ""))
             self._tree.addTopLevelItem(item)
 
         self._btn_cond.setEnabled(False)
-
+        
     def _current_node_index(self) -> int:
         """
         返回当前选中节点在 Track.nodes 列表中的索引，若无选中或找不到则返回 -1。

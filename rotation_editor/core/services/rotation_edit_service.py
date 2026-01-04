@@ -456,3 +456,74 @@ class RotationEditService:
         dst_t.nodes.insert(dst_index, node)
         self._mark_dirty()
         return True
+    # ---------- 设置节点的步骤(step_index) ----------
+
+    def set_node_step(
+        self,
+        *,
+        preset: RotationPreset,
+        mode_id: Optional[str],
+        track_id: Optional[str],
+        node_id: str,
+        step_index: int,
+        order_in_step: Optional[int] = None,
+    ) -> bool:
+        """
+        设置指定节点的 step_index（以及可选的 order_in_step）：
+
+        - preset: 所属 RotationPreset
+        - mode_id: 所属模式 ID（None 表示全局轨道）
+        - track_id: 轨道 ID
+        - node_id: 节点 ID
+        - step_index: 新的步骤索引（<0 会被归零）
+        - order_in_step: 可选，同一 Step 内的相对顺序（暂时用不到可以不传）
+
+        返回：
+        - 若找到节点且值有变化，则返回 True 并标记 rotations 脏；
+        - 否则返回 False。
+        """
+        t = self.get_track(preset, mode_id, track_id)
+        if t is None:
+            return False
+
+        nid = (node_id or "").strip()
+        if not nid:
+            return False
+
+        try:
+            s_new = int(step_index)
+        except Exception:
+            s_new = 0
+        if s_new < 0:
+            s_new = 0
+
+        o_new: Optional[int]
+        if order_in_step is None:
+            o_new = None
+        else:
+            try:
+                o_new = int(order_in_step)
+            except Exception:
+                o_new = 0
+            if o_new < 0:
+                o_new = 0
+
+        for n in t.nodes:
+            if getattr(n, "id", "") == nid:
+                # 读取当前值
+                s_old = int(getattr(n, "step_index", 0) or 0)
+                o_old = int(getattr(n, "order_in_step", 0) or 0)
+
+                if s_old == s_new and (o_new is None or o_old == o_new):
+                    # 没有实际变化
+                    return False
+
+                if hasattr(n, "step_index"):
+                    setattr(n, "step_index", s_new)
+                if o_new is not None and hasattr(n, "order_in_step"):
+                    setattr(n, "order_in_step", o_new)
+
+                self._mark_dirty()
+                return True
+
+        return False

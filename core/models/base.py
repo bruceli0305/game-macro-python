@@ -130,6 +130,43 @@ class IOConfig:
 
 
 @dataclass
+class CastBarConfig:
+    """
+    施法完成判定策略（全局配置）：
+
+    - mode: "timer" | "bar"
+        * "timer": 仅按技能的 readbar_ms 等待
+        * "bar":   使用施法条像素点位判断释放完成
+    - point_id: 若 mode="bar"，引用 PointsFile 中的一个点位 ID 作为
+                “施法条读满时”的颜色基准
+    - tolerance: 颜色容差，0..255
+    """
+    mode: str = "timer"
+    point_id: str = ""
+    tolerance: int = 15
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "CastBarConfig":
+        d = as_dict(d)
+        mode = as_str(d.get("mode", "timer"), "timer").strip().lower()
+        if mode not in ("timer", "bar"):
+            mode = "timer"
+        tol = clamp_int(as_int(d.get("tolerance", 15), 15), 0, 255)
+        return CastBarConfig(
+            mode=mode,
+            point_id=as_str(d.get("point_id", "")),
+            tolerance=tol,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "point_id": self.point_id,
+            "tolerance": int(self.tolerance),
+        }
+
+
+@dataclass
 class BaseFile:
     """
     Represents base.json root object.
@@ -142,6 +179,8 @@ class BaseFile:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     pick: PickConfig = field(default_factory=PickConfig)
     io: IOConfig = field(default_factory=IOConfig)
+    # 施法完成策略（定时 / 施法条像素）
+    cast_bar: CastBarConfig = field(default_factory=CastBarConfig)
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "BaseFile":
@@ -152,6 +191,7 @@ class BaseFile:
             capture=CaptureConfig.from_dict(d.get("capture", {}) or {}),
             pick=PickConfig.from_dict(d.get("pick", {}) or {}),
             io=IOConfig.from_dict(d.get("io", {}) or {}),
+            cast_bar=CastBarConfig.from_dict(d.get("cast_bar", {}) or {}),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -161,4 +201,5 @@ class BaseFile:
             "capture": self.capture.to_dict(),
             "pick": self.pick.to_dict(),
             "io": self.io.to_dict(),
+            "cast_bar": self.cast_bar.to_dict(),
         }

@@ -83,8 +83,10 @@ def chunk_content_by_functions(content, max_lines=2000):
 def main():
     # 获取当前目录
     current_dir = os.path.dirname(os.path.abspath(__file__))
+    # 设置目标目录为 rotation_editor
+    target_dir = os.path.join(current_dir, 'rotation_editor')
     # 查找所有.py文件
-    python_files = find_python_files(current_dir)
+    python_files = find_python_files(target_dir)
     
     # 输出文件夹
     output_dir = os.path.join(current_dir, 'py_to_txt_output')
@@ -93,7 +95,7 @@ def main():
     all_content = ""
     for file_path in python_files:
         print(f'读取文件: {file_path}')
-        file_content = read_file_with_header(file_path, current_dir)
+        file_content = read_file_with_header(file_path, target_dir)
         all_content += file_content
     
     # 按函数分割整个项目内容

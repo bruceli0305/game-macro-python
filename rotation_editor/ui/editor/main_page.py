@@ -29,15 +29,25 @@ from rotation_editor.ui.editor.node_panel import NodeListPanel
 from rotation_editor.ui.editor.timeline_canvas import TimelineCanvas
 from rotation_editor.ui.editor.mode_bar import ModeTabBar
 
+from rotation_editor.core.runtime.engine import (
+    MacroEngine,
+    EngineConfig,
+    ExecutionCursor,
+    Scheduler,
+)
+
 
 class RotationEditorPage(QWidget):
     """
-    循环编辑器页：
+    循环编辑器页 + 执行引擎控制：
 
-    - 顶部：方案下拉 + 保存/重载 + 缩放控件 + 脏标记
-    - 模式：ModeTabBar + 新增/重命名/删除模式
-    - 中间：TimelineCanvas（全局 + 当前模式下轨道，含时间刻度线和网格）
-    - NodeListPanel：隐藏逻辑组件，负责节点 CRUD / 条件编辑
+    - 顶部：方案下拉 + 开始 / 暂停 / 单步 / 停止 + 保存/重载 + 缩放控件 + 脏标记
+    - 中间：TimelineCanvas
+    - 引擎控制：
+        * 开始：start()
+        * 暂停 / 继续：pause() / resume()
+        * 单步：step()（执行一轮调度迭代）
+        * 停止：stop()
     """
 
     def __init__(
@@ -46,12 +56,14 @@ class RotationEditorPage(QWidget):
         ctx: ProfileContext,
         session: ProfileSession,
         notify: UiNotify,
+        dispatcher: Scheduler,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._ctx = ctx
         self._session = session
         self._notify = notify
+        self._dispatcher = dispatcher
 
         self._preset_svc = RotationService(
             session=self._session,
@@ -70,12 +82,18 @@ class RotationEditorPage(QWidget):
         self._building = False
         self._dirty_ui = False
 
+        # 执行引擎
+        self._engine: Optional[MacroEngine] = None
+        self._engine_running: bool = False
+        self._engine_paused: bool = False
+
         self._build_ui()
         self._subscribe_store_dirty()
         self._rebuild_preset_combo()
         self._select_first_preset_if_any()
 
         self._update_zoom_label()
+        self._update_engine_buttons()
 
     # ---------- UI 构建 ----------
 
@@ -86,7 +104,7 @@ class RotationEditorPage(QWidget):
 
         style = self.style()
 
-        # 顶部：标题 + preset 下拉 + 保存/重载 + 缩放控件 + 脏标记
+        # 顶部：标题 + preset 下拉 + 控制按钮 + 保存/重载 + 缩放控件 + 脏标记
         header = QHBoxLayout()
         lbl_title = QLabel("循环编辑器", self)
         f = lbl_title.font()
@@ -101,6 +119,24 @@ class RotationEditorPage(QWidget):
         self._cmb_preset = QComboBox(self)
         self._cmb_preset.currentIndexChanged.connect(self._on_preset_changed)
         header.addWidget(self._cmb_preset, 1)
+
+        # 控制按钮：开始 / 暂停(继续) / 单步 / 停止
+        self._btn_start = QPushButton("开始", self)
+        self._btn_start.clicked.connect(self._on_start_clicked)
+        header.addWidget(self._btn_start)
+
+        self._btn_pause = QPushButton("暂停", self)
+        self._btn_pause.clicked.connect(self._on_pause_clicked)
+        header.addWidget(self._btn_pause)
+
+        self._btn_step = QPushButton("单步", self)
+        self._btn_step.clicked.connect(self._on_step_clicked)
+        header.addWidget(self._btn_step)
+
+        self._btn_stop = QPushButton("停止", self)
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self._on_stop_clicked)
+        header.addWidget(self._btn_stop)
 
         header.addSpacing(10)
 
@@ -187,6 +223,7 @@ class RotationEditorPage(QWidget):
         self._timeline_canvas.nodeContextMenuRequested.connect(self._on_timeline_node_context_menu)
         self._timeline_canvas.trackContextMenuRequested.connect(self._on_timeline_track_context_menu)
         self._timeline_canvas.trackAddRequested.connect(self._on_timeline_track_add_requested)
+        self._timeline_canvas.stepChanged.connect(self._on_timeline_step_changed)  # 新增
         self._timeline_canvas.zoomChanged.connect(self._on_canvas_zoom_changed)
 
         root.addWidget(self._timeline_canvas, 1)
@@ -217,25 +254,17 @@ class RotationEditorPage(QWidget):
     # ---------- 缩放 ----------
 
     def _on_canvas_zoom_changed(self) -> None:
-        """
-        TimelineCanvas 内部缩放变化（例如 Ctrl+滚轮）时调用：
-        - 重绘时间轴
-        - 更新缩放百分比显示
-        """
         self._refresh_timeline()
         self._update_zoom_label()
 
     def _on_zoom_in_clicked(self) -> None:
         self._timeline_canvas.zoom_in()
-        # zoomChanged 信号会触发 _on_canvas_zoom_changed
 
     def _on_zoom_out_clicked(self) -> None:
         self._timeline_canvas.zoom_out()
-        # zoomChanged 信号会触发 _on_canvas_zoom_changed
 
     def _on_zoom_reset_clicked(self) -> None:
         self._timeline_canvas.reset_zoom()
-        # zoomChanged 信号会触发 _on_canvas_zoom_changed
 
     def _update_zoom_label(self) -> None:
         ratio = self._timeline_canvas.zoom_ratio()
@@ -260,6 +289,21 @@ class RotationEditorPage(QWidget):
         self._rebuild_preset_combo()
         self._select_first_preset_if_any()
         self._update_zoom_label()
+
+        if self._engine is not None and self._engine.is_running():
+            self._engine.stop("context_changed")
+
+    # ---------- 外部：指定当前 preset ----------
+
+    def set_current_preset(self, preset_id: str) -> None:
+        pid = (preset_id or "").strip()
+        if not pid:
+            return
+        for i in range(self._cmb_preset.count()):
+            data = self._cmb_preset.itemData(i)
+            if isinstance(data, str) and data == pid:
+                self._cmb_preset.setCurrentIndex(i)
+                return
 
     # ---------- preset 相关 ----------
 
@@ -423,11 +467,6 @@ class RotationEditorPage(QWidget):
     # ---------- 轨道新增（来自画布“+”） ----------
 
     def _on_timeline_track_add_requested(self, mode_id: str) -> None:
-        """
-        处理画布左下角“+ 新增轨道”按钮：
-        - mode_id 非空 => 在该模式下新增轨道
-        - mode_id 为空 => 新增全局轨道
-        """
         preset = self._current_preset()
         if preset is None:
             self._notify.error("请先在“循环/轨道方案”页面创建一个方案")
@@ -590,7 +629,6 @@ class RotationEditorPage(QWidget):
         except Exception:
             pass
 
-        # 先获取当前节点，判断是否为网关节点
         node = self._edit_svc.get_node(
             preset=preset,
             mode_id=mode_id_s or None,
@@ -628,10 +666,9 @@ class RotationEditorPage(QWidget):
                 self._notify.error("删除节点失败", detail=str(e))
 
         elif act_cond is not None and action == act_cond:
-            # 只有网关节点才会有这个菜单
             try:
                 self._panel_nodes.set_condition_for_current()
-                changed = False  # 条件变化不影响时间轴布局
+                changed = False
             except Exception as e:
                 self._notify.error("设置条件失败", detail=str(e))
 
@@ -688,6 +725,10 @@ class RotationEditorPage(QWidget):
     # ---------- 保存 / 重载 ----------
 
     def _on_reload(self) -> None:
+        if self._engine_running:
+            self._notify.error("请先停止循环，再重新加载循环配置")
+            return
+
         ok = QMessageBox.question(
             self,
             "重新加载",
@@ -706,6 +747,10 @@ class RotationEditorPage(QWidget):
             self._notify.error("重新加载失败", detail=str(e))
 
     def _on_save(self) -> None:
+        if self._engine_running:
+            self._notify.error("请先停止循环，再保存循环配置")
+            return
+
         saved = self._preset_svc.save_cmd()
         if saved:
             self._notify.info("rotation.json 已保存")
@@ -715,6 +760,172 @@ class RotationEditorPage(QWidget):
     # ---------- flush_to_model ----------
 
     def flush_to_model(self) -> None:
-        # 当前编辑器的所有修改都是即时作用于 dataclass，
-        # 没有额外缓冲，这里保留接口以便未来扩展。
         pass
+
+    # ---------- 执行引擎：启动 / 暂停 / 单步 / 停止 ----------
+
+    def _ensure_engine(self) -> MacroEngine:
+        if self._engine is None:
+            self._engine = MacroEngine(
+                ctx=self._ctx,
+                scheduler=self._dispatcher,
+                callbacks=self,
+                config=EngineConfig(),
+            )
+        return self._engine
+
+    def _update_engine_buttons(self) -> None:
+        running = bool(self._engine_running)
+        paused = bool(self._engine_paused)
+        has_preset = self._cmb_preset.count() > 0
+
+        self._btn_start.setEnabled((not running) and has_preset)
+        self._btn_stop.setEnabled(running)
+
+        self._btn_pause.setEnabled(running)
+        self._btn_step.setEnabled(running and paused)
+
+        if paused:
+            self._btn_pause.setText("继续")
+        else:
+            self._btn_pause.setText("暂停")
+
+        # 运行时禁止切换方案 / 保存 / 重新加载
+        self._cmb_preset.setEnabled(not running)
+        self._btn_reload.setEnabled(not running)
+        self._btn_save.setEnabled(not running)
+
+    def _on_start_clicked(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._notify.error("请先选择一个方案再启动循环")
+            return
+
+        eng = self._ensure_engine()
+        if eng.is_running():
+            self._notify.status_msg("循环已在运行中", ttl_ms=1500)
+            return
+
+        try:
+            eng.start(preset)
+        except Exception as e:
+            self._notify.error("启动循环失败", detail=str(e))
+
+    def _on_pause_clicked(self) -> None:
+        if self._engine is None or not self._engine_running:
+            return
+
+        if not self._engine_paused:
+            self._engine.pause()
+            self._engine_paused = True
+            self._notify.status_msg("循环已暂停", ttl_ms=1500)
+        else:
+            self._engine.resume()
+            self._engine_paused = False
+            self._notify.status_msg("循环已继续", ttl_ms=1500)
+
+        self._update_engine_buttons()
+
+    def _on_step_clicked(self) -> None:
+        if self._engine is None or not self._engine_running:
+            return
+
+        # 确保处于暂停状态
+        self._engine.pause()
+        self._engine_paused = True
+        self._engine.step()
+        self._notify.status_msg("单步执行一次", ttl_ms=1500)
+        self._update_engine_buttons()
+
+    def _on_stop_clicked(self) -> None:
+        if self._engine is None or not self._engine.is_running():
+            return
+        try:
+            self._engine.stop("user_stop")
+        except Exception as e:
+            self._notify.error("停止循环失败", detail=str(e))
+
+    # ---------- 引擎回调 ----------
+
+    def on_started(self, preset_id: str) -> None:
+        self._engine_running = True
+        self._engine_paused = False
+        self._update_engine_buttons()
+        self._notify.status_msg(f"循环执行已启动: {preset_id}", ttl_ms=2500)
+
+    def on_stopped(self, reason: str) -> None:
+        self._engine_running = False
+        self._engine_paused = False
+        self._update_engine_buttons()
+        # 清除时间轴高亮
+        self._timeline_canvas.set_current_node(None, "", -1)
+        self._notify.status_msg(f"循环执行已停止: {reason}", ttl_ms=2500)
+
+    def on_node_executed(self, cursor: ExecutionCursor, node) -> None:
+        label = getattr(node, "label", "") or getattr(node, "name", "") or "(节点)"
+        self._notify.status_msg(f"执行节点: {label}", ttl_ms=800)
+
+        # 若执行发生在新的模式，则切换到该模式
+        mode_id = cursor.mode_id or ""
+        track_id = cursor.track_id
+        idx = int(cursor.node_index)
+
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        if mode_id and mode_id != (self._current_mode_id or ""):
+            self._current_mode_id = mode_id
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+            self._panel_nodes.set_context(self._ctx, preset=preset)
+            self._panel_nodes.set_target(mode_id, None)
+            self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+        # 高亮当前执行节点（包含全局轨道；mode_id 为空字符串时表示全局）
+        self._timeline_canvas.set_current_node(mode_id or None, track_id, idx)
+
+    def on_error(self, msg: str, detail: str) -> None:
+        self._notify.error(msg, detail=detail)
+        
+    def _on_timeline_step_changed(
+        self,
+        mode_id: str,
+        track_id: str,
+        node_id: str,
+        step_index: int,
+    ) -> None:
+        """
+        时间轴横向拖拽节点后，修改该节点的 step_index。
+        - mode_id: "" 表示全局轨道
+        """
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        mid = (mode_id or "").strip() or None
+        tid = (track_id or "").strip() or None
+
+        changed = self._edit_svc.set_node_step(
+            preset=preset,
+            mode_id=mid,
+            track_id=tid,
+            node_id=node_id or "",
+            step_index=int(step_index),
+        )
+        if not changed:
+            return
+
+        # 重新渲染时间轴
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+        # NodeListPanel 也同步刷新（显示新的步骤值）
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(mid, tid)

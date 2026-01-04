@@ -31,6 +31,11 @@ class BaseSettingsPatch:
     auto_save: bool
     backup_on_save: bool
 
+    # 施法完成策略
+    cast_mode: str              # "timer" | "bar"
+    cast_bar_point_id: str
+    cast_bar_tolerance: int
+
 
 class BaseSettingsService:
     """
@@ -66,6 +71,12 @@ class BaseSettingsService:
         _ = clamp_int(int(patch.mouse_avoid_offset_y), 0, 500)
         _ = clamp_int(int(patch.mouse_avoid_settle_ms), 0, 500)
 
+        # 施法完成模式 / 容差校验
+        mode = (patch.cast_mode or "timer").strip().lower()
+        if mode not in ("timer", "bar"):
+            raise ValueError("施法完成模式只能是 'timer' 或 'bar'")
+        _ = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
+
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         theme = (patch.theme or "").strip()
         if theme == "---" or not theme:
@@ -88,6 +99,14 @@ class BaseSettingsService:
 
         b.io.auto_save = bool(patch.auto_save)
         b.io.backup_on_save = bool(patch.backup_on_save)
+
+        # 施法完成策略
+        cmode = (patch.cast_mode or "timer").strip().lower()
+        if cmode not in ("timer", "bar"):
+            cmode = "timer"
+        b.cast_bar.mode = cmode
+        b.cast_bar.point_id = (patch.cast_bar_point_id or "").strip()
+        b.cast_bar.tolerance = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
 
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
         self.validate_patch(patch)

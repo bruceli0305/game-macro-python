@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFormLayout,
     QStyle,
+    QLineEdit,
+    QInputDialog,
 )
 from PySide6.QtCore import QTimer
 
@@ -63,6 +65,7 @@ class BaseSettingsPage(QWidget):
     - “重新加载”按钮调用 reload_cmd
     - 通过 ProfileSession.subscribe_dirty 显示“未保存*”
     - 取色确认热键使用 HotkeyEdit 录制
+    - 新增：施法完成策略配置（定时 / 施法条像素）
     """
 
     def __init__(
@@ -117,16 +120,18 @@ class BaseSettingsPage(QWidget):
 
         vbox.addLayout(header)
 
-        # 三个分组
+        # 两列容器
+        cols = QHBoxLayout()
+        cols.setSpacing(10)
+        vbox.addLayout(cols, 1)
+
+        left_col = QVBoxLayout()
+        right_col = QVBoxLayout()
+        cols.addLayout(left_col, 1)
+        cols.addLayout(right_col, 1)
+
+        # ---- 左列：界面 / 截图 / 取色确认 ----
         g_ui = QGroupBox("界面 / 截图 / 取色确认", self)
-        g_pick = QGroupBox("取色避让 / 预览 / 鼠标避让", self)
-        g_io = QGroupBox("保存策略", self)
-
-        vbox.addWidget(g_ui)
-        vbox.addWidget(g_pick)
-        vbox.addWidget(g_io)
-
-        # group: UI / capture / confirm
         form_ui = QFormLayout(g_ui)
 
         # 主题
@@ -147,7 +152,10 @@ class BaseSettingsPage(QWidget):
         hint = QLabel("提示：Esc 固定为取消", g_ui)
         form_ui.addRow("", hint)
 
-        # group: pick avoidance / preview / mouse avoidance
+        left_col.addWidget(g_ui)
+
+        # 取色避让 / 预览 / 鼠标避让
+        g_pick = QGroupBox("取色避让 / 预览 / 鼠标避让", self)
         form_pick = QFormLayout(g_pick)
 
         self.cmb_avoid_mode = QComboBox(g_pick)
@@ -194,7 +202,38 @@ class BaseSettingsPage(QWidget):
         self.spin_mouse_avoid_settle_ms.setSingleStep(10)
         form_pick.addRow("避让后等待(ms)", self.spin_mouse_avoid_settle_ms)
 
-        # group: IO
+        left_col.addWidget(g_pick)
+
+        # ---- 右列：施法完成策略 + 保存策略 ----
+        g_cast = QGroupBox("施法完成 / 执行策略", self)
+        form_cast = QFormLayout(g_cast)
+
+        self.cmb_cast_mode = QComboBox(g_cast)
+        self.cmb_cast_mode.addItems([
+            "仅按技能读条时间",      # "timer"
+            "使用施法条像素判断",    # "bar"
+        ])
+        form_cast.addRow("施法完成模式", self.cmb_cast_mode)
+
+        # 施法条点位 ID + 选择按钮
+        row_cast_point = QHBoxLayout()
+        self.txt_cast_point_id = QLineEdit(g_cast)
+        self.txt_cast_point_id.setPlaceholderText("施法条点位 ID（来自“取色点位配置”）")
+        btn_select_point = QPushButton("选择...", g_cast)
+        btn_select_point.clicked.connect(self._on_select_cast_point)
+        row_cast_point.addWidget(self.txt_cast_point_id, 1)
+        row_cast_point.addWidget(btn_select_point)
+        form_cast.addRow("施法条点位 ID", row_cast_point)
+
+        self.spin_cast_tol = QSpinBox(g_cast)
+        self.spin_cast_tol.setRange(0, 255)
+        self.spin_cast_tol.setSingleStep(1)
+        self.spin_cast_tol.setValue(15)
+        form_cast.addRow("施法条颜色容差", self.spin_cast_tol)
+
+        right_col.addWidget(g_cast)
+
+        g_io = QGroupBox("保存策略", self)
         form_io = QFormLayout(g_io)
 
         self.chk_auto_save = QCheckBox("自动保存（CRUD 时生效）", g_io)
@@ -202,6 +241,8 @@ class BaseSettingsPage(QWidget):
 
         form_io.addRow(self.chk_auto_save)
         form_io.addRow(self.chk_backup)
+
+        right_col.addWidget(g_io)
 
         # buttons
         btn_row = QHBoxLayout()
@@ -287,6 +328,26 @@ class BaseSettingsPage(QWidget):
             # IO
             self.chk_auto_save.setChecked(bool(b.io.auto_save))
             self.chk_backup.setChecked(bool(b.io.backup_on_save))
+
+            # 施法完成策略
+            cb = getattr(b, "cast_bar", None)
+            if cb is None:
+                mode = "timer"
+                pid = ""
+                tol = 15
+            else:
+                mode = (getattr(cb, "mode", "timer") or "timer").strip().lower()
+                pid = getattr(cb, "point_id", "") or ""
+                tol = int(getattr(cb, "tolerance", 15) or 15)
+
+            if mode == "bar":
+                self.cmb_cast_mode.setCurrentText("使用施法条像素判断")
+            else:
+                self.cmb_cast_mode.setCurrentText("仅按技能读条时间")
+
+            self.txt_cast_point_id.setText(pid)
+            self.spin_cast_tol.setValue(tol)
+
         finally:
             self._building = False
 
@@ -304,6 +365,10 @@ class BaseSettingsPage(QWidget):
         avoid_mode = _AVOID_DISP_TO_VAL.get(self.cmb_avoid_mode.currentText(), "hide_main")
         preview_anchor = _ANCHOR_DISP_TO_VAL.get(self.cmb_preview_anchor.currentText(), "bottom_right")
 
+        # 施法模式映射
+        cast_mode_disp = self.cmb_cast_mode.currentText()
+        cast_mode = "timer" if cast_mode_disp.startswith("仅按") else "bar"
+
         return BaseSettingsPatch(
             theme=theme or "darkly",
             monitor_policy=monitor_policy,
@@ -319,6 +384,10 @@ class BaseSettingsPage(QWidget):
             mouse_avoid_settle_ms=clamp_int(int(self.spin_mouse_avoid_settle_ms.value()), 0, 500),
             auto_save=bool(self.chk_auto_save.isChecked()),
             backup_on_save=bool(self.chk_backup.isChecked()),
+
+            cast_mode=cast_mode,
+            cast_bar_point_id=self.txt_cast_point_id.text(),
+            cast_bar_tolerance=int(self.spin_cast_tol.value()),
         )
 
     # ---------- 热键校验 ----------
@@ -350,7 +419,7 @@ class BaseSettingsPage(QWidget):
             self._validate_confirm_hotkey_live()
             self._apply_timer.start(200)
 
-        # combobox / spinbox / checkbox
+        # combobox / spinbox / checkbox / lineedit
         self.cmb_theme.currentTextChanged.connect(on_any_changed)
         self.cmb_monitor.currentTextChanged.connect(on_any_changed)
         self.hk_confirm.hotkeyChanged.connect(on_any_changed)
@@ -366,6 +435,11 @@ class BaseSettingsPage(QWidget):
         self.chk_auto_save.toggled.connect(on_any_changed)
         self.chk_backup.toggled.connect(on_any_changed)
 
+        # 施法完成策略
+        self.cmb_cast_mode.currentTextChanged.connect(on_any_changed)
+        self.txt_cast_point_id.textChanged.connect(on_any_changed)
+        self.spin_cast_tol.valueChanged.connect(on_any_changed)
+
     def _apply_now(self) -> None:
         if self._building:
             return
@@ -375,6 +449,36 @@ class BaseSettingsPage(QWidget):
         except Exception:
             # 验证错误等已在 live 校验中提示，这里忽略
             pass
+
+    # ---------- 施法条点位选择 ----------
+
+    def _on_select_cast_point(self) -> None:
+        """
+        从当前 Profile 的点位列表中选择一个作为施法条点位。
+        """
+        pts = list(getattr(self._ctx.points, "points", []) or [])
+        if not pts:
+            self._notify.error("当前 Profile 下没有点位，请先在“取色点位配置”页面添加点位。")
+            return
+
+        items = [f"{p.name or '(未命名)'} [{(p.id or '')[-6:]}]" for p in pts]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "选择施法条点位",
+            "请选择施法条所在的点位：",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        try:
+            idx = items.index(choice)
+        except ValueError:
+            idx = 0
+        p = pts[idx]
+        self.txt_cast_point_id.setText(p.id or "")
 
     # ---------- 按钮动作 ----------
 

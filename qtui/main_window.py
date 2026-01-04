@@ -208,6 +208,7 @@ class MainWindow(QMainWindow):
             ctx=self._ctx,
             session=self.services.session,
             notify=self.notify,
+            dispatcher=self.dispatcher,  # 新增：将 QtDispatcher 作为 Scheduler 传给执行引擎
             parent=self,
         )
 
@@ -509,7 +510,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            self._page_rotation_editor.set_current_preset(pid)
+            self._page_rotation_editor.set_context(self._ctx)  # 确保上下文同步
         except Exception:
             pass
 

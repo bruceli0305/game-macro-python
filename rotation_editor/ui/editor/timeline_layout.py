@@ -106,6 +106,16 @@ def build_timeline_layout(
         * 非空 => 显示全局轨道 + 对应模式下所有轨道
     - time_scale_px_per_ms: 时间缩放比例（像素/毫秒），例如 0.06 表示 1s = 60px
 
+    时间轴语义（升级版）：
+
+    - 对每条轨道 Track：
+        * 若该轨道上至少有一个节点的 step_index > 0，则启用“步骤轴布局”：
+            - start_ms = step_index * STEP_MS（STEP_MS 为一个显示用的常数）
+            - end_ms   = start_ms + duration_ms
+        * 若所有节点的 step_index 都为 0（默认情况），退回到旧有逻辑：
+            - 该轨道内部按节点顺序，从 0 累加 duration_ms 作为 start_ms/end_ms。
+      注意：步轴布局仅影响“显示位置”，实际执行顺序由运行时引擎决定。
+
     返回：
     - 若 ctx 或 preset 为 None，则返回空列表
     - 否则返回若干 TrackVisualSpec，顺序为：
@@ -123,6 +133,9 @@ def build_timeline_layout(
 
     rows: List[TrackVisualSpec] = []
 
+    # 显示用步骤宽度（毫秒）：仅用于布局，不是实际读条时间
+    STEP_MS = 1000
+
     def build_row(
         track: Track,
         title_prefix: str,
@@ -130,8 +143,11 @@ def build_timeline_layout(
     ) -> TrackVisualSpec:
         """
         为单条轨道构建 TrackVisualSpec。
-        即使该轨道没有任何节点，也会返回 nodes=[] 的 TrackVisualSpec，
-        以便 UI 仍然能显示轨道名称和“新增轨道/新增节点”等入口。
+
+        - 若轨道没有任何节点，仍然返回 nodes=[] 的 TrackVisualSpec，
+          以便 UI 仍然能显示轨道名称和“新增轨道/新增节点”等入口。
+        - 若该轨道上有节点且存在 step_index>0，则按 step_index*STEP_MS
+          决定 start_ms；否则退回旧行为：按顺序累加 duration。
         """
         title = f"{title_prefix}{track.name or '(未命名)'}"
 
@@ -145,14 +161,43 @@ def build_timeline_layout(
             )
 
         nodes_vs: List[NodeVisualSpec] = []
+
+        # 先收集所有节点的 step_index，判断是否启用步骤轴
+        step_vals: List[int] = []
+        for n in track.nodes:
+            try:
+                s = int(getattr(n, "step_index", 0) or 0)
+            except Exception:
+                s = 0
+            if s < 0:
+                s = 0
+            step_vals.append(s)
+        use_step_axis = bool(step_vals and max(step_vals) > 0)
+
         cur_t = 0
+        max_end = 0
+
         for n in track.nodes:
             d = _node_duration_ms(n, skills_by_id)
             if d < 0:
                 d = 0
-            start = cur_t
-            end = cur_t + d
-            cur_t = end
+
+            # 决定 start_ms / end_ms
+            if use_step_axis:
+                try:
+                    s = int(getattr(n, "step_index", 0) or 0)
+                except Exception:
+                    s = 0
+                if s < 0:
+                    s = 0
+                start = s * STEP_MS
+            else:
+                start = cur_t
+                cur_t += d
+
+            end = start + d
+            if end > max_end:
+                max_end = end
 
             # 像素宽度：duration * scale，限制在 [min_node_px, max_node_px]
             w = float(d) * float(time_scale_px_per_ms)
@@ -193,7 +238,7 @@ def build_timeline_layout(
                 )
             )
 
-        total_duration = int(cur_t)
+        total_duration = int(max_end if use_step_axis else cur_t)
         return TrackVisualSpec(
             mode_id=mode_id_for_track,
             track_id=track.id or "",

@@ -55,11 +55,18 @@ class TimelineCanvas(QGraphicsView):
     - 在最后一条轨道之后（或无轨道时）画一个“新增轨道”按钮，下方 -> trackAddRequested(mode_id)
       * mode_id == "" 表示新增全局轨道
     - Ctrl+滚轮缩放时间轴（仅改变时间→像素映射，不改变业务数据），缩放变化时发 zoomChanged()
+
+    新增：
+    - set_current_node(mode_id, track_id, node_index) 高亮当前执行节点：
+        * 使用黄色粗描边 + 提升 Z 值
+        * 自动滚动到节点位置附近
     """
 
     nodeClicked = Signal(str, str, int)
     nodesReordered = Signal(str, str, list)
     nodeCrossMoved = Signal(str, str, str, str, int, str)
+
+    stepChanged = Signal(str, str, str, int)
 
     nodeContextMenuRequested = Signal(str, str, int, int, int)
     trackContextMenuRequested = Signal(str, str, int, int)
@@ -74,7 +81,7 @@ class TimelineCanvas(QGraphicsView):
 
         # 顶部标尺高度
         self._ruler_height = 24
-        # 轨道行（高度 + 间距）与左侧标签宽度（之前已调小间距）
+        # 轨道行（高度 + 间距）与左侧标签宽度
         self._row_height = 44
         self._row_gap = 4
         self._label_width = 160
@@ -87,7 +94,29 @@ class TimelineCanvas(QGraphicsView):
         self._time_scale_min = 0.01      # 1s ≈ 10px
         self._time_scale_max = 0.3       # 1s ≈ 300px
 
+        # 步骤对应的“显示毫秒”：必须和 build_timeline_layout 里的 STEP_MS 一致
+        self._step_ms = 1000
+
         self._row_keys: Dict[int, Tuple[str, str]] = {}
+
+        # 每个轨道对应的 rect items 顺序：key=(mode_id, track_id)
+        self._track_items: Dict[Tuple[str, str], List[QGraphicsRectItem]] = {}
+
+        # 拖拽状态
+        self._drag_item: Optional[QGraphicsRectItem] = None
+        self._drag_row_key: Optional[Tuple[str, str]] = None
+        self._drag_start_pos: QPointF = QPointF()
+        self._drag_start_scene_pos: QPointF = QPointF()
+        self._drag_row_y: float = 0.0
+
+        # 当前高亮节点
+        self._current_item: Optional[QGraphicsRectItem] = None
+        self._current_key: Optional[Tuple[str, str]] = None
+        self._current_index: Optional[int] = None
+
+        # 标准画笔
+        self._normal_pen = QPen(QColor(210, 210, 210), 1.0)
+        self._highlight_pen = QPen(QColor(255, 255, 0), 2.0)
 
         # 渲染参数
         self.setRenderHint(QPainter.Antialiasing, True)
@@ -108,16 +137,6 @@ class TimelineCanvas(QGraphicsView):
         self._ctx: Optional[ProfileContext] = None
         self._preset: Optional[RotationPreset] = None
         self._current_mode_id: Optional[str] = None
-
-        # 拖拽状态
-        self._drag_item: Optional[QGraphicsRectItem] = None
-        self._drag_row_key: Optional[Tuple[str, str]] = None
-        self._drag_start_pos: QPointF = QPointF()
-        self._drag_start_scene_pos: QPointF = QPointF()
-        self._drag_row_y: float = 0.0
-
-        # 每个轨道对应的 rect items 顺序：key=(mode_id, track_id)
-        self._track_items: Dict[Tuple[str, str], List[QGraphicsRectItem]] = {}
 
     # ---------- 时间缩放 API ----------
 
@@ -160,12 +179,24 @@ class TimelineCanvas(QGraphicsView):
         preset: Optional[RotationPreset],
         current_mode_id: Optional[str],
     ) -> None:
+        """
+        重建场景内容：
+
+        - ctx / preset 为 None 时清空。
+        - rows 由 build_timeline_layout 构建：
+            * 每个 TrackVisualSpec 包含 nodes 的 start_ms / width。
+        - 本方法根据 NodeVisualSpec.start_ms * time_scale_px_per_ms
+          计算节点的 X 位置，而不再简单按顺序平铺。
+        """
         self._scene.clear()
         self._track_items.clear()
         self._row_keys.clear()
         self._ctx = ctx
         self._preset = preset
         self._current_mode_id = (current_mode_id or "").strip() or None
+
+        # 不清除 key/index，只清除旧的 item 引用，后续重建后会尝试重新应用高亮
+        self._current_item = None
 
         if ctx is None or preset is None:
             return
@@ -193,7 +224,7 @@ class TimelineCanvas(QGraphicsView):
 
         track_area_top = self._ruler_height
 
-        # 无轨道：略（与之前版本一致）-------------------------
+        # 无轨道
         if not rows:
             x_extent = float(self._label_width + 300)
             view = self.viewport()
@@ -251,7 +282,6 @@ class TimelineCanvas(QGraphicsView):
                 total_height,
             )
             return
-        # ----------------------------------------------------
 
         # 有轨道
         for row in rows:
@@ -268,14 +298,17 @@ class TimelineCanvas(QGraphicsView):
             )
             self._scene.addItem(label_item)
 
-            key = (row.mode_id, row.track_id)
+            key = (row.mode_id or "", row.track_id or "")
             self._row_keys[row_index] = key
 
-            x = self._label_width
             rect_items: List[QGraphicsRectItem] = []
+            row_x_max = float(self._label_width)
 
             for idx, nvs in enumerate(row.nodes):
                 w = nvs.width
+
+                # 根据 start_ms 映射到像素坐标
+                x = float(self._label_width) + float(nvs.start_ms) * float(self._time_scale_px_per_ms)
 
                 rect = QRectF(0, -self._node_height / 2.0, w, self._node_height)
                 item = QGraphicsRectItem(rect)
@@ -295,15 +328,14 @@ class TimelineCanvas(QGraphicsView):
                 else:
                     fill = QColor(130, 130, 130)
 
-                pen = QPen(QColor(210, 210, 210), 1.0)
-                item.setPen(pen)
+                item.setPen(self._normal_pen)
                 item.setBrush(QBrush(fill))
                 item.setToolTip(self._node_tooltip_meta(nvs))
 
-                item.setData(0, row.mode_id)   # mode_id
-                item.setData(1, row.track_id)  # track_id
-                item.setData(2, idx)           # node_index
-                item.setData(3, nvs.node_id)   # node_id
+                item.setData(0, row.mode_id or "")   # mode_id
+                item.setData(1, row.track_id or "")  # track_id
+                item.setData(2, idx)                 # node_index（行内索引，用于点击）
+                item.setData(3, nvs.node_id)         # node_id
 
                 self._scene.addItem(item)
 
@@ -316,10 +348,10 @@ class TimelineCanvas(QGraphicsView):
                 text_item2.setBrush(QColor(255, 255, 255))
 
                 rect_items.append(item)
-                x += w + self._x_gap
+                row_x_max = max(row_x_max, x + w)
 
             self._track_items[key] = rect_items
-            x_max = max(x_max, x)
+            x_max = max(x_max, row_x_max)
             row_index += 1
 
         last_row_index = len(rows) - 1
@@ -373,6 +405,74 @@ class TimelineCanvas(QGraphicsView):
             max(total_height, 240),
         )
 
+        # 若之前有记忆的 current_key/index，则尝试恢复高亮
+        if self._current_key is not None and self._current_index is not None:
+            self._reapply_highlight()
+
+    # ---------- 高亮当前节点 ----------
+
+    def _clear_highlight(self) -> None:
+        if self._current_item is not None:
+            try:
+                self._current_item.setPen(self._normal_pen)
+                self._current_item.setZValue(0)
+            except Exception:
+                pass
+        self._current_item = None
+
+    def _reapply_highlight(self) -> None:
+        key = self._current_key
+        idx = self._current_index
+        if key is None or idx is None:
+            return
+        items = self._track_items.get(key)
+        if not items:
+            return
+        if idx < 0 or idx >= len(items):
+            return
+        self._apply_highlight(items[idx])
+
+    def _apply_highlight(self, item: QGraphicsRectItem) -> None:
+        # 清除旧的
+        self._clear_highlight()
+        # 应用于新的
+        self._current_item = item
+        try:
+            item.setPen(self._highlight_pen)
+            item.setZValue(10)
+            # 自动滚动到节点附近
+            rect = item.sceneBoundingRect().adjusted(-20, -20, 20, 20)
+            self.ensureVisible(rect, xMargin=10, yMargin=10)
+        except Exception:
+            pass
+
+    def set_current_node(self, mode_id: Optional[str], track_id: str, node_index: int) -> None:
+        """
+        高亮当前执行节点（由引擎回调驱动）：
+        - mode_id: None/"" 表示全局轨道
+        - track_id: 轨道 ID
+        - node_index: 节点在轨道中的索引；若 <0 则清除高亮
+        """
+        if node_index < 0:
+            # 清除高亮
+            self._current_key = None
+            self._current_index = None
+            self._clear_highlight()
+            return
+
+        key = ((mode_id or "") or "", track_id or "")
+        self._current_key = key
+        self._current_index = int(node_index)
+
+        items = self._track_items.get(key)
+        if not items:
+            # 当前视图中不含该轨道（可能在其他模式），不做处理
+            return
+        idx = int(node_index)
+        if idx < 0 or idx >= len(items):
+            return
+        self._apply_highlight(items[idx])
+
     # ---------- 时间刻度线 + 网格 ----------
 
     def _draw_time_ruler_and_grid(
@@ -382,38 +482,38 @@ class TimelineCanvas(QGraphicsView):
         x_extent: float,
         grid_bottom: float,
     ) -> None:
-        if max_time_ms <= 0:
-            max_time_ms = 5000
+        """
+        绘制顶部标尺 + 垂直网格（步骤版本）：
 
+        - 不再按“秒”刻度（0s / 5s / 10s），改为按 Step 刻度：
+            * Step0, Step1, Step2, ... （整数步骤）
+        - 每个 Step 的显示宽度由 _step_ms * _time_scale_px_per_ms 决定，
+          必须与 build_timeline_layout 里使用的 STEP_MS 一致。
+        """
         scale = float(self._time_scale_px_per_ms)
         if scale <= 0:
             return
 
+        # 步骤对应的“显示毫秒”（与 build_timeline_layout 中 STEP_MS 保持一致）
+        try:
+            step_ms = int(getattr(self, "_step_ms", 1000) or 1000)
+        except Exception:
+            step_ms = 1000
+        if step_ms <= 0:
+            step_ms = 1000
+
         start_x = float(self._label_width)
         ruler_bottom = float(self._ruler_height) - 2.0
 
-        candidates_ms = [200, 500, 1000, 2000, 5000, 10000]
-        target_px = 80.0
-        best_ms = candidates_ms[0]
-        best_diff = float("inf")
+        if max_time_ms <= 0:
+            max_time_ms = step_ms
 
-        for ms in candidates_ms:
-            tick_px = ms * scale
-            if tick_px <= 0:
-                continue
-            diff = abs(tick_px - target_px)
-            if 40.0 <= tick_px <= 200.0:
-                if diff < best_diff:
-                    best_diff = diff
-                    best_ms = ms
-            elif best_diff == float("inf"):
-                if diff < best_diff:
-                    best_diff = diff
-                    best_ms = ms
-
-        tick_ms = best_ms
-
-        major_every = 5
+        # 覆盖“场景中真实需要的时间范围”和“当前视口宽度反推的可见范围”
+        visible_ms = int(max(0.0, (x_extent - start_x) / scale))
+        max_ms = max(max_time_ms, visible_ms)
+        # 至少一个 Step
+        import math
+        max_step = max(1, int(math.ceil(max_ms / float(step_ms))))
 
         pen_grid = QPen(QColor(70, 70, 70), 1.0, Qt.DashLine)
         pen_ruler = QPen(QColor(150, 150, 150), 1.0)
@@ -421,7 +521,7 @@ class TimelineCanvas(QGraphicsView):
         font_small = QFont(font)
         font_small.setPointSize(max(font.pointSize() - 1, 6))
 
-        # 横向基线
+        # 顶部横线
         self._scene.addLine(
             start_x,
             ruler_bottom,
@@ -430,22 +530,11 @@ class TimelineCanvas(QGraphicsView):
             pen_ruler,
         )
 
-        # 保证刻度线至少铺满当前 x_extent：根据宽度反推“可见时间”
-        visible_ms = int(max(0.0, (x_extent - start_x) / scale))
-        max_ruler_ms = max(max_time_ms, visible_ms)
-
-        t = 0
-        idx = 0
-        while t <= max_ruler_ms:
+        for step in range(0, max_step + 1):
+            t = step * step_ms
             x = start_x + t * scale
             if x > x_extent:
                 break
-
-            is_major = (idx % major_every == 0)
-
-            pen_grid_use = pen_grid
-            if is_major:
-                pen_grid_use = QPen(QColor(90, 90, 90), 1.0, Qt.DashLine)
 
             # 垂直网格线
             self._scene.addLine(
@@ -453,11 +542,11 @@ class TimelineCanvas(QGraphicsView):
                 ruler_bottom,
                 x,
                 grid_bottom,
-                pen_grid_use,
+                pen_grid,
             )
 
             # 刻度小线
-            tick_len = 6.0 if is_major else 3.0
+            tick_len = 6.0
             self._scene.addLine(
                 x,
                 ruler_bottom,
@@ -466,22 +555,16 @@ class TimelineCanvas(QGraphicsView):
                 pen_ruler,
             )
 
-            # 时间文字（大刻度）
-            if is_major:
-                secs = t / 1000.0
-                label = f"{secs:g}s"
-                text_item = QGraphicsSimpleTextItem(label)
-                text_item.setFont(font_small)
-                text_item.setBrush(QColor(200, 200, 200))
-                tb = text_item.boundingRect()
-                tx = x - tb.width() / 2.0
-                ty = ruler_bottom - tick_len - tb.height()
-                text_item.setPos(tx, ty)
-                self._scene.addItem(text_item)
-
-            t += tick_ms
-            idx += 1
-
+            # 步骤号文字：0, 1, 2, ...
+            label = f"{step}"
+            text_item = QGraphicsSimpleTextItem(label)
+            text_item.setFont(font_small)
+            text_item.setBrush(QColor(200, 200, 200))
+            tb = text_item.boundingRect()
+            tx = x - tb.width() / 2.0
+            ty = ruler_bottom - tick_len - tb.height()
+            text_item.setPos(tx, ty)
+            self._scene.addItem(text_item)
     # ---------- 鼠标事件：点击 & 拖拽 & 缩放 ----------
 
     def mousePressEvent(self, event) -> None:
@@ -596,23 +679,37 @@ class TimelineCanvas(QGraphicsView):
                 if row_top <= y <= row_top + self._row_height:
                     dest_key = self._row_keys.get(row_index)
 
+            # ---------- 同一轨道内拖拽：解释为“修改 step_index” ----------
             if dest_key is None or dest_key == src_key:
-                if src_items:
-                    new_items = reflow_row_items_for_drag(
-                        items=src_items,
-                        drag_item=self._drag_item,
-                        label_width=float(self._label_width),
-                        x_gap=float(self._x_gap),
+                # 计算新的 step_index（按拖拽后位置四舍五入到最近的 Step 列）
+                rect = self._drag_item.rect()
+                x_item = float(self._drag_item.pos().x())
+                center_x = x_item + rect.width() / 2.0
+
+                step_w = max(float(self._time_scale_px_per_ms) * float(self._step_ms), 1.0)
+                rel = center_x - float(self._label_width)
+                if rel < 0.0:
+                    rel = 0.0
+                new_step = int(round(rel / step_w))
+                if new_step < 0:
+                    new_step = 0
+
+                # 将拖拽的 item 临时吸附到新的 Step 列（视觉上不留在“中间”）
+                new_x = float(self._label_width) + new_step * step_w
+                self._drag_item.setPos(new_x, self._drag_item.pos().y())
+
+                # 发出步骤变化信号：由外层编辑器负责写回模型并刷新画布
+                src_mid, src_tid = src_key
+                nid = self._drag_item.data(3)
+                if isinstance(nid, str):
+                    self.stepChanged.emit(
+                        src_mid or "",
+                        src_tid or "",
+                        nid,
+                        int(new_step),
                     )
-                    self._track_items[src_key] = new_items
-                    node_ids: List[str] = []
-                    for it in new_items:
-                        nid = it.data(3)
-                        if isinstance(nid, str):
-                            node_ids.append(nid)
-                    if len(node_ids) >= 2:
-                        mid, tid = src_key
-                        self.nodesReordered.emit(mid, tid, node_ids)
+
+            # ---------- 跨轨道拖拽：仍然走“节点跨轨道移动”逻辑 ----------
             else:
                 dst_items = self._track_items.get(dest_key, [])
                 if dst_items:
@@ -693,13 +790,3 @@ class TimelineCanvas(QGraphicsView):
                 lines.append(f"condition={nvs.condition_name}")
             return "\n".join(lines)
         return f"Node: {nvs.label}\nnode_id={nvs.node_id}, duration={nvs.duration_ms}ms"
-
-    def _node_tooltip(self, n: Node) -> str:
-        if isinstance(n, SkillNode):
-            return f"SkillNode: {n.label or ''}\nskill_id={n.skill_id}"
-        if isinstance(n, GatewayNode):
-            return (
-                f"GatewayNode: {n.label or ''}\n"
-                f"action={n.action}, target_mode_id={n.target_mode_id or ''}"
-            )
-        return f"Node: {getattr(n, 'kind', '')}"

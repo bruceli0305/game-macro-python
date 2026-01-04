@@ -15,12 +15,20 @@ class Node:
     - id: 节点 ID（字符串）
     - label: UI 上展示用的短标签（例如 "2" / "A→B" 等）
 
+    新增：
+    - step_index: 该节点所属的“步骤”（Step），用于步骤轴调度（>=0）
+    - order_in_step: 同一 Step 内的相对顺序（>=0）
+
     实际使用时一般是 SkillNode 或 GatewayNode 子类。
     """
 
     id: str = ""
     kind: str = "skill"
     label: str = ""
+
+    # 步骤轴相关字段（步骤号 + 步内顺序）
+    step_index: int = 0
+    order_in_step: int = 0
 
     # ---------- 工厂方法 ----------
 
@@ -47,6 +55,8 @@ class Node:
             "id": self.id,
             "kind": self.kind,
             "label": self.label,
+            "step_index": int(self.step_index),
+            "order_in_step": int(self.order_in_step),
         }
 
 
@@ -59,6 +69,10 @@ class SkillNode(Node):
     - skill_id: 引用 skills.json 中的 Skill.id
     - override_cast_ms: 可选，覆盖 Skill.cast.readbar_ms
     - comment: 备注（UI 展示用）
+
+    继承自 Node 的：
+    - step_index: 所属步骤
+    - order_in_step: 同一步骤内顺序
     """
 
     skill_id: str = ""
@@ -70,6 +84,10 @@ class SkillNode(Node):
         d = as_dict(d)
         node_id = as_str(d.get("id", ""))
         label = as_str(d.get("label", ""))
+
+        # 步骤轴字段（兼容旧数据，缺省为 0）
+        step_index = as_int(d.get("step_index", 0), 0)
+        order_in_step = as_int(d.get("order_in_step", 0), 0)
 
         skill_id = as_str(d.get("skill_id", ""))
         oc_raw = d.get("override_cast_ms", None)
@@ -85,6 +103,8 @@ class SkillNode(Node):
             id=node_id,
             kind="skill",
             label=label,
+            step_index=step_index,
+            order_in_step=order_in_step,
             skill_id=skill_id,
             override_cast_ms=override_cast_ms,
             comment=comment,
@@ -95,6 +115,8 @@ class SkillNode(Node):
             "id": self.id,
             "kind": "skill",
             "label": self.label,
+            "step_index": int(self.step_index),
+            "order_in_step": int(self.order_in_step),
             "skill_id": self.skill_id,
             "comment": self.comment,
         }
@@ -119,6 +141,10 @@ class GatewayNode(Node):
         - "end": 结束当前模式/轨道
     - target_mode_id / target_track_id / target_node_index:
         动作需要的目标参数（视 action 而定）
+
+    继承自 Node 的：
+    - step_index: 所属步骤
+    - order_in_step: 同一步骤内顺序
     """
 
     condition_id: Optional[str] = None
@@ -132,6 +158,10 @@ class GatewayNode(Node):
         d = as_dict(d)
         node_id = as_str(d.get("id", ""))
         label = as_str(d.get("label", ""))
+
+        # 步骤轴字段（兼容旧数据，缺省为 0）
+        step_index = as_int(d.get("step_index", 0), 0)
+        order_in_step = as_int(d.get("order_in_step", 0), 0)
 
         cond_id = d.get("condition_id", None)
         if cond_id is not None:
@@ -158,6 +188,8 @@ class GatewayNode(Node):
             id=node_id,
             kind="gateway",
             label=label,
+            step_index=step_index,
+            order_in_step=order_in_step,
             condition_id=cond_id or None,
             action=action,
             target_mode_id=t_mode or None,
@@ -170,6 +202,8 @@ class GatewayNode(Node):
             "id": self.id,
             "kind": "gateway",
             "label": self.label,
+            "step_index": int(self.step_index),
+            "order_in_step": int(self.order_in_step),
             "action": self.action,
         }
         if self.condition_id:
