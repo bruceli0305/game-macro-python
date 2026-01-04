@@ -43,14 +43,27 @@ log = logging.getLogger(__name__)
 class AtomCond:
     """
     UI 内部使用的原子条件结构：
-    - kind: "pixel_point" | "pixel_skill"
-    - ref_id: point_id 或 skill_id
-    - tolerance: 容差 0..255
+
+    - kind:
+        * "pixel_point"   : 点位颜色匹配
+        * "pixel_skill"   : 技能像素匹配
+        * "skill_cast_ge" : 技能施放次数 >= N
+
+    - ref_id:
+        * 对于 pixel_point : point_id
+        * 对于 pixel_skill / skill_cast_ge : skill_id
+
+    - value:
+        * pixel_*  : 容差（0..255）
+        * skill_cast_ge : 次数 N (>=1)
+
     - neg: 是否取反（NOT）
+        * 对 pixel_*    : NOT(颜色匹配)
+        * 对 skill_cast_ge : NOT(施放次数 >= N) == (施放次数 < N)
     """
     kind: str
     ref_id: str
-    tolerance: int
+    value: int
     neg: bool = False
 
 
@@ -62,7 +75,9 @@ class ConditionEditorDialog(QDialog):
     - 右侧：当前条件的 basic + AST 构建器：
         * 名称
         * 顶层逻辑：全部满足 (AND) / 任一满足 (OR)
-        * 原子条件列表（仅支持像素条件：点位 / 技能像素 + 取反 + 容差）
+        * 原子条件列表：
+            - 像素条件：点位 / 技能像素 + 取反 + 容差
+            - 技能次数条件：技能施放次数 >= N + 取反
 
     数据结构：
     - Condition.kind="expr_tree_v1"
@@ -74,6 +89,7 @@ class ConditionEditorDialog(QDialog):
         * 原子节点：
           - {"type": "pixel_point", "point_id": "...", "tolerance": 10}
           - {"type": "pixel_skill", "skill_id": "...", "tolerance": 5}
+          - {"type": "skill_cast_ge", "skill_id": "...", "count": 3}
     """
 
     def __init__(
@@ -118,10 +134,9 @@ class ConditionEditorDialog(QDialog):
 
         # 顶部说明
         lbl_tip = QLabel(
-            "说明：当前支持基于像素的条件组合：\n"
-            "- 原子条件：点位颜色匹配 / 技能像素匹配（带容差）\n"
+            "说明：当前支持基于像素和技能次数的条件组合：\n"
+            "- 原子条件：点位颜色匹配 / 技能像素匹配 / 技能施放次数 >= N（均可取反）\n"
             "- 顶层逻辑：全部满足(AND) 或 任一满足(OR)\n"
-            "- 每条原子条件可选择取反 (NOT)\n"
             "- 左侧列表会显示每个条件被网关节点引用的次数（未使用/使用 N 次）。",
             self,
         )
@@ -193,10 +208,10 @@ class ConditionEditorDialog(QDialog):
         self._tree_atoms.setAlternatingRowColors(True)
         self._tree_atoms.setSelectionMode(QTreeWidget.SingleSelection)
         self._tree_atoms.setSelectionBehavior(QTreeWidget.SelectRows)
-        self._tree_atoms.setHeaderLabels(["类型", "目标", "容差", "取反"])
-        self._tree_atoms.setColumnWidth(0, 90)
+        self._tree_atoms.setHeaderLabels(["类型", "目标", "数值/容差", "取反"])
+        self._tree_atoms.setColumnWidth(0, 110)
         self._tree_atoms.setColumnWidth(1, 200)
-        self._tree_atoms.setColumnWidth(2, 60)
+        self._tree_atoms.setColumnWidth(2, 80)
         self._tree_atoms.setColumnWidth(3, 60)
         right_col.addWidget(self._tree_atoms, 1)
 
@@ -206,6 +221,7 @@ class ConditionEditorDialog(QDialog):
 
         icon_add_point = load_icon("point", style, QStyle.StandardPixmap.SP_FileIcon)
         icon_add_skill = load_icon("skill", style, QStyle.StandardPixmap.SP_FileIcon)
+        icon_add_skill_cast = load_icon("skill", style, QStyle.StandardPixmap.SP_FileDialogListView)
         icon_del_atom = load_icon("delete", style, QStyle.StandardPixmap.SP_TrashIcon)
 
         self._btn_add_point = QPushButton("添加点位条件", self)
@@ -218,6 +234,11 @@ class ConditionEditorDialog(QDialog):
         self._btn_add_skill.clicked.connect(self._on_add_skill_atom)
         atoms_btn_row.addWidget(self._btn_add_skill)
 
+        self._btn_add_skill_cast = QPushButton("添加技能次数条件", self)
+        self._btn_add_skill_cast.setIcon(icon_add_skill_cast)
+        self._btn_add_skill_cast.clicked.connect(self._on_add_skill_cast_atom)
+        atoms_btn_row.addWidget(self._btn_add_skill_cast)
+
         self._btn_del_atom = QPushButton("删除选中条件", self)
         self._btn_del_atom.setIcon(icon_del_atom)
         self._btn_del_atom.clicked.connect(self._on_delete_atom)
@@ -226,29 +247,24 @@ class ConditionEditorDialog(QDialog):
         atoms_btn_row.addStretch(1)
         right_col.addLayout(atoms_btn_row)
 
-        # 网关相关按钮
-        gw_btn_row = QHBoxLayout()
-        gw_btn_row.setSpacing(6)
+        # 底部按钮行：保存 / 清除 / 关闭
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(6)
+        bottom_row.addStretch(1)
 
-        self._btn_apply = QPushButton("应用到当前网关节点", self)
+        self._btn_apply = QPushButton("保存", self)
         self._btn_apply.clicked.connect(self._on_apply)
-        gw_btn_row.addWidget(self._btn_apply)
+        bottom_row.addWidget(self._btn_apply)
 
-        self._btn_clear = QPushButton("清除当前网关条件", self)
+        self._btn_clear = QPushButton("清除", self)
         self._btn_clear.clicked.connect(self._on_clear_gateway)
-        gw_btn_row.addWidget(self._btn_clear)
+        bottom_row.addWidget(self._btn_clear)
 
-        gw_btn_row.addStretch(1)
-
-        right_col.addLayout(gw_btn_row)
-
-        # 关闭按钮
-        close_row = QHBoxLayout()
-        close_row.addStretch(1)
         self._btn_close = QPushButton("关闭", self)
         self._btn_close.clicked.connect(self.close)
-        close_row.addWidget(self._btn_close)
-        right_col.addLayout(close_row)
+        bottom_row.addWidget(self._btn_close)
+
+        right_col.addLayout(bottom_row)
 
         body_row.addLayout(right_col, 2)
 
@@ -256,11 +272,10 @@ class ConditionEditorDialog(QDialog):
         self._edit_name.textChanged.connect(self._on_form_changed)
         self._cmb_logic.currentIndexChanged.connect(self._on_form_changed)
 
-        # 若当前没有 gateway，禁用应用/清除按钮
+        # 若当前没有 gateway，禁用“保存”和“清除”
         if self._gateway is None:
             self._btn_apply.setEnabled(False)
             self._btn_clear.setEnabled(False)
-
     # ---------- 使用次数统计 ----------
 
     def _recompute_usage(self) -> None:
@@ -484,7 +499,7 @@ class ConditionEditorDialog(QDialog):
                 tol = max(0, min(255, tol))
                 if not pid:
                     continue
-                atoms.append(AtomCond(kind="pixel_point", ref_id=pid, tolerance=tol, neg=neg))
+                atoms.append(AtomCond(kind="pixel_point", ref_id=pid, value=tol, neg=neg))
 
             elif t_child == "pixel_skill":
                 sid = (inner.get("skill_id") or "").strip()
@@ -492,7 +507,14 @@ class ConditionEditorDialog(QDialog):
                 tol = max(0, min(255, tol))
                 if not sid:
                     continue
-                atoms.append(AtomCond(kind="pixel_skill", ref_id=sid, tolerance=tol, neg=neg))
+                atoms.append(AtomCond(kind="pixel_skill", ref_id=sid, value=tol, neg=neg))
+
+            elif t_child == "skill_cast_ge":
+                sid = (inner.get("skill_id") or "").strip()
+                cnt = int(inner.get("count", 0) or 0)
+                if not sid or cnt <= 0:
+                    continue
+                atoms.append(AtomCond(kind="skill_cast_ge", ref_id=sid, value=cnt, neg=neg))
 
             else:
                 continue
@@ -505,24 +527,40 @@ class ConditionEditorDialog(QDialog):
 
         children: List[Dict[str, Any]] = []
         for a in atoms:
-            if a.kind == "pixel_point":
+            k = (a.kind or "").strip().lower()
+            if k == "pixel_point":
                 base = {
                     "type": "pixel_point",
                     "point_id": a.ref_id,
-                    "tolerance": max(0, min(255, int(a.tolerance))),
+                    "tolerance": max(0, min(255, int(a.value))),
                 }
-            else:
+            elif k == "pixel_skill":
                 base = {
                     "type": "pixel_skill",
                     "skill_id": a.ref_id,
-                    "tolerance": max(0, min(255, int(a.tolerance))),
+                    "tolerance": max(0, min(255, int(a.value))),
                 }
+            elif k == "skill_cast_ge":
+                cnt = int(a.value)
+                if cnt <= 0:
+                    cnt = 1
+                base = {
+                    "type": "skill_cast_ge",
+                    "skill_id": a.ref_id,
+                    "count": cnt,
+                }
+            else:
+                # 未知类型，跳过
+                continue
 
             if a.neg:
                 node = {"type": "logic_not", "child": base}
             else:
                 node = base
             children.append(node)
+
+        if not children:
+            return {}
 
         if op == "or":
             return {"type": "logic_or", "children": children}
@@ -536,16 +574,27 @@ class ConditionEditorDialog(QDialog):
             self._tree_atoms.clear()
             for a in self._atoms:
                 item = QTreeWidgetItem()
-                if a.kind == "pixel_point":
+                k = (a.kind or "").strip().lower()
+                if k == "pixel_point":
                     typ = "点位颜色"
                     target = self._describe_point(a.ref_id)
-                else:
+                    val_txt = str(int(a.value))
+                elif k == "pixel_skill":
                     typ = "技能像素"
                     target = self._describe_skill(a.ref_id)
+                    val_txt = str(int(a.value))
+                elif k == "skill_cast_ge":
+                    typ = "技能施放次数≥"
+                    target = self._describe_skill(a.ref_id)
+                    val_txt = str(int(a.value))
+                else:
+                    typ = a.kind or "未知"
+                    target = a.ref_id
+                    val_txt = str(int(a.value))
 
                 item.setText(0, typ)
                 item.setText(1, target)
-                item.setText(2, str(int(a.tolerance)))
+                item.setText(2, val_txt)
                 item.setText(3, "是" if a.neg else "否")
 
                 item.setData(0, Qt.UserRole, a)
@@ -566,7 +615,7 @@ class ConditionEditorDialog(QDialog):
         for s in skills:
             if s.id == sid:
                 short = (s.id or "")[-6:]
-                return f"{s.name or '(未命名)'} [{short}]"
+                return f"{s.name or '(未命命)'} [{short}]"
         return f"(技能缺失: {sid[-6:] if sid else ''})"
 
     # ---------- 原子条件增删 ----------
@@ -612,7 +661,7 @@ class ConditionEditorDialog(QDialog):
             QMessageBox.No,
         ) == QMessageBox.Yes
 
-        self._atoms.append(AtomCond(kind="pixel_point", ref_id=p.id, tolerance=tol, neg=neg))
+        self._atoms.append(AtomCond(kind="pixel_point", ref_id=p.id, value=tol, neg=neg))
         self._rebuild_atoms_view()
         self._apply_form_to_current()
 
@@ -657,7 +706,57 @@ class ConditionEditorDialog(QDialog):
             QMessageBox.No,
         ) == QMessageBox.Yes
 
-        self._atoms.append(AtomCond(kind="pixel_skill", ref_id=s.id, tolerance=tol, neg=neg))
+        self._atoms.append(AtomCond(kind="pixel_skill", ref_id=s.id, value=tol, neg=neg))
+        self._rebuild_atoms_view()
+        self._apply_form_to_current()
+
+    def _on_add_skill_cast_atom(self) -> None:
+        """
+        新增：技能施放次数条件 skill_cast_ge。
+        """
+        skills: List[Skill] = list(getattr(self._ctx.skills, "skills", []) or [])
+        if not skills:
+            self._notify.error("当前 Profile 下没有技能，请先在“技能配置”页面添加。")
+            return
+
+        items = [f"{s.name or '(未命名)'} [{(s.id or '')[-6:]}]" for s in skills]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "选择技能",
+            "请选择要检查施放次数的技能：",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        idx = items.index(choice) if choice in items else 0
+        s = skills[idx]
+
+        cnt, ok_cnt = QInputDialog.getInt(
+            self,
+            "设置次数",
+            "施放次数 (>=1)：",
+            1,
+            1,
+            10**6,
+            1,
+        )
+        if not ok_cnt:
+            return
+
+        neg = QMessageBox.question(
+            self,
+            "是否取反",
+            "是否对该条件取反？\n\n"
+            "否：表示“该技能施放次数 ≥ N”\n"
+            "是：表示“该技能施放次数 < N”",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) == QMessageBox.Yes
+
+        self._atoms.append(AtomCond(kind="skill_cast_ge", ref_id=s.id, value=cnt, neg=neg))
         self._rebuild_atoms_view()
         self._apply_form_to_current()
 
