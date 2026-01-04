@@ -34,6 +34,8 @@ class BaseSettingsPatch:
     cast_mode: str              # "timer" | "bar"
     cast_bar_point_id: str
     cast_bar_tolerance: int
+    cast_bar_poll_interval_ms: int
+    cast_bar_max_wait_factor: float
 
     # 执行策略：启停热键 + 技能间默认间隔
     exec_toggle_enabled: bool
@@ -82,6 +84,15 @@ class BaseSettingsService:
             raise ValueError("施法完成模式只能是 'timer' 或 'bar'")
         _ = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
 
+        # 施法条轮询间隔 / 最大等待倍数
+        _ = clamp_int(int(patch.cast_bar_poll_interval_ms), 10, 1000)
+        try:
+            f = float(patch.cast_bar_max_wait_factor)
+        except Exception:
+            raise ValueError("施法条最长等待倍数必须是数字")
+        if f <= 0:
+            raise ValueError("施法条最长等待倍数必须大于 0")
+
         # 执行启停热键校验
         if patch.exec_toggle_enabled:
             hk_exec = normalize(patch.exec_toggle_hotkey)
@@ -125,6 +136,19 @@ class BaseSettingsService:
         b.cast_bar.point_id = (patch.cast_bar_point_id or "").strip()
         b.cast_bar.tolerance = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
 
+        poll = clamp_int(int(patch.cast_bar_poll_interval_ms), 10, 1000)
+        b.cast_bar.poll_interval_ms = poll
+
+        try:
+            factor = float(patch.cast_bar_max_wait_factor)
+        except Exception:
+            factor = 1.5
+        if factor < 0.1:
+            factor = 0.1
+        if factor > 10.0:
+            factor = 10.0
+        b.cast_bar.max_wait_factor = factor
+
         # 执行策略：启停热键
         if patch.exec_toggle_enabled:
             hk_exec = normalize(patch.exec_toggle_hotkey)
@@ -137,7 +161,7 @@ class BaseSettingsService:
         # 执行策略：技能间默认间隔
         gap = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
         b.exec.default_skill_gap_ms = gap
-        
+
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
         self.validate_patch(patch)
 

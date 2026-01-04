@@ -134,10 +134,15 @@ class CastBarConfig:
     - point_id: 若 mode="bar"，引用 PointsFile 中的一个点位 ID 作为
                 “施法条读满时”的颜色基准
     - tolerance: 颜色容差，0..255
+    - poll_interval_ms: 轮询施法条像素的时间间隔（毫秒）
+    - max_wait_factor: 最长等待倍数；实际最长等待时间为
+        max_wait = max(readbar_ms * max_wait_factor, 某个兜底值)
     """
     mode: str = "timer"
     point_id: str = ""
     tolerance: int = 15
+    poll_interval_ms: int = 30
+    max_wait_factor: float = 1.5
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "CastBarConfig":
@@ -145,11 +150,27 @@ class CastBarConfig:
         mode = as_str(d.get("mode", "timer"), "timer").strip().lower()
         if mode not in ("timer", "bar"):
             mode = "timer"
+
         tol = clamp_int(as_int(d.get("tolerance", 15), 15), 0, 255)
+
+        poll = clamp_int(as_int(d.get("poll_interval_ms", 30), 30), 10, 1000)
+
+        raw_factor = d.get("max_wait_factor", 1.5)
+        try:
+            factor = float(raw_factor)
+        except Exception:
+            factor = 1.5
+        if factor < 0.1:
+            factor = 0.1
+        if factor > 10.0:
+            factor = 10.0
+
         return CastBarConfig(
             mode=mode,
             point_id=as_str(d.get("point_id", "")),
             tolerance=tol,
+            poll_interval_ms=poll,
+            max_wait_factor=factor,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -157,9 +178,9 @@ class CastBarConfig:
             "mode": self.mode,
             "point_id": self.point_id,
             "tolerance": int(self.tolerance),
+            "poll_interval_ms": int(self.poll_interval_ms),
+            "max_wait_factor": float(self.max_wait_factor),
         }
-
-
 @dataclass
 class ExecConfig:
     """

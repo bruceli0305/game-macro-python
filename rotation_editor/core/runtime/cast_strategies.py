@@ -69,6 +69,25 @@ class BarCastStrategy(CastCompletionStrategy):
         node_readbar_ms: int,
         rt_ctx_factory: Callable[[], RuntimeContext],
     ) -> None:
+        """
+        施法条像素模式：
+
+        - 对于有读条时间的技能（node_readbar_ms > 0）：
+            * 使用 ProfileContext.points 中的某个点位作为“施法条读满时颜色”
+            * 在 [0, node_readbar_ms * max_wait_factor] 内轮询该点颜色是否接近目标颜色
+        - 对于瞬发技能（node_readbar_ms <= 0）：
+            * 不使用施法条，立即返回（不做额外等待），
+              实际节奏由 EngineConfig.default_skill_gap_ms 控制。
+        """
+
+        # 瞬发技能：不做施法条轮询，直接返回
+        try:
+            total_ms = int(node_readbar_ms)
+        except Exception:
+            total_ms = 0
+        if total_ms <= 0:
+            return
+
         # 找到施法条点位
         pts = getattr(self.ctx.points, "points", []) or []
         pt = next((p for p in pts if p.id == self.point_id), None)
@@ -76,16 +95,17 @@ class BarCastStrategy(CastCompletionStrategy):
             # 找不到点位时退回 Timer 策略
             TimerCastStrategy().wait_for_complete(
                 skill_id=skill_id,
-                node_readbar_ms=node_readbar_ms,
+                node_readbar_ms=total_ms,
                 rt_ctx_factory=rt_ctx_factory,
             )
             return
 
         target = pt.color
         tol = max(0, min(255, int(self.tolerance)))
-        max_wait = int(node_readbar_ms * self.max_wait_factor) if node_readbar_ms > 0 else 2000
+        # 最长等待时间：readbar_ms * max_wait_factor，兜底最少 500ms
+        max_wait = int(total_ms * self.max_wait_factor)
         if max_wait <= 0:
-            max_wait = 2000
+            max_wait = 500
 
         start = time.monotonic() * 1000.0
         sample = SampleSpec(mode=pt.sample.mode, radius=int(pt.sample.radius))
@@ -133,10 +153,29 @@ def make_cast_strategy(ctx: ProfileContext, *, default_gap_ms: int = 50) -> Cast
     if mode != "bar" or not pid:
         return TimerCastStrategy(default_gap_ms=default_gap_ms)
 
+    # 使用基础配置中的施法条轮询间隔和最长等待倍数
+    try:
+        poll = int(getattr(cb, "poll_interval_ms", 30) or 30)
+    except Exception:
+        poll = 30
+    if poll < 10:
+        poll = 10
+    if poll > 1000:
+        poll = 1000
+
+    try:
+        factor = float(getattr(cb, "max_wait_factor", 1.5) or 1.5)
+    except Exception:
+        factor = 1.5
+    if factor < 0.1:
+        factor = 0.1
+    if factor > 10.0:
+        factor = 10.0
+
     return BarCastStrategy(
         ctx=ctx,
         point_id=pid,
         tolerance=tol,
-        poll_interval_ms=30,
-        max_wait_factor=1.5,
+        poll_interval_ms=poll,
+        max_wait_factor=factor,
     )
