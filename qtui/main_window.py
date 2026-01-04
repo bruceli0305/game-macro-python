@@ -34,6 +34,7 @@ from qtui.unsaved_guard import UnsavedChangesGuard
 from rotation_editor.ui.presets_page import RotationPresetsPage
 from rotation_editor.ui.editor.main_page import RotationEditorPage
 
+from qtui.exec_hotkey import ExecHotkeyController
 
 class MainWindow(QMainWindow):
     """
@@ -110,6 +111,9 @@ class MainWindow(QMainWindow):
             notify=self.notify,
         )
 
+        # 执行启停热键控制器（初始化为 None，稍后在 _setup_central_widget 后创建）
+        self._exec_hotkey: Optional[ExecHotkeyController] = None
+
         # 脏状态标题“*”
         try:
             self.services.session.subscribe_dirty(self._on_store_dirty)
@@ -128,6 +132,16 @@ class MainWindow(QMainWindow):
             pages_set_context=self._set_pages_context,
             backup_provider=lambda: bool(getattr(self._ctx.base.io, "backup_on_save", True)),
         )
+
+        # 执行启停热键控制器：在页面创建完成后再初始化
+        try:
+            self._exec_hotkey = ExecHotkeyController(
+                dispatcher=self.dispatcher,
+                get_ctx=lambda: self._ctx,
+                toggle_cb=self._toggle_exec_by_hotkey,
+            )
+        except Exception:
+            self._exec_hotkey = None
 
         # 使用 WindowStateController 恢复窗口几何
         self._win_state.apply_initial_geometry()
@@ -249,12 +263,21 @@ class MainWindow(QMainWindow):
 
     def _on_store_dirty(self, parts) -> None:
         try:
-            dirty = bool(parts)
+            parts_set = set(parts or [])
         except Exception:
-            dirty = False
+            parts_set = set()
+
+        dirty = bool(parts_set)
         title = self._base_title + (" *" if dirty else "")
         if self.windowTitle() != title:
             self.setWindowTitle(title)
+
+        # base 配置变化时刷新执行启停热键
+        if self._exec_hotkey is not None and "base" in parts_set:
+            try:
+                self._exec_hotkey.refresh_from_ctx()
+            except Exception:
+                pass
 
     # ---------- 导航回调 ----------
 
@@ -318,6 +341,13 @@ class MainWindow(QMainWindow):
 
         # 页面上下文同步
         self._set_pages_context(ctx)
+
+        # 执行启停热键同步
+        if self._exec_hotkey is not None:
+            try:
+                self._exec_hotkey.refresh_from_ctx()
+            except Exception:
+                pass
 
     # ---------- 取色 UI 策略快照 ----------
 
@@ -540,7 +570,12 @@ class MainWindow(QMainWindow):
             self._pick_coord.close()
         except Exception:
             pass
-
+        # 停止执行热键监听器
+        try:
+            if self._exec_hotkey is not None:
+                self._exec_hotkey.close()
+        except Exception:
+            pass
         # 保存当前窗口几何到 app_state.json
         try:
             self._win_state.persist_current_geometry()
@@ -548,3 +583,22 @@ class MainWindow(QMainWindow):
             pass
 
         event.accept()
+    def _toggle_exec_by_hotkey(self) -> None:
+        """
+        由 ExecHotkeyController 触发：
+        - 若循环引擎未运行，则启动当前 RotationEditorPage 选中的方案；
+        - 若正在运行，则停止。
+        在 Qt 主线程中执行（由 QtDispatcher 保证）。
+        """
+        try:
+            page = self._page_rotation_editor
+        except Exception:
+            return
+        if page is None:
+            return
+
+        try:
+            page.toggle_engine_via_hotkey()
+        except Exception as e:
+            # 这里捕获所有异常，避免热键回调把 UI 弄崩；具体错误交给 UiNotify
+            self.notify.error("执行启停热键失败", detail=str(e))

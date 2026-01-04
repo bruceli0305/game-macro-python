@@ -1,4 +1,3 @@
-# File: core/models/base.py
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -37,10 +36,6 @@ class CaptureConfig:
 class PickAvoidanceConfig:
     """
     Window avoidance + preview UX config.
-
-    NOTE:
-    - 这部分先保持现有结构（avoidance 子结构），避免一次性影响太多 UI/Controller 代码。
-    - 后续如要扁平化，可在 Step 6+ 统一替换引用路径。
     """
     mode: str = "hide_main"  # "hide_main" | "minimize" | "move_aside" | "none"
     delay_ms: int = 120
@@ -74,9 +69,8 @@ class PickConfig:
     """
     pick config root.
 
-    Step 4 change:
-    - 移除全局取色/取消取色热键（base.hotkeys 全段删除）
-    - 新增：确认取色热键 + 鼠标避让配置（供 PickService 使用）
+    - confirm_hotkey: 取色确认热键（Esc 固定为取消）
+    - mouse_avoid: 鼠标避让配置
     """
     avoidance: PickAvoidanceConfig = field(default_factory=PickAvoidanceConfig)
 
@@ -167,6 +161,34 @@ class CastBarConfig:
 
 
 @dataclass
+class ExecConfig:
+    """
+    执行策略（宏引擎）相关配置：
+
+    - enabled: 是否启用执行启停热键
+    - toggle_hotkey: 启停热键（全局），由后续全局热键监听使用
+        * 空串或 enabled=False 表示禁用
+        * 格式同其他热键，使用 normalize() 规范化
+    """
+    enabled: bool = False
+    toggle_hotkey: str = ""  # 例如 "f9" / "ctrl+f9"
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "ExecConfig":
+        d = as_dict(d)
+        return ExecConfig(
+            enabled=as_bool(d.get("enabled", False), False),
+            toggle_hotkey=as_str(d.get("toggle_hotkey", ""), ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "toggle_hotkey": self.toggle_hotkey,
+        }
+
+
+@dataclass
 class BaseFile:
     """
     Represents base.json root object.
@@ -181,6 +203,8 @@ class BaseFile:
     io: IOConfig = field(default_factory=IOConfig)
     # 施法完成策略（定时 / 施法条像素）
     cast_bar: CastBarConfig = field(default_factory=CastBarConfig)
+    # 执行策略（启停热键等）
+    exec: ExecConfig = field(default_factory=ExecConfig)
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "BaseFile":
@@ -192,6 +216,7 @@ class BaseFile:
             pick=PickConfig.from_dict(d.get("pick", {}) or {}),
             io=IOConfig.from_dict(d.get("io", {}) or {}),
             cast_bar=CastBarConfig.from_dict(d.get("cast_bar", {}) or {}),
+            exec=ExecConfig.from_dict(d.get("exec", {}) or {}),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -202,4 +227,5 @@ class BaseFile:
             "pick": self.pick.to_dict(),
             "io": self.io.to_dict(),
             "cast_bar": self.cast_bar.to_dict(),
+            "exec": self.exec.to_dict(),
         }

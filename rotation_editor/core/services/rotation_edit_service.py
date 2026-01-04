@@ -527,3 +527,56 @@ class RotationEditService:
                 return True
 
         return False
+
+    def delete_track(
+        self,
+        *,
+        preset: RotationPreset,
+        mode_id: Optional[str],
+        track_id: Optional[str],
+    ) -> bool:
+        """
+        删除指定轨道：
+
+        - mode_id 非空 => 从对应 Mode.tracks 中删除 track_id；
+        - mode_id 为空 => 从 preset.global_tracks 中删除 track_id。
+        删除成功时：
+        - 若 entry_mode_id/entry_track_id 指向该轨道，则清空 entry_track_id；
+          （全局轨道的情况：entry_mode_id 为空且 entry_track_id 匹配）
+        """
+        tid = (track_id or "").strip()
+        if not tid:
+            return False
+
+        mid = (mode_id or "").strip()
+        deleted = False
+
+        if mid:
+            mode = self._find_mode(preset, mid)
+            if mode is None:
+                return False
+            before = len(mode.tracks)
+            mode.tracks = [t for t in mode.tracks if (t.id or "") != tid]
+            deleted = len(mode.tracks) != before
+        else:
+            before = len(preset.global_tracks)
+            preset.global_tracks = [t for t in preset.global_tracks if (t.id or "") != tid]
+            deleted = len(preset.global_tracks) != before
+
+        if not deleted:
+            return False
+
+        # 处理入口轨道引用
+        em = (preset.entry_mode_id or "").strip()
+        et = (preset.entry_track_id or "").strip()
+        if mid:
+            # 模式轨道：只有 entry_mode_id 与 mode_id 且 entry_track_id 匹配时才清空
+            if em == mid and et == tid:
+                preset.entry_track_id = ""
+        else:
+            # 全局轨道：entry_mode_id 为空且 entry_track_id 匹配时清空
+            if (not em) and et == tid:
+                preset.entry_track_id = ""
+
+        self._mark_dirty()
+        return True

@@ -1,4 +1,3 @@
-# qtui/pages/base_settings_page.py
 from __future__ import annotations
 
 from typing import Optional
@@ -65,7 +64,8 @@ class BaseSettingsPage(QWidget):
     - “重新加载”按钮调用 reload_cmd
     - 通过 ProfileSession.subscribe_dirty 显示“未保存*”
     - 取色确认热键使用 HotkeyEdit 录制
-    - 新增：施法完成策略配置（定时 / 施法条像素）
+    - 施法完成策略配置（定时 / 施法条像素）
+    - 执行策略：执行启停热键（toggle）
     """
 
     def __init__(
@@ -204,7 +204,7 @@ class BaseSettingsPage(QWidget):
 
         left_col.addWidget(g_pick)
 
-        # ---- 右列：施法完成策略 + 保存策略 ----
+        # ---- 右列：施法完成 / 执行策略 + 保存策略 ----
         g_cast = QGroupBox("施法完成 / 执行策略", self)
         form_cast = QFormLayout(g_cast)
 
@@ -230,6 +230,13 @@ class BaseSettingsPage(QWidget):
         self.spin_cast_tol.setSingleStep(1)
         self.spin_cast_tol.setValue(15)
         form_cast.addRow("施法条颜色容差", self.spin_cast_tol)
+
+        # 执行启停热键
+        self.chk_exec_hotkey = QCheckBox("启用执行启停热键", g_cast)
+        form_cast.addRow(self.chk_exec_hotkey)
+
+        self.hk_exec_toggle = HotkeyEdit(g_cast, initial="f9")
+        form_cast.addRow("启停热键", self.hk_exec_toggle)
 
         right_col.addWidget(g_cast)
 
@@ -301,7 +308,7 @@ class BaseSettingsPage(QWidget):
             if idx >= 0:
                 self.cmb_monitor.setCurrentIndex(idx)
 
-            # 热键
+            # 热键：取色确认
             hk = getattr(b.pick, "confirm_hotkey", "") or "f8"
             self.hk_confirm.set_hotkey(hk)
 
@@ -348,6 +355,16 @@ class BaseSettingsPage(QWidget):
             self.txt_cast_point_id.setText(pid)
             self.spin_cast_tol.setValue(tol)
 
+            # 执行启停热键
+            ex = getattr(b, "exec", None)
+            if ex is None:
+                self.chk_exec_hotkey.setChecked(False)
+                self.hk_exec_toggle.set_hotkey("f9")
+            else:
+                self.chk_exec_hotkey.setChecked(bool(getattr(ex, "enabled", False)))
+                hk_exec = getattr(ex, "toggle_hotkey", "") or ""
+                self.hk_exec_toggle.set_hotkey(hk_exec or "f9")
+
         finally:
             self._building = False
 
@@ -369,6 +386,10 @@ class BaseSettingsPage(QWidget):
         cast_mode_disp = self.cmb_cast_mode.currentText()
         cast_mode = "timer" if cast_mode_disp.startswith("仅按") else "bar"
 
+        # 执行启停热键
+        exec_toggle_enabled = bool(self.chk_exec_hotkey.isChecked())
+        exec_toggle_hotkey = self.hk_exec_toggle.get_hotkey().strip()
+
         return BaseSettingsPatch(
             theme=theme or "darkly",
             monitor_policy=monitor_policy,
@@ -388,6 +409,9 @@ class BaseSettingsPage(QWidget):
             cast_mode=cast_mode,
             cast_bar_point_id=self.txt_cast_point_id.text(),
             cast_bar_tolerance=int(self.spin_cast_tol.value()),
+
+            exec_toggle_enabled=exec_toggle_enabled,
+            exec_toggle_hotkey=exec_toggle_hotkey,
         )
 
     # ---------- 热键校验 ----------
@@ -439,6 +463,10 @@ class BaseSettingsPage(QWidget):
         self.cmb_cast_mode.currentTextChanged.connect(on_any_changed)
         self.txt_cast_point_id.textChanged.connect(on_any_changed)
         self.spin_cast_tol.valueChanged.connect(on_any_changed)
+
+        # 执行启停热键
+        self.chk_exec_hotkey.toggled.connect(on_any_changed)
+        self.hk_exec_toggle.hotkeyChanged.connect(on_any_changed)
 
     def _apply_now(self) -> None:
         if self._building:

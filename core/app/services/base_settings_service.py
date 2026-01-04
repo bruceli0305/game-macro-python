@@ -1,4 +1,3 @@
-# core/app/services/base_settings_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,6 +35,10 @@ class BaseSettingsPatch:
     cast_bar_point_id: str
     cast_bar_tolerance: int
 
+    # 执行策略：启停热键
+    exec_toggle_enabled: bool
+    exec_toggle_hotkey: str
+
 
 class BaseSettingsService:
     """
@@ -61,6 +64,7 @@ class BaseSettingsService:
         return self._session.profile
 
     def validate_patch(self, patch: BaseSettingsPatch) -> None:
+        # 取色确认热键
         hk = normalize(patch.pick_confirm_hotkey)
         _mods, main = parse(hk)
 
@@ -76,6 +80,15 @@ class BaseSettingsService:
         if mode not in ("timer", "bar"):
             raise ValueError("施法完成模式只能是 'timer' 或 'bar'")
         _ = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
+
+        # 执行启停热键校验
+        if patch.exec_toggle_enabled:
+            hk_exec = normalize(patch.exec_toggle_hotkey)
+            if hk_exec:
+                _mods2, main2 = parse(hk_exec)
+                if main2 == "esc":
+                    raise ValueError("执行启停热键不能使用 Esc")
+            # hk_exec 允许为空（视为未配置），后面会按 enabled & hotkey 决定是否生效
 
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         theme = (patch.theme or "").strip()
@@ -107,6 +120,15 @@ class BaseSettingsService:
         b.cast_bar.mode = cmode
         b.cast_bar.point_id = (patch.cast_bar_point_id or "").strip()
         b.cast_bar.tolerance = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
+
+        # 执行策略：启停热键
+        if patch.exec_toggle_enabled:
+            hk_exec = normalize(patch.exec_toggle_hotkey)
+        else:
+            hk_exec = ""
+        enabled = bool(patch.exec_toggle_enabled and hk_exec)
+        b.exec.enabled = enabled
+        b.exec.toggle_hotkey = hk_exec if enabled else ""
 
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
         self.validate_patch(patch)

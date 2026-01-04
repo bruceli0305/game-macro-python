@@ -241,8 +241,20 @@ class RotationEditorPage(QWidget):
             parts_set = set(parts or [])
         except Exception:
             parts_set = set()
+
+        # UI 脏标记（只看 rotations 部分）
         self._dirty_ui = "rotations" in parts_set
         self._update_dirty_ui()
+
+        # 捕获 Plan 动态更新：
+        # - 当 points / skills / rotations 变脏，且引擎正在运行时，
+        #   标记 CapturePlan 为“脏”，下一轮循环会重建 ROI。
+        if self._engine is not None and self._engine.is_running():
+            if any(p in parts_set for p in ("points", "skills", "rotations")):
+                try:
+                    self._engine.invalidate_capture_plan()
+                except Exception:
+                    pass
 
     def _on_service_dirty(self) -> None:
         pass
@@ -704,24 +716,67 @@ class RotationEditorPage(QWidget):
         menu = QMenu(self)
         act_new_skill = menu.addAction("新增技能节点...")
         act_new_gw = menu.addAction("新增网关节点...")
+        menu.addSeparator()
+        act_del_track = menu.addAction("删除此轨道")
 
         pos = QPoint(int(gx), int(gy))
         action = menu.exec(pos)
         if action is None:
             return
 
-        try:
-            if action == act_new_skill:
-                self._panel_nodes.add_skill_node()
-            elif action == act_new_gw:
-                self._panel_nodes.add_gateway_node()
-        except Exception as e:
-            self._notify.error("新增节点失败", detail=str(e))
+        # 新增节点
+        if action == act_new_skill or action == act_new_gw:
+            try:
+                if action == act_new_skill:
+                    self._panel_nodes.add_skill_node()
+                elif action == act_new_gw:
+                    self._panel_nodes.add_gateway_node()
+            except Exception as e:
+                self._notify.error("新增节点失败", detail=str(e))
+                return
+
+            preset2 = self._current_preset()
+            self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
             return
 
-        preset2 = self._current_preset()
-        self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+        # 删除轨道
+        if action == act_del_track:
+            # 防御：没有轨道 ID 直接返回
+            if not track_id_s:
+                self._notify.error("当前轨道没有有效 ID，无法删除")
+                return
 
+            # 询问确认
+            t = self._edit_svc.get_track(preset, mode_id_s or None, track_id_s or None)
+            t_name = t.name if (t is not None and getattr(t, "name", None)) else ""
+            ok = QMessageBox.question(
+                self,
+                "删除轨道",
+                f"确认删除轨道：{t_name or '(未命名轨道)'} ？\n\n"
+                f"该操作将删除此轨道上的所有节点。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ok != QMessageBox.Yes:
+                return
+
+            deleted = self._edit_svc.delete_track(
+                preset=preset,
+                mode_id=mode_id_s or None,
+                track_id=track_id_s or None,
+            )
+            if not deleted:
+                self._notify.error("删除轨道失败：轨道不存在")
+                return
+
+            # 刷新节点面板和时间轴
+            preset2 = self._current_preset()
+            self._panel_nodes.set_context(self._ctx, preset=preset2)
+            # 当前模式下已删掉该轨道，target 设为 (mode_id, None)
+            self._panel_nodes.set_target(mode_id_s or None, None)
+            self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+            self._notify.info("已删除轨道")
+            return
     # ---------- 保存 / 重载 ----------
 
     def _on_reload(self) -> None:
@@ -794,6 +849,8 @@ class RotationEditorPage(QWidget):
         self._cmb_preset.setEnabled(not running)
         self._btn_reload.setEnabled(not running)
         self._btn_save.setEnabled(not running)
+        # 运行时禁止结构编辑（只读）：时间轴拖拽 / 模式增删改 / 节点面板操作
+        self._set_edit_enabled(not running)
 
     def _on_start_clicked(self) -> None:
         preset = self._current_preset()
@@ -894,7 +951,7 @@ class RotationEditorPage(QWidget):
 
     def on_error(self, msg: str, detail: str) -> None:
         self._notify.error(msg, detail=detail)
-        
+
     def _on_timeline_step_changed(
         self,
         mode_id: str,
@@ -929,3 +986,45 @@ class RotationEditorPage(QWidget):
         # NodeListPanel 也同步刷新（显示新的步骤值）
         self._panel_nodes.set_context(self._ctx, preset=preset)
         self._panel_nodes.set_target(mid, tid)
+    # ---------- 编辑开关（运行时只读） ----------
+
+    def _set_edit_enabled(self, enabled: bool) -> None:
+        """
+        控制循环编辑器是否处于“可编辑”状态：
+
+        - enabled=True  : 可以增删模式/轨道/节点、拖拽等（正常编辑）
+        - enabled=False : 只读模式，禁止任何结构性修改（引擎运行时）
+
+        注意：
+        - 高亮当前执行节点仍然可用（setEnabled(False) 不影响绘制和 set_current_node）。
+        """
+        # 时间轴交互（拖拽、右键菜单等）
+        self._timeline_canvas.setEnabled(enabled)
+
+        # 节点列表面板里的各种按钮
+        self._panel_nodes.setEnabled(enabled)
+
+        # 模式操作按钮
+        self._btn_mode_add.setEnabled(enabled)
+        self._btn_mode_rename.setEnabled(enabled)
+        self._btn_mode_delete.setEnabled(enabled)
+    def toggle_engine_via_hotkey(self) -> None:
+        """
+        供全局启停热键调用：
+        - 若当前引擎未运行，则相当于点击“开始”；
+        - 若正在运行，则相当于点击“停止”。
+
+        要求：
+        - 必须已经在循环编辑器中至少选择过一个方案（_current_preset_id 非空）。
+        """
+        preset = self._current_preset()
+        if preset is None:
+            self._notify.error("请先在“循环编辑器”中选择一个方案")
+            return
+
+        if not self._engine_running:
+            # 相当于点击“开始”
+            self._on_start_clicked()
+        else:
+            # 相当于点击“停止”
+            self._on_stop_clicked()

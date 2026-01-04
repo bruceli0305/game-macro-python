@@ -257,7 +257,9 @@ class MacroEngine:
         self._step_once: bool = False
         # 停止原因（由 stop() / Gateway 等设置，_run_loop 最终统一使用）
         self._stop_reason: str = "finished"
-
+        # CapturePlan 缓存与脏标记（运行期动态更新 ROI）
+        self._capture_plan = None
+        self._capture_plan_dirty: bool = False
     # ---------- 生命周期 ----------
 
     def is_running(self) -> bool:
@@ -336,7 +338,7 @@ class MacroEngine:
 
     def _run_loop(self, preset: RotationPreset) -> None:
         """
-        主循环（多轨 + 安全停止版）：
+        主循环（多轨 + 步骤轴 + 安全停止 + CapturePlan 动态更新）：
 
         - 全局侧：仍然只执行 global_tracks[0] 一条轨道，顺序执行节点。
         - 模式侧：对“当前模式”下的所有轨道做拍平（基于 _build_mode_flat）：
@@ -346,11 +348,23 @@ class MacroEngine:
         安全限制：
         - preset.max_exec_nodes > 0 时：累计执行节点数达到该值，自动停止。
         - preset.max_run_seconds > 0 时：总运行时长达到该值（秒），自动停止。
+
+        CapturePlan 动态更新：
+        - 启动时构建一份 plan；
+        - 运行中若调用 invalidate_capture_plan()，会在下一轮循环重建 plan。
         """
         try:
             scanner = PixelScanner(ScreenCapture())
+
+            # 初始 CapturePlan
             plan = build_capture_plan(self._ctx, preset)
-            cast_strategy = make_cast_strategy(self._ctx, default_gap_ms=self._cfg.default_skill_gap_ms)
+            self._capture_plan = plan
+            self._capture_plan_dirty = False
+
+            cast_strategy = make_cast_strategy(
+                self._ctx,
+                default_gap_ms=self._cfg.default_skill_gap_ms,
+            )
             skill_state = SimpleSkillState()
             resolver = TrackResolver(preset)
 
@@ -413,6 +427,15 @@ class MacroEngine:
                     self._stop_reason = "max_exec_nodes"
                     self._stop_evt.set()
                     break
+
+                # ---------- 重建 CapturePlan（若被标记为脏） ----------
+                if self._capture_plan_dirty:
+                    try:
+                        plan = build_capture_plan(self._ctx, preset)
+                        self._capture_plan = plan
+                    except Exception:
+                        log.exception("rebuild capture_plan failed")
+                    self._capture_plan_dirty = False
 
                 # 计算下一次需要执行的时间
                 times: list[int] = []
@@ -504,35 +527,43 @@ class MacroEngine:
                     new_mode_id = mode_id
 
                     # 如果当前是 GatewayNode，可能发生了 switch_mode / jump_track / jump_node / end
-                    if isinstance(m_node, GatewayNode):
+                    if isinstance(m_node, GatewayNode) and not self._stop_evt.is_set():
                         target_cursor = mc  # _exec_gateway_node 返回的“下一位置”游标
 
-                        # 情况 1：切换到其他模式
-                        if (target_cursor.mode_id or "") and (target_cursor.mode_id or "") != mode_id:
-                            new_mode_id = target_cursor.mode_id or ""
-                            new_flat = self._build_mode_flat(preset, new_mode_id)
-                            if new_flat:
-                                # 在新模式的 flat 中，定位到目标 (track_id, node_index)
-                                new_flat_index = self._find_flat_index(
-                                    new_flat,
-                                    target_cursor.track_id,
-                                    target_cursor.node_index,
-                                )
-                                mode_flat = new_flat
-                            else:
-                                # 目标模式下没有轨道：停止模式侧
-                                new_mode_id = None
-                                mode_flat = []
-                                new_flat_index = 0
+                        # 判断这个 Gateway 是否只是“同轨道顺序前进”（条件不满足时的行为）：
+                        is_seq_same_track = (
+                            (target_cursor.mode_id or "") == (cursor.mode_id or "") and
+                            (target_cursor.track_id or "") == (cursor.track_id or "") and
+                            int(getattr(target_cursor, "node_index", -1)) == int(cursor.node_index) + 1
+                        )
 
-                        # 情况 2：在同一模式内 jump_track / jump_node
-                        elif (target_cursor.mode_id or "") == mode_id:
-                            if mode_flat:
-                                new_flat_index = self._find_flat_index(
-                                    mode_flat,
-                                    target_cursor.track_id,
-                                    target_cursor.node_index,
-                                )
+                        if not is_seq_same_track:
+                            # 情况 1：切换到其他模式
+                            if (target_cursor.mode_id or "") and (target_cursor.mode_id or "") != mode_id:
+                                new_mode_id = target_cursor.mode_id or ""
+                                new_flat = self._build_mode_flat(preset, new_mode_id)
+                                if new_flat:
+                                    # 在新模式的 flat 中，定位到目标 (track_id, node_index)
+                                    new_flat_index = self._find_flat_index(
+                                        new_flat,
+                                        target_cursor.track_id,
+                                        target_cursor.node_index,
+                                    )
+                                    mode_flat = new_flat
+                                else:
+                                    # 目标模式下没有轨道：停止模式侧
+                                    new_mode_id = None
+                                    mode_flat = []
+                                    new_flat_index = 0
+
+                            # 情况 2：在同一模式内 jump_track / jump_node
+                            elif (target_cursor.mode_id or "") == mode_id:
+                                if mode_flat:
+                                    new_flat_index = self._find_flat_index(
+                                        mode_flat,
+                                        target_cursor.track_id,
+                                        target_cursor.node_index,
+                                    )
 
                     # 更新模式侧状态
                     mode_id = new_mode_id
@@ -1002,3 +1033,10 @@ class MacroEngine:
             if t == tid and n == idx:
                 return i
         return 0
+
+    def invalidate_capture_plan(self) -> None:
+        """
+        标记当前 CapturePlan 为“脏”，将在下一次主循环迭代时重建 ROI。
+        仅在引擎运行时有效；未运行时标记无害，start() 会重新生成 plan。
+        """
+        self._capture_plan_dirty = True

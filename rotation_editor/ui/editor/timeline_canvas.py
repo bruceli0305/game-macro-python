@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsRectItem,
     QGraphicsSimpleTextItem,
+    QGraphicsItem,
 )
 
 from core.profiles import ProfileContext
@@ -489,6 +490,7 @@ class TimelineCanvas(QGraphicsView):
             * Step0, Step1, Step2, ... （整数步骤）
         - 每个 Step 的显示宽度由 _step_ms * _time_scale_px_per_ms 决定，
           必须与 build_timeline_layout 里使用的 STEP_MS 一致。
+        - 轨道标题和步骤数字都是“纯装饰”，不参与交互，不可选中。
         """
         scale = float(self._time_scale_px_per_ms)
         if scale <= 0:
@@ -511,7 +513,7 @@ class TimelineCanvas(QGraphicsView):
         # 覆盖“场景中真实需要的时间范围”和“当前视口宽度反推的可见范围”
         visible_ms = int(max(0.0, (x_extent - start_x) / scale))
         max_ms = max(max_time_ms, visible_ms)
-        # 至少一个 Step
+
         import math
         max_step = max(1, int(math.ceil(max_ms / float(step_ms))))
 
@@ -564,7 +566,14 @@ class TimelineCanvas(QGraphicsView):
             tx = x - tb.width() / 2.0
             ty = ruler_bottom - tick_len - tb.height()
             text_item.setPos(tx, ty)
+
+            # 关键：不接受鼠标，不可选中，不可获得焦点
+            text_item.setAcceptedMouseButtons(Qt.NoButton)
+            text_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
+            text_item.setFlag(QGraphicsItem.ItemIsFocusable, False)
+
             self._scene.addItem(text_item)
+
     # ---------- 鼠标事件：点击 & 拖拽 & 缩放 ----------
 
     def mousePressEvent(self, event) -> None:
@@ -575,6 +584,23 @@ class TimelineCanvas(QGraphicsView):
         if isinstance(item, QGraphicsSimpleTextItem) and isinstance(item.parentItem(), QGraphicsRectItem):
             item = item.parentItem()
 
+        # 特殊处理：点击“裸的”文字（轨道名 / 步骤数字）时，什么也不做，直接刷新一遍
+        #
+        # 这些文字是我们自己加的 QGraphicsSimpleTextItem，parentItem() 为 None：
+        # - 轨道标题：[模式:XXX] 轨道名
+        # - 顶部步骤数字：0 / 1 / 2 / ...
+        #
+        # Qt 在点击它们时可能会应用选中/高亮效果，导致看起来“消失”；
+        # 这里直接拦截点击并重建场景，保证它们按我们自己的颜色重新画出来。
+        if isinstance(item, QGraphicsSimpleTextItem) and item.parentItem() is None:
+            # 强制重建当前视图
+            try:
+                self.set_data(self._ctx, self._preset, self._current_mode_id)
+            except Exception:
+                pass
+            return
+
+        # 新增轨道按钮：矩形本体
         if isinstance(item, QGraphicsRectItem):
             tag = item.data(0)
             if tag == "add_track_button":
