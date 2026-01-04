@@ -821,11 +821,25 @@ class RotationEditorPage(QWidget):
 
     def _ensure_engine(self) -> MacroEngine:
         if self._engine is None:
+            # 从 Base.exec 读取技能间默认间隔
+            try:
+                ex = self._ctx.base.exec
+                gap = int(getattr(ex, "default_skill_gap_ms", 50) or 50)
+                if gap < 0:
+                    gap = 0
+            except Exception:
+                gap = 50
+
             self._engine = MacroEngine(
                 ctx=self._ctx,
                 scheduler=self._dispatcher,
                 callbacks=self,
-                config=EngineConfig(),
+                config=EngineConfig(
+                    # 轮询间隔仍使用默认 20ms
+                    poll_interval_ms=20,
+                    default_skill_gap_ms=gap,
+                    stop_on_error=True,
+                ),
             )
         return self._engine
 

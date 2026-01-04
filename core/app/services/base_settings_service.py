@@ -35,9 +35,10 @@ class BaseSettingsPatch:
     cast_bar_point_id: str
     cast_bar_tolerance: int
 
-    # 执行策略：启停热键
+    # 执行策略：启停热键 + 技能间默认间隔
     exec_toggle_enabled: bool
     exec_toggle_hotkey: str
+    exec_skill_gap_ms: int
 
 
 class BaseSettingsService:
@@ -90,6 +91,9 @@ class BaseSettingsService:
                     raise ValueError("执行启停热键不能使用 Esc")
             # hk_exec 允许为空（视为未配置），后面会按 enabled & hotkey 决定是否生效
 
+        # 技能间默认间隔
+        _ = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
+
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         theme = (patch.theme or "").strip()
         if theme == "---" or not theme:
@@ -130,6 +134,10 @@ class BaseSettingsService:
         b.exec.enabled = enabled
         b.exec.toggle_hotkey = hk_exec if enabled else ""
 
+        # 执行策略：技能间默认间隔
+        gap = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
+        b.exec.default_skill_gap_ms = gap
+        
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
         self.validate_patch(patch)
 

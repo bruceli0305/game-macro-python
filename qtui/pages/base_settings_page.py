@@ -65,7 +65,9 @@ class BaseSettingsPage(QWidget):
     - 通过 ProfileSession.subscribe_dirty 显示“未保存*”
     - 取色确认热键使用 HotkeyEdit 录制
     - 施法完成策略配置（定时 / 施法条像素）
-    - 执行策略：执行启停热键（toggle）
+    - 执行策略：
+        * 执行启停热键
+        * 技能间默认间隔(ms)
     """
 
     def __init__(
@@ -238,6 +240,12 @@ class BaseSettingsPage(QWidget):
         self.hk_exec_toggle = HotkeyEdit(g_cast, initial="f9")
         form_cast.addRow("启停热键", self.hk_exec_toggle)
 
+        # 技能间默认间隔(ms)
+        self.spin_exec_skill_gap = QSpinBox(g_cast)
+        self.spin_exec_skill_gap.setRange(0, 10**6)
+        self.spin_exec_skill_gap.setSingleStep(10)
+        form_cast.addRow("技能间默认间隔(ms)", self.spin_exec_skill_gap)
+
         right_col.addWidget(g_cast)
 
         g_io = QGroupBox("保存策略", self)
@@ -355,15 +363,20 @@ class BaseSettingsPage(QWidget):
             self.txt_cast_point_id.setText(pid)
             self.spin_cast_tol.setValue(tol)
 
-            # 执行启停热键
+            # 执行策略：启停热键 + 技能间间隔
             ex = getattr(b, "exec", None)
             if ex is None:
                 self.chk_exec_hotkey.setChecked(False)
                 self.hk_exec_toggle.set_hotkey("f9")
+                self.spin_exec_skill_gap.setValue(50)
             else:
                 self.chk_exec_hotkey.setChecked(bool(getattr(ex, "enabled", False)))
                 hk_exec = getattr(ex, "toggle_hotkey", "") or ""
                 self.hk_exec_toggle.set_hotkey(hk_exec or "f9")
+                gap = int(getattr(ex, "default_skill_gap_ms", 50) or 50)
+                if gap < 0:
+                    gap = 0
+                self.spin_exec_skill_gap.setValue(gap)
 
         finally:
             self._building = False
@@ -380,7 +393,7 @@ class BaseSettingsPage(QWidget):
         monitor_policy = _MONITOR_DISP_TO_VAL.get(self.cmb_monitor.currentText(), "primary")
 
         avoid_mode = _AVOID_DISP_TO_VAL.get(self.cmb_avoid_mode.currentText(), "hide_main")
-        preview_anchor = _ANCHOR_DISP_TO_VAL.get(self.cmb_preview_anchor.currentText(), "bottom_right")
+        preview_anchor = _ANCHOR_VAL_TO_DISP.get(self.cmb_preview_anchor.currentText(), "bottom_right")
 
         # 施法模式映射
         cast_mode_disp = self.cmb_cast_mode.currentText()
@@ -412,6 +425,7 @@ class BaseSettingsPage(QWidget):
 
             exec_toggle_enabled=exec_toggle_enabled,
             exec_toggle_hotkey=exec_toggle_hotkey,
+            exec_skill_gap_ms=int(self.spin_exec_skill_gap.value()),
         )
 
     # ---------- 热键校验 ----------
@@ -464,9 +478,10 @@ class BaseSettingsPage(QWidget):
         self.txt_cast_point_id.textChanged.connect(on_any_changed)
         self.spin_cast_tol.valueChanged.connect(on_any_changed)
 
-        # 执行启停热键
+        # 执行启停热键 + 技能间默认间隔
         self.chk_exec_hotkey.toggled.connect(on_any_changed)
         self.hk_exec_toggle.hotkeyChanged.connect(on_any_changed)
+        self.spin_exec_skill_gap.valueChanged.connect(on_any_changed)
 
     def _apply_now(self) -> None:
         if self._building:
@@ -519,21 +534,32 @@ class BaseSettingsPage(QWidget):
                 return
 
             # 立即应用主题
-            self._notify.apply_theme(self._services.profile.base.ui.theme)
+            try:
+                theme = self._services.ctx.base.ui.theme
+            except Exception:
+                theme = "darkly"
+            self._notify.apply_theme(theme)
             self._notify.info("profile.json 已保存（基础配置）")
         except Exception as e:
+            # 任意异常都显示在“取色确认热键”那一行，保持原有 UX
             self._apply_hotkey_error(str(e))
             self._notify.error("保存失败", detail=str(e))
-
+            
     def _on_reload(self) -> None:
         try:
             self._services.base.reload_cmd()
             self.set_context(self._services.ctx)
-            self._notify.apply_theme(self._services.profile.base.ui.theme)
+
+            # 重新应用主题
+            try:
+                theme = self._services.ctx.base.ui.theme
+            except Exception:
+                theme = "darkly"
+            self._notify.apply_theme(theme)
+
             self._notify.info("已重新加载基础配置")
         except Exception as e:
             self._notify.error("重新加载失败", detail=str(e))
-
     # ---------- 提供给 UnsavedGuard 的统一接口 ----------
 
     def flush_to_model(self) -> None:

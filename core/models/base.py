@@ -169,9 +169,12 @@ class ExecConfig:
     - toggle_hotkey: 启停热键（全局），由后续全局热键监听使用
         * 空串或 enabled=False 表示禁用
         * 格式同其他热键，使用 normalize() 规范化
+    - default_skill_gap_ms: 每个技能执行完成后到下一个节点之间的默认间隔
+        * 0 表示“尽快”（不主动插入 sleep）
     """
     enabled: bool = False
     toggle_hotkey: str = ""  # 例如 "f9" / "ctrl+f9"
+    default_skill_gap_ms: int = 50
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "ExecConfig":
@@ -179,14 +182,15 @@ class ExecConfig:
         return ExecConfig(
             enabled=as_bool(d.get("enabled", False), False),
             toggle_hotkey=as_str(d.get("toggle_hotkey", ""), ""),
+            default_skill_gap_ms=clamp_int(as_int(d.get("default_skill_gap_ms", 50), 50), 0, 10**6),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "enabled": bool(self.enabled),
             "toggle_hotkey": self.toggle_hotkey,
+            "default_skill_gap_ms": int(self.default_skill_gap_ms),
         }
-
 
 @dataclass
 class BaseFile:
