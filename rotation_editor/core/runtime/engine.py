@@ -255,6 +255,8 @@ class MacroEngine:
         # 暂停 / 单步标记
         self._paused: bool = False
         self._step_once: bool = False
+        # 停止原因（由 stop() / Gateway 等设置，_run_loop 最终统一使用）
+        self._stop_reason: str = "finished"
 
     # ---------- 生命周期 ----------
 
@@ -265,15 +267,30 @@ class MacroEngine:
         if self._running:
             return
         self._stop_evt.clear()
+        self._stop_reason = "finished"  # 新增：每次启动重置默认停止原因
         self._thread = threading.Thread(target=self._run_loop, args=(preset,), daemon=True)
         self._running = True
         self._thread.start()
         self._sch.call_soon(lambda: self._cb.on_started(preset.id or ""))
 
     def stop(self, reason: str = "user_stop") -> None:
+        """
+        外部停止请求：
+        - 设置停止原因；
+        - 触发 _stop_evt；
+        - join 工作线程。
+
+        on_stopped 回调统一由 _run_loop 的 finally 调用，避免多处发。
+        """
         if not self._running:
             return
+
+        # 记录停止原因
+        self._stop_reason = reason
+
+        # 通知工作线程尽快退出主循环
         self._stop_evt.set()
+
         th = self._thread
         self._thread = None
         if th is not None:
@@ -281,10 +298,8 @@ class MacroEngine:
                 th.join(timeout=0.5)
             except Exception:
                 log.exception("MacroEngine thread join failed")
-        self._running = False
-        self._paused = False
-        self._step_once = False
-        self._sch.call_soon(lambda: self._cb.on_stopped(reason))
+
+    # _running / _paused / _step_once 在 _run_loop 的 finally 里统一重置
 
     # ---------- 暂停 / 单步 ----------
 
@@ -519,9 +534,19 @@ class MacroEngine:
                     self._step_once = False
 
         finally:
+            # 标志位复位
             self._running = False
             self._paused = False
             self._step_once = False
+
+            # 统一通知 UI：执行已停止
+            try:
+                reason = self._stop_reason
+            except Exception:
+                reason = "finished"
+
+            # 放到 Qt 主线程执行回调
+            self._sch.call_soon(lambda r=reason: self._cb.on_stopped(r))
 
     # ---------- 单次执行一个游标 ----------
 
@@ -681,12 +706,13 @@ class MacroEngine:
             * True  => 执行动作
 
         支持的 action：
-        - "switch_mode" : 切换到 target_mode_id 的第一条轨道（与之前一致）
+        - "switch_mode" : 切换到 target_mode_id 的第一条轨道
         - "jump_track"  : 跳转到指定模式/轨道的起点：
                           * mode_id = node.target_mode_id 或保持当前 cursor.mode_id
                           * track_id = node.target_track_id（必需）
         - "jump_node"   : 在当前轨道内按索引跳转：
                           * target_node_index 超界时回到 0
+        - "end"         : 结束整个 MacroEngine 执行（相当于用户点击“停止”）
         """
 
         # 1) 评估条件
@@ -726,6 +752,19 @@ class MacroEngine:
         # 2) 执行动作
         action = (node.action or "switch_mode").strip().lower() or "switch_mode"
 
+        # ------ end：结束整个执行引擎 ------
+        if action == "end":
+            # 标记停止原因，并设置停止事件；
+            # _run_loop 将自然退出并在 finally 中触发 on_stopped("gateway_end") 回调。
+            self._stop_reason = "gateway_end"
+            self._stop_evt.set()
+
+            # 当前游标不再前进，给一个很短的 next_time_ms 即可；
+            # 主循环检测到 _stop_evt 已设置后会退出。
+            return NodeExecResult(
+                cursor=cursor,
+                next_time_ms=now_ms() + 10,
+            )
         # ------ switch_mode ------
         if action == "switch_mode":
             target_mode_id = (node.target_mode_id or "").strip()
