@@ -336,22 +336,16 @@ class MacroEngine:
 
     def _run_loop(self, preset: RotationPreset) -> None:
         """
-        主循环（更新版）：
+        主循环（多轨 + 安全停止版）：
 
         - 全局侧：仍然只执行 global_tracks[0] 一条轨道，顺序执行节点。
-        - 模式侧：对“当前模式”下的所有轨道做拍平：
-            flat = [ (track1,0), (track1,1), ..., (track2,0), (track2,1), ... ]
+        - 模式侧：对“当前模式”下的所有轨道做拍平（基于 _build_mode_flat）：
+            flat = [ (track_id, node_index), ... ]
           然后按 flat[index] 循环执行，从入口轨道/节点对应的位置开始。
 
-        GatewayNode:
-        - 对 SkillNode：忽略其返回的 cursor（仍按 flat 顺序前进）。
-        - 对 GatewayNode：
-            * 若 switch_mode/jump_track/jump_node 导致返回的 cursor 指向
-              另一个模式/轨道/节点：
-              - 若切换模式：重建该模式的 flat & 光标，使之从目标节点位置继续。
-              - 若同模式内跳转：在当前 flat 中找到对应 (track_id,node_index) 位置，
-                将模式侧光标定位到那里。
-            * 若只是“顺序前进”（无跳转），则仍按 flat+1 往下走。
+        安全限制：
+        - preset.max_exec_nodes > 0 时：累计执行节点数达到该值，自动停止。
+        - preset.max_run_seconds > 0 时：总运行时长达到该值（秒），自动停止。
         """
         try:
             scanner = PixelScanner(ScreenCapture())
@@ -395,6 +389,10 @@ class MacroEngine:
                 self._emit_error("没有可用轨道", "Preset 下没有任何全局或模式轨道")
                 return
 
+            # ---------- 安全限制状态 ----------
+            start_ms_all = now_ms()
+            exec_nodes = 0  # 已执行节点数（全局 + 模式合计）
+
             while not self._stop_evt.is_set():
                 # 暂停状态：不执行节点，只睡一会
                 if self._paused and not self._step_once:
@@ -402,6 +400,19 @@ class MacroEngine:
                     continue
 
                 now = now_ms()
+
+                # ---------- 安全限制检查 ----------
+                if preset.max_run_seconds > 0:
+                    elapsed = now - start_ms_all
+                    if elapsed >= int(preset.max_run_seconds) * 1000:
+                        self._stop_reason = "max_run_seconds"
+                        self._stop_evt.set()
+                        break
+
+                if preset.max_exec_nodes > 0 and exec_nodes >= int(preset.max_exec_nodes):
+                    self._stop_reason = "max_exec_nodes"
+                    self._stop_evt.set()
+                    break
 
                 # 计算下一次需要执行的时间
                 times: list[int] = []
@@ -458,6 +469,7 @@ class MacroEngine:
                     global_next = gnext
                     if g_before is not None and g_node is not None:
                         self._emit_node_executed(g_before, g_node)
+                        exec_nodes += 1  # 计数一次节点执行
 
                 # ---------- 执行模式侧：在拍平序列 mode_flat 上循环 ----------
                 elif kind == "mode" and mode_id is not None and mode_flat:
@@ -485,12 +497,13 @@ class MacroEngine:
                     # 发出回调（高亮当前节点）
                     if m_before is not None and m_node is not None:
                         self._emit_node_executed(m_before, m_node)
+                        exec_nodes += 1  # 计数一次节点执行
 
                     # 默认：在 flat 中前进一格（循环）
                     new_flat_index = (mode_flat_index + 1) % len(mode_flat) if mode_flat else 0
                     new_mode_id = mode_id
 
-                    # 如果当前是 GatewayNode，可能发生了 switch_mode / jump_track / jump_node
+                    # 如果当前是 GatewayNode，可能发生了 switch_mode / jump_track / jump_node / end
                     if isinstance(m_node, GatewayNode):
                         target_cursor = mc  # _exec_gateway_node 返回的“下一位置”游标
 
@@ -545,9 +558,8 @@ class MacroEngine:
             except Exception:
                 reason = "finished"
 
-            # 放到 Qt 主线程执行回调
             self._sch.call_soon(lambda r=reason: self._cb.on_stopped(r))
-
+            
     # ---------- 单次执行一个游标 ----------
 
     def _run_single(
