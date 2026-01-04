@@ -344,6 +344,18 @@ class NodeListPanel(QWidget):
         self._rebuild_nodes()
 
     def _on_add_gateway_node(self) -> None:
+        """
+        在当前轨道末尾新增一个网关节点。
+
+        旧版本在此处会强制要求选择“目标模式”，以便立即配置 switch_mode。
+        为了让操作更轻量，这里改为：
+
+        - 仅询问网关标签；
+        - 新建时 action="end"，不指定目标模式/轨道/节点；
+        - 用户后续可以通过“编辑节点”对话框调整为 switch_mode/jump_track/jump_node。
+
+        这样就不会在“新增网关节点”时就必须选目标。
+        """
         p = self._preset
         if p is None:
             self._notify.error("当前没有选中的方案")
@@ -359,35 +371,23 @@ class NodeListPanel(QWidget):
             return
         label = (label or "").strip() or "Gateway"
 
-        modes = p.modes or []
-        if not modes:
-            self._notify.error("当前方案下还没有模式，请先新建模式")
-            return
+        # 直接创建一个 action="end" 的 GatewayNode（无目标），后续由用户编辑
+        from rotation_editor.core.models import GatewayNode  # 避免循环导入
 
-        names = [m.name or "(未命名)" for m in modes]
-        choice, ok = QInputDialog.getItem(
-            self,
-            "选择目标模式",
-            "当执行到该网关节点时，切换到哪个模式：",
-            names,
-            0,
-            False,
-        )
-        if not ok:
-            return
-        idx = names.index(choice) if choice in names else 0
-        target_mode = modes[idx]
+        nid = self._edit_svc._new_id()  # 使用服务内部的 ID 生成（已存在）
 
-        gw = self._edit_svc.add_gateway_node(
-            preset=p,
-            mode_id=self._mode_id,
-            track_id=self._track_id,
+        gw = GatewayNode(
+            id=nid,
+            kind="gateway",
             label=label,
-            target_mode_id=target_mode.id or "",
+            condition_id=None,
+            action="end",
+            target_mode_id=None,
+            target_track_id=None,
+            target_node_index=None,
         )
-        if gw is None:
-            self._notify.error("新增网关节点失败：轨道不存在")
-            return
+        t.nodes.append(gw)
+        self._edit_svc.mark_dirty()
 
         self._rebuild_nodes()
 
@@ -415,6 +415,8 @@ class NodeListPanel(QWidget):
             ctx=self._ctx,
             preset=p,
             node=n,
+            mode_id=self._mode_id,
+            track_id=self._track_id,
             notify=self._notify,
             parent=self,
         )
@@ -423,8 +425,8 @@ class NodeListPanel(QWidget):
             self._mark_dirty()
             self._rebuild_nodes()
             if 0 <= idx < self._tree.topLevelItemCount():
-                self._tree.setCurrentItem(self._tree.topLevelItem(idx))
-
+                self._tree.setCurrentItem(self._tree.topLevelItem(idx))   
+       
     def _on_set_condition(self) -> None:
         """
         为当前选中的网关节点设置/编辑条件。
