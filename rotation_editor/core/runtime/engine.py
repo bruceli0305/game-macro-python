@@ -19,6 +19,7 @@ from rotation_editor.core.runtime.clock import mono_ms
 from rotation_editor.core.runtime.state import GlobalRuntime, ModeRuntime
 from rotation_editor.core.runtime.executor import NodeExecutor, SimpleSkillState
 from rotation_editor.core.runtime.gateway_actions import apply_gateway_global, apply_gateway_mode
+from rotation_editor.core.runtime.validation import PresetValidator
 
 log = logging.getLogger(__name__)
 
@@ -51,13 +52,7 @@ class ExecutionCursor:
 
 class MacroEngine:
     """
-    第六步：模块化引擎（调度/状态/执行/动作分离）
-
-    语义保持：
-    - 全局：并行、环形、忽略 step
-    - 模式：并行、线性、按 step 同步推进，cycle 结束 reset
-    - stop 可中断 + monotonic 调度
-    - ScreenCapture 统一复用
+    第七步：加入启动前校验（PresetValidator）
     """
 
     def __init__(
@@ -93,6 +88,19 @@ class MacroEngine:
     def start(self, preset: RotationPreset) -> None:
         if self._running:
             return
+
+        # 启动前校验：失败则拒绝启动
+        issues = PresetValidator().validate(preset, ctx=self._ctx)
+        if issues:
+            lines = []
+            for it in issues[:30]:
+                lines.append(f"- [{it.code}] {it.location}: {it.message}" + (f" ({it.detail})" if it.detail else ""))
+            if len(issues) > 30:
+                lines.append(f"... 还有 {len(issues) - 30} 条错误")
+            detail = "\n".join(lines)
+            self._sch.call_soon(lambda d=detail: self._cb.on_error("循环方案校验失败，已拒绝启动", d))
+            return
+
         self._stop_evt.clear()
         self._stop_reason = "finished"
         self._thread = threading.Thread(target=self._run_loop, args=(preset,), daemon=True)
@@ -189,10 +197,8 @@ class MacroEngine:
                 default_skill_gap_ms=int(self._cfg.default_skill_gap_ms),
             )
 
-            # 全局 runtime
             global_rt = GlobalRuntime(list(preset.global_tracks or []), now_ms=mono_ms())
 
-            # 模式 runtime
             mode_rt: Optional[ModeRuntime] = None
             entry_mode_id = self._select_entry_mode_id(preset)
             if entry_mode_id:
@@ -212,7 +218,6 @@ class MacroEngine:
 
                 now = mono_ms()
 
-                # 安全限制
                 if getattr(preset, "max_run_seconds", 0) > 0:
                     if now - start_ms >= int(preset.max_run_seconds) * 1000:
                         self._stop_reason = "max_run_seconds"
@@ -224,7 +229,6 @@ class MacroEngine:
                     self._stop_evt.set()
                     break
 
-                # 重建 plan（复用 cap）
                 if self._capture_plan_dirty:
                     try:
                         plan = build_capture_plan(self._ctx, preset, capture=cap)
@@ -232,13 +236,11 @@ class MacroEngine:
                         log.exception("rebuild capture_plan failed")
                     self._capture_plan_dirty = False
 
-                # mode step 推进/循环 reset
                 if mode_rt is not None:
                     mode_rt.ensure_step_runnable()
                     if not mode_rt.has_tracks():
                         mode_rt = None
 
-                # 下一次时间
                 next_times: List[int] = []
                 next_times.extend(global_rt.all_next_times())
                 if mode_rt is not None:
@@ -253,7 +255,6 @@ class MacroEngine:
                     self._stop_evt.wait(sleep_ms / 1000.0)
                     continue
 
-                # 候选：global 优先
                 candidates: List[Tuple[str, int, str]] = []
                 for nt, tid in global_rt.ready_candidates(now):
                     candidates.append(("global", nt, tid))
@@ -271,9 +272,6 @@ class MacroEngine:
                 if self._stop_evt.is_set():
                     break
 
-                # -------------------------
-                # 执行全局
-                # -------------------------
                 if kind == "global":
                     tr = global_rt.get_track(tid)
                     st = global_rt.get_state(tid)
@@ -293,7 +291,6 @@ class MacroEngine:
                         if isinstance(node, SkillNode):
                             st.next_time_ms = executor.exec_skill_node(node)
                             st.advance(tr)
-
                         elif isinstance(node, GatewayNode):
                             ok = executor.gateway_condition_ok(preset, node)
                             if not ok:
@@ -309,7 +306,6 @@ class MacroEngine:
                                     stop_evt=self._stop_evt,
                                     set_stop_reason=set_stop_reason,
                                 )
-
                         else:
                             st.advance(tr)
                             st.next_time_ms = mono_ms() + 10
@@ -324,9 +320,6 @@ class MacroEngine:
                     self._emit_node_executed(cursor, node)
                     exec_nodes += 1
 
-                # -------------------------
-                # 执行模式
-                # -------------------------
                 else:
                     if mode_rt is None:
                         continue
@@ -351,14 +344,13 @@ class MacroEngine:
                         if isinstance(node, SkillNode):
                             st.next_time_ms = executor.exec_skill_node(node)
                             st.advance()
-
                         elif isinstance(node, GatewayNode):
                             ok = executor.gateway_condition_ok(preset, node)
                             if not ok:
                                 st.advance()
                                 st.next_time_ms = mono_ms() + 10
                             else:
-                                mode_rt2 = apply_gateway_mode(
+                                mode_rt = apply_gateway_mode(
                                     node=node,
                                     current_track_id=tid,
                                     mode_rt=mode_rt,
@@ -366,8 +358,6 @@ class MacroEngine:
                                     stop_evt=self._stop_evt,
                                     set_stop_reason=set_stop_reason,
                                 )
-                                mode_rt = mode_rt2
-
                         else:
                             st.advance()
                             st.next_time_ms = mono_ms() + 10
@@ -382,7 +372,6 @@ class MacroEngine:
                     self._emit_node_executed(cursor, node)
                     exec_nodes += 1
 
-                # 单步：执行一次后回到暂停
                 if self._step_once:
                     self._paused = True
                     self._step_once = False
