@@ -55,11 +55,17 @@ _ANCHOR_DISP_TO_VAL = {
 }
 _ANCHOR_VAL_TO_DISP = {v: k for k, v in _ANCHOR_DISP_TO_VAL.items()}
 
+_START_SIGNAL_DISP_TO_VAL = {
+    "技能像素变化（pixel）": "pixel",
+    "施法条变化（cast_bar）": "cast_bar",
+    "不检测直接开始（none）": "none",
+}
+_START_SIGNAL_VAL_TO_DISP = {v: k for k, v in _START_SIGNAL_DISP_TO_VAL.items()}
+
 
 class BaseSettingsPage(QWidget):
     """
-    基础配置页面（Qt 版）：
-    ...
+    基础配置页面（Qt 版）
     """
 
     def __init__(
@@ -173,9 +179,7 @@ class BaseSettingsPage(QWidget):
 
         form_pick.addRow(QLabel("", g_pick), QLabel("", g_pick))
 
-        self.chk_mouse_avoid = QCheckBox(
-            "确认取色前鼠标避让（防止 hover 高亮污染颜色）", g_pick
-        )
+        self.chk_mouse_avoid = QCheckBox("确认取色前鼠标避让（防止 hover 高亮污染颜色）", g_pick)
         form_pick.addRow("", self.chk_mouse_avoid)
 
         self.spin_mouse_avoid_offset_y = QSpinBox(g_pick)
@@ -195,10 +199,7 @@ class BaseSettingsPage(QWidget):
         form_cast = QFormLayout(g_cast)
 
         self.cmb_cast_mode = QComboBox(g_cast)
-        self.cmb_cast_mode.addItems([
-            "仅按技能读条时间",
-            "使用施法条像素判断",
-        ])
+        self.cmb_cast_mode.addItems(["仅按技能读条时间", "使用施法条像素判断"])
         form_cast.addRow("施法完成模式", self.cmb_cast_mode)
 
         row_cast_point = QHBoxLayout()
@@ -227,6 +228,7 @@ class BaseSettingsPage(QWidget):
         self.spin_cast_max_factor.setDecimals(2)
         form_cast.addRow("施法条最长等待倍数", self.spin_cast_max_factor)
 
+        # 执行启停热键
         self.chk_exec_hotkey = QCheckBox("启用执行启停热键", g_cast)
         form_cast.addRow(self.chk_exec_hotkey)
 
@@ -238,6 +240,36 @@ class BaseSettingsPage(QWidget):
         self.spin_exec_skill_gap.setSingleStep(10)
         form_cast.addRow("技能间默认间隔(ms)", self.spin_exec_skill_gap)
 
+        # -------- 新增：状态机/轮询/重试 --------
+        self.spin_exec_poll_not_ready = QSpinBox(g_cast)
+        self.spin_exec_poll_not_ready.setRange(10, 10**6)
+        self.spin_exec_poll_not_ready.setSingleStep(10)
+        form_cast.addRow("not_ready 轮询间隔(ms)", self.spin_exec_poll_not_ready)
+
+        self.cmb_start_signal = QComboBox(g_cast)
+        self.cmb_start_signal.addItems(list(_START_SIGNAL_DISP_TO_VAL.keys()))
+        form_cast.addRow("开始施法信号", self.cmb_start_signal)
+
+        self.spin_start_timeout = QSpinBox(g_cast)
+        self.spin_start_timeout.setRange(1, 10**6)
+        self.spin_start_timeout.setSingleStep(5)
+        form_cast.addRow("开始判定超时(ms)", self.spin_start_timeout)
+
+        self.spin_start_poll = QSpinBox(g_cast)
+        self.spin_start_poll.setRange(5, 10**6)
+        self.spin_start_poll.setSingleStep(5)
+        form_cast.addRow("开始判定轮询(ms)", self.spin_start_poll)
+
+        self.spin_max_retries = QSpinBox(g_cast)
+        self.spin_max_retries.setRange(0, 1000)
+        self.spin_max_retries.setSingleStep(1)
+        form_cast.addRow("最大重试次数", self.spin_max_retries)
+
+        self.spin_retry_gap = QSpinBox(g_cast)
+        self.spin_retry_gap.setRange(0, 10**6)
+        self.spin_retry_gap.setSingleStep(10)
+        form_cast.addRow("重试间隔(ms)", self.spin_retry_gap)
+
         right_col.addWidget(g_cast)
 
         g_io = QGroupBox("保存策略", self)
@@ -245,7 +277,6 @@ class BaseSettingsPage(QWidget):
 
         self.chk_auto_save = QCheckBox("自动保存（CRUD 时生效）", g_io)
         self.chk_backup = QCheckBox("保存时生成 .bak 备份", g_io)
-
         form_io.addRow(self.chk_auto_save)
         form_io.addRow(self.chk_backup)
 
@@ -274,7 +305,6 @@ class BaseSettingsPage(QWidget):
         self._install_dirty_watchers()
 
     # ---------- 脏状态 ----------
-
     def _on_store_dirty(self, parts) -> None:
         try:
             parts_set = set(parts or [])
@@ -283,7 +313,6 @@ class BaseSettingsPage(QWidget):
         self._lbl_dirty.setText("未保存*" if "base" in parts_set else "")
 
     # ---------- 数据绑定 ----------
-
     def set_context(self, ctx: ProfileContext) -> None:
         self._ctx = ctx
         b = ctx.base
@@ -309,6 +338,7 @@ class BaseSettingsPage(QWidget):
             idx = self.cmb_avoid_mode.findText(disp_mode)
             if idx >= 0:
                 self.cmb_avoid_mode.setCurrentIndex(idx)
+
             self.spin_avoid_delay.setValue(int(av.delay_ms))
             self.chk_preview_follow.setChecked(bool(av.preview_follow_cursor))
             self.spin_preview_offset_x.setValue(int(av.preview_offset[0]))
@@ -326,59 +356,51 @@ class BaseSettingsPage(QWidget):
             self.chk_backup.setChecked(bool(b.io.backup_on_save))
 
             cb = getattr(b, "cast_bar", None)
-            if cb is None:
-                mode = "timer"
-                pid = ""
-                tol = 15
-                poll = 30
-                factor = 1.5
-            else:
-                mode = (getattr(cb, "mode", "timer") or "timer").strip().lower()
-                pid = getattr(cb, "point_id", "") or ""
-                tol = int(getattr(cb, "tolerance", 15) or 15)
-                poll = int(getattr(cb, "poll_interval_ms", 30) or 30)
-                factor = float(getattr(cb, "max_wait_factor", 1.5) or 1.5)
+            mode = (getattr(cb, "mode", "timer") or "timer").strip().lower() if cb is not None else "timer"
+            pid = getattr(cb, "point_id", "") or "" if cb is not None else ""
+            tol = int(getattr(cb, "tolerance", 15) or 15) if cb is not None else 15
+            poll = int(getattr(cb, "poll_interval_ms", 30) or 30) if cb is not None else 30
+            factor = float(getattr(cb, "max_wait_factor", 1.5) or 1.5) if cb is not None else 1.5
 
-            if mode == "bar":
-                self.cmb_cast_mode.setCurrentText("使用施法条像素判断")
-            else:
-                self.cmb_cast_mode.setCurrentText("仅按技能读条时间")
-
+            self.cmb_cast_mode.setCurrentText("使用施法条像素判断" if mode == "bar" else "仅按技能读条时间")
             self.txt_cast_point_id.setText(pid)
-            self.spin_cast_tol.setValue(tol)
-            if poll < 10:
-                poll = 10
-            if poll > 1000:
-                poll = 1000
-            self.spin_cast_poll.setValue(poll)
-
-            if factor < 0.1:
-                factor = 0.1
-            if factor > 10.0:
-                factor = 10.0
-            self.spin_cast_max_factor.setValue(factor)
+            self.spin_cast_tol.setValue(int(tol))
+            self.spin_cast_poll.setValue(int(max(10, min(1000, poll))))
+            self.spin_cast_max_factor.setValue(float(max(0.1, min(10.0, factor))))
 
             ex = getattr(b, "exec", None)
-            if ex is None:
-                self.chk_exec_hotkey.setChecked(False)
-                self.hk_exec_toggle.set_hotkey("f9")
-                self.spin_exec_skill_gap.setValue(50)
-            else:
-                self.chk_exec_hotkey.setChecked(bool(getattr(ex, "enabled", False)))
-                hk_exec = getattr(ex, "toggle_hotkey", "") or ""
-                self.hk_exec_toggle.set_hotkey(hk_exec or "f9")
-                gap = int(getattr(ex, "default_skill_gap_ms", 50) or 50)
-                if gap < 0:
-                    gap = 0
-                self.spin_exec_skill_gap.setValue(gap)
+            enabled = bool(getattr(ex, "enabled", False)) if ex is not None else False
+            hk_exec = getattr(ex, "toggle_hotkey", "") or "" if ex is not None else ""
+            gap = int(getattr(ex, "default_skill_gap_ms", 50) or 50) if ex is not None else 50
+
+            self.chk_exec_hotkey.setChecked(bool(enabled))
+            self.hk_exec_toggle.set_hotkey(hk_exec or "f9")
+            self.spin_exec_skill_gap.setValue(int(max(0, gap)))
+
+            # 新增字段加载
+            poll_not_ready = int(getattr(ex, "poll_not_ready_ms", 50) or 50) if ex is not None else 50
+            start_mode = (getattr(ex, "start_signal_mode", "pixel") or "pixel").strip().lower() if ex is not None else "pixel"
+            start_timeout = int(getattr(ex, "start_timeout_ms", 20) or 20) if ex is not None else 20
+            start_poll = int(getattr(ex, "start_poll_ms", 10) or 10) if ex is not None else 10
+            max_retries = int(getattr(ex, "max_retries", 3) or 3) if ex is not None else 3
+            retry_gap = int(getattr(ex, "retry_gap_ms", 30) or 30) if ex is not None else 30
+
+            self.spin_exec_poll_not_ready.setValue(int(max(10, poll_not_ready)))
+
+            disp_sig = _START_SIGNAL_VAL_TO_DISP.get(start_mode, "技能像素变化（pixel）")
+            idx = self.cmb_start_signal.findText(disp_sig)
+            if idx >= 0:
+                self.cmb_start_signal.setCurrentIndex(idx)
+
+            self.spin_start_timeout.setValue(int(max(1, start_timeout)))
+            self.spin_start_poll.setValue(int(max(5, start_poll)))
+            self.spin_max_retries.setValue(int(max(0, max_retries)))
+            self.spin_retry_gap.setValue(int(max(0, retry_gap)))
 
         finally:
             self._building = False
 
-        self._validate_confirm_hotkey_live()
-
     # ---------- 收集 patch ----------
-
     def _collect_patch(self) -> BaseSettingsPatch:
         theme = (self.cmb_theme.currentText() or "").strip()
         if theme == "---":
@@ -395,19 +417,26 @@ class BaseSettingsPage(QWidget):
         exec_toggle_enabled = bool(self.chk_exec_hotkey.isChecked())
         exec_toggle_hotkey = self.hk_exec_toggle.get_hotkey().strip()
 
+        start_sig_disp = self.cmb_start_signal.currentText()
+        start_sig_val = _START_SIGNAL_DISP_TO_VAL.get(start_sig_disp, "pixel")
+
         return BaseSettingsPatch(
             theme=theme or "darkly",
             monitor_policy=monitor_policy,
+
             pick_confirm_hotkey=self.hk_confirm.get_hotkey().strip(),
+
             avoid_mode=avoid_mode,
             avoid_delay_ms=clamp_int(int(self.spin_avoid_delay.value()), 0, 5000),
             preview_follow=bool(self.chk_preview_follow.isChecked()),
             preview_offset_x=int(self.spin_preview_offset_x.value()),
             preview_offset_y=int(self.spin_preview_offset_y.value()),
             preview_anchor=preview_anchor,
+
             mouse_avoid=bool(self.chk_mouse_avoid.isChecked()),
             mouse_avoid_offset_y=clamp_int(int(self.spin_mouse_avoid_offset_y.value()), 0, 500),
             mouse_avoid_settle_ms=clamp_int(int(self.spin_mouse_avoid_settle_ms.value()), 0, 500),
+
             auto_save=bool(self.chk_auto_save.isChecked()),
             backup_on_save=bool(self.chk_backup.isChecked()),
 
@@ -420,46 +449,38 @@ class BaseSettingsPage(QWidget):
             exec_toggle_enabled=exec_toggle_enabled,
             exec_toggle_hotkey=exec_toggle_hotkey,
             exec_skill_gap_ms=int(self.spin_exec_skill_gap.value()),
+
+            exec_poll_not_ready_ms=int(self.spin_exec_poll_not_ready.value()),
+            exec_start_signal_mode=start_sig_val,
+            exec_start_timeout_ms=int(self.spin_start_timeout.value()),
+            exec_start_poll_ms=int(self.spin_start_poll.value()),
+            exec_max_retries=int(self.spin_max_retries.value()),
+            exec_retry_gap_ms=int(self.spin_retry_gap.value()),
         )
 
-    # ---------- 热键校验 ----------
-
-    def _clear_hotkey_error(self) -> None:
-        self.hk_confirm.clear_error()
-
-    def _apply_hotkey_error(self, msg: str) -> None:
-        s = (msg or "").strip()
-        self.hk_confirm.set_error(s)
-
-    def _validate_confirm_hotkey_live(self) -> None:
-        try:
-            patch = self._collect_patch()
-            self._services.base.validate_patch(patch)
-            self._clear_hotkey_error()
-        except Exception as e:
-            self._apply_hotkey_error(str(e))
-
     # ---------- 防抖应用 ----------
-
     def _install_dirty_watchers(self) -> None:
         def on_any_changed(*_args) -> None:
             if self._building:
                 return
-            self._validate_confirm_hotkey_live()
             self._apply_timer.start(200)
 
+        # 绑定所有控件
         self.cmb_theme.currentTextChanged.connect(on_any_changed)
         self.cmb_monitor.currentTextChanged.connect(on_any_changed)
         self.hk_confirm.hotkeyChanged.connect(on_any_changed)
+
         self.cmb_avoid_mode.currentTextChanged.connect(on_any_changed)
         self.spin_avoid_delay.valueChanged.connect(on_any_changed)
         self.chk_preview_follow.toggled.connect(on_any_changed)
         self.spin_preview_offset_x.valueChanged.connect(on_any_changed)
         self.spin_preview_offset_y.valueChanged.connect(on_any_changed)
         self.cmb_preview_anchor.currentTextChanged.connect(on_any_changed)
+
         self.chk_mouse_avoid.toggled.connect(on_any_changed)
         self.spin_mouse_avoid_offset_y.valueChanged.connect(on_any_changed)
         self.spin_mouse_avoid_settle_ms.valueChanged.connect(on_any_changed)
+
         self.chk_auto_save.toggled.connect(on_any_changed)
         self.chk_backup.toggled.connect(on_any_changed)
 
@@ -473,6 +494,13 @@ class BaseSettingsPage(QWidget):
         self.hk_exec_toggle.hotkeyChanged.connect(on_any_changed)
         self.spin_exec_skill_gap.valueChanged.connect(on_any_changed)
 
+        self.spin_exec_poll_not_ready.valueChanged.connect(on_any_changed)
+        self.cmb_start_signal.currentTextChanged.connect(on_any_changed)
+        self.spin_start_timeout.valueChanged.connect(on_any_changed)
+        self.spin_start_poll.valueChanged.connect(on_any_changed)
+        self.spin_max_retries.valueChanged.connect(on_any_changed)
+        self.spin_retry_gap.valueChanged.connect(on_any_changed)
+
     def _apply_now(self) -> None:
         if self._building:
             return
@@ -483,22 +511,14 @@ class BaseSettingsPage(QWidget):
             pass
 
     # ---------- 施法条点位选择 ----------
-
     def _on_select_cast_point(self) -> None:
         pts = list(getattr(self._ctx.points, "points", []) or [])
         if not pts:
-            self._notify.error("当前 Profile 下没有点位，请先在“取色点位配置”页面添加点位。")
+            self._notify.error("当前 Profile 下没有点位，请先添加点位。")
             return
 
         items = [f"{p.name or '(未命名)'} [{(p.id or '')[-6:]}]" for p in pts]
-        choice, ok = QInputDialog.getItem(
-            self,
-            "选择施法条点位",
-            "请选择施法条所在的点位：",
-            items,
-            0,
-            False,
-        )
+        choice, ok = QInputDialog.getItem(self, "选择施法条点位", "请选择施法条所在的点位：", items, 0, False)
         if not ok:
             return
 
@@ -510,7 +530,6 @@ class BaseSettingsPage(QWidget):
         self.txt_cast_point_id.setText(p.id or "")
 
     # ---------- 按钮动作 ----------
-
     def _on_save(self) -> None:
         patch = self._collect_patch()
         try:
@@ -518,26 +537,14 @@ class BaseSettingsPage(QWidget):
             if not saved:
                 self._notify.status_msg("未检测到更改", ttl_ms=2000)
                 return
-
-            try:
-                theme = self._services.ctx.base.ui.theme
-            except Exception:
-                theme = "darkly"
-            self._notify.apply_theme(theme)
             self._notify.info("profile.json 已保存（基础配置）")
         except Exception as e:
-            self._apply_hotkey_error(str(e))
             self._notify.error("保存失败", detail=str(e))
 
     def _on_reload(self) -> None:
         try:
             self._services.base.reload_cmd()
             self.set_context(self._services.ctx)
-            try:
-                theme = self._services.ctx.base.ui.theme
-            except Exception:
-                theme = "darkly"
-            self._notify.apply_theme(theme)
             self._notify.info("已重新加载基础配置")
         except Exception as e:
             self._notify.error("重新加载失败", detail=str(e))

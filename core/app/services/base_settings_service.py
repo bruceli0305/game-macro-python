@@ -37,10 +37,18 @@ class BaseSettingsPatch:
     cast_bar_poll_interval_ms: int
     cast_bar_max_wait_factor: float
 
-    # 执行策略：启停热键 + 技能间默认间隔
+    # 执行策略：启停热键 + 技能间隔
     exec_toggle_enabled: bool
     exec_toggle_hotkey: str
     exec_skill_gap_ms: int
+
+    # 执行策略：轮询/开始信号/重试（新增）
+    exec_poll_not_ready_ms: int
+    exec_start_signal_mode: str     # "pixel" | "cast_bar" | "none"
+    exec_start_timeout_ms: int
+    exec_start_poll_ms: int
+    exec_max_retries: int
+    exec_retry_gap_ms: int
 
 
 class BaseSettingsService:
@@ -70,7 +78,6 @@ class BaseSettingsService:
         # 取色确认热键
         hk = normalize(patch.pick_confirm_hotkey)
         _mods, main = parse(hk)
-
         if main == "esc":
             raise ValueError("confirm_hotkey: 确认热键不能使用 Esc（Esc 固定为取消）")
 
@@ -84,7 +91,6 @@ class BaseSettingsService:
             raise ValueError("施法完成模式只能是 'timer' 或 'bar'")
         _ = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
 
-        # 施法条轮询间隔 / 最大等待倍数
         _ = clamp_int(int(patch.cast_bar_poll_interval_ms), 10, 1000)
         try:
             f = float(patch.cast_bar_max_wait_factor)
@@ -100,10 +106,25 @@ class BaseSettingsService:
                 _mods2, main2 = parse(hk_exec)
                 if main2 == "esc":
                     raise ValueError("执行启停热键不能使用 Esc")
-            # hk_exec 允许为空（视为未配置），后面会按 enabled & hotkey 决定是否生效
 
-        # 技能间默认间隔
         _ = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
+
+        # 新增：轮询/开始信号/重试
+        _ = clamp_int(int(patch.exec_poll_not_ready_ms), 10, 10**6)
+
+        smode = (patch.exec_start_signal_mode or "pixel").strip().lower()
+        if smode not in ("pixel", "cast_bar", "none"):
+            raise ValueError("开始施法信号模式只能是 'pixel' / 'cast_bar' / 'none'")
+
+        _ = clamp_int(int(patch.exec_start_timeout_ms), 1, 10**6)
+        _ = clamp_int(int(patch.exec_start_poll_ms), 5, 10**6)
+        _ = clamp_int(int(patch.exec_max_retries), 0, 1000)
+        _ = clamp_int(int(patch.exec_retry_gap_ms), 0, 10**6)
+
+        # 如果 start_signal_mode=cast_bar，必须配置 cast_bar_point_id
+        if smode == "cast_bar":
+            if not (patch.cast_bar_point_id or "").strip():
+                raise ValueError("开始施法信号=施法条变化(cast_bar) 时，必须设置“施法条点位 ID”")
 
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
         theme = (patch.theme or "").strip()
@@ -135,9 +156,7 @@ class BaseSettingsService:
         b.cast_bar.mode = cmode
         b.cast_bar.point_id = (patch.cast_bar_point_id or "").strip()
         b.cast_bar.tolerance = clamp_int(int(patch.cast_bar_tolerance), 0, 255)
-
-        poll = clamp_int(int(patch.cast_bar_poll_interval_ms), 10, 1000)
-        b.cast_bar.poll_interval_ms = poll
+        b.cast_bar.poll_interval_ms = clamp_int(int(patch.cast_bar_poll_interval_ms), 10, 1000)
 
         try:
             factor = float(patch.cast_bar_max_wait_factor)
@@ -158,9 +177,19 @@ class BaseSettingsService:
         b.exec.enabled = enabled
         b.exec.toggle_hotkey = hk_exec if enabled else ""
 
-        # 执行策略：技能间默认间隔
-        gap = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
-        b.exec.default_skill_gap_ms = gap
+        # 执行策略：技能间隔
+        b.exec.default_skill_gap_ms = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
+
+        # 新增：轮询/开始信号/重试
+        b.exec.poll_not_ready_ms = clamp_int(int(patch.exec_poll_not_ready_ms), 10, 10**6)
+        smode = (patch.exec_start_signal_mode or "pixel").strip().lower()
+        if smode not in ("pixel", "cast_bar", "none"):
+            smode = "pixel"
+        b.exec.start_signal_mode = smode
+        b.exec.start_timeout_ms = clamp_int(int(patch.exec_start_timeout_ms), 1, 10**6)
+        b.exec.start_poll_ms = clamp_int(int(patch.exec_start_poll_ms), 5, 10**6)
+        b.exec.max_retries = clamp_int(int(patch.exec_max_retries), 0, 1000)
+        b.exec.retry_gap_ms = clamp_int(int(patch.exec_retry_gap_ms), 0, 10**6)
 
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
         self.validate_patch(patch)
@@ -179,9 +208,6 @@ class BaseSettingsService:
         return True
 
     def save_cmd(self, patch: BaseSettingsPatch) -> bool:
-        """
-        应用 patch 并保存到磁盘。
-        """
         changed = self.apply_patch(patch)
 
         base_dirty = "base" in self._session.dirty_parts()
@@ -194,12 +220,8 @@ class BaseSettingsService:
         return True
 
     def reload_cmd(self) -> None:
-        """
-        从 profile.json 重新加载 base 部分。
-        """
         try:
             self._session.reload_parts({"base"})
         except Exception:
-            # 出错时交给上层 UI 处理，这里只尽量保证不崩
             pass
         self._notify_dirty()

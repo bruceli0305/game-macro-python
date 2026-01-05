@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, List, Tuple
+from typing import Callable, Optional, Protocol, List, Tuple, Dict, Any
 
 from core.profiles import ProfileContext
 from core.pick.capture import ScreenCapture
@@ -39,7 +39,15 @@ class EngineCallbacks(Protocol):
 class EngineConfig:
     poll_interval_ms: int = 20
     default_skill_gap_ms: int = 50
-    poll_not_ready_ms: int = 50  # 新增：不可释放时轮询间隔
+
+    poll_not_ready_ms: int = 50
+
+    start_signal_mode: str = "pixel"  # pixel / cast_bar / none
+    start_timeout_ms: int = 20
+    start_poll_ms: int = 10
+    max_retries: int = 3
+    retry_gap_ms: int = 30
+
     stop_on_error: bool = True
 
 
@@ -77,6 +85,27 @@ class MacroEngine:
 
         self._capture_plan_dirty: bool = False
 
+        # 调试面板数据源
+        self._cast_lock = threading.Lock()
+        self._skill_state: Optional[SimpleSkillState] = None
+
+    # ---- debug API ----
+    def get_skill_stats_snapshot(self) -> List[Dict[str, Any]]:
+        ss = self._skill_state
+        if ss is None:
+            return []
+        try:
+            return ss.snapshot_for_ui(self._ctx)
+        except Exception:
+            return []
+
+    def is_cast_locked(self) -> bool:
+        try:
+            return bool(self._cast_lock.locked())
+        except Exception:
+            return False
+
+    # ---------- 生命周期 ----------
     def is_running(self) -> bool:
         return self._running
 
@@ -135,6 +164,7 @@ class MacroEngine:
     def invalidate_capture_plan(self) -> None:
         self._capture_plan_dirty = True
 
+    # ---------- 内部：模式入口 ----------
     def _select_entry_mode_id(self, preset: RotationPreset) -> Optional[str]:
         em = (preset.entry_mode_id or "").strip()
         if em:
@@ -155,6 +185,7 @@ class MacroEngine:
             return None
         return ModeRuntime(mode_id=mid, tracks=list(mode.tracks or []), now_ms=int(now))
 
+    # ---------- 主循环 ----------
     def _run_loop(self, preset: RotationPreset) -> None:
         cap = ScreenCapture()
         scanner = PixelScanner(cap)
@@ -170,6 +201,7 @@ class MacroEngine:
 
             cast_strategy = make_cast_strategy(self._ctx, default_gap_ms=self._cfg.default_skill_gap_ms)
             skill_state = SimpleSkillState()
+            self._skill_state = skill_state  # 供 UI 读取
 
             def get_plan():
                 return plan
@@ -182,8 +214,14 @@ class MacroEngine:
                 scanner=scanner,
                 plan_getter=get_plan,
                 stop_evt=self._stop_evt,
+                cast_lock=self._cast_lock,
                 default_skill_gap_ms=int(self._cfg.default_skill_gap_ms),
                 poll_not_ready_ms=int(self._cfg.poll_not_ready_ms),
+                start_signal_mode=str(self._cfg.start_signal_mode or "pixel"),
+                start_timeout_ms=int(self._cfg.start_timeout_ms),
+                start_poll_ms=int(self._cfg.start_poll_ms),
+                max_retries=int(self._cfg.max_retries),
+                retry_gap_ms=int(self._cfg.retry_gap_ms),
             )
 
             global_rt = GlobalRuntime(list(preset.global_tracks or []), now_ms=mono_ms())
@@ -279,7 +317,7 @@ class MacroEngine:
                     try:
                         if isinstance(node, SkillNode):
                             st.next_time_ms = executor.exec_skill_node(node)
-                            st.advance(tr)
+                            st.advance(tr)  # ready=False 也推进（符合需求）
                         elif isinstance(node, GatewayNode):
                             ok = executor.gateway_condition_ok(preset, node)
                             if not ok:
@@ -332,7 +370,7 @@ class MacroEngine:
                     try:
                         if isinstance(node, SkillNode):
                             st.next_time_ms = executor.exec_skill_node(node)
-                            st.advance()
+                            st.advance()  # ready=False 也推进（符合需求）
                         elif isinstance(node, GatewayNode):
                             ok = executor.gateway_condition_ok(preset, node)
                             if not ok:

@@ -74,10 +74,8 @@ class PickConfig:
     """
     avoidance: PickAvoidanceConfig = field(default_factory=PickAvoidanceConfig)
 
-    # confirm pick by hotkey (Esc is fixed cancel in PickService)
     confirm_hotkey: str = "f8"
 
-    # mouse avoidance: move mouse away (Y-axis) before sampling the original point
     mouse_avoid: bool = True
     mouse_avoid_offset_y: int = 80
     mouse_avoid_settle_ms: int = 80
@@ -126,17 +124,7 @@ class IOConfig:
 @dataclass
 class CastBarConfig:
     """
-    施法完成判定策略（全局配置）：
-
-    - mode: "timer" | "bar"
-        * "timer": 仅按技能的 readbar_ms 等待
-        * "bar":   使用施法条像素点位判断释放完成
-    - point_id: 若 mode="bar"，引用 PointsFile 中的一个点位 ID 作为
-                “施法条读满时”的颜色基准
-    - tolerance: 颜色容差，0..255
-    - poll_interval_ms: 轮询施法条像素的时间间隔（毫秒）
-    - max_wait_factor: 最长等待倍数；实际最长等待时间为
-        max_wait = max(readbar_ms * max_wait_factor, 某个兜底值)
+    施法完成判定策略（全局配置）
     """
     mode: str = "timer"
     point_id: str = ""
@@ -152,7 +140,6 @@ class CastBarConfig:
             mode = "timer"
 
         tol = clamp_int(as_int(d.get("tolerance", 15), 15), 0, 255)
-
         poll = clamp_int(as_int(d.get("poll_interval_ms", 30), 30), 10, 1000)
 
         raw_factor = d.get("max_wait_factor", 1.5)
@@ -181,29 +168,52 @@ class CastBarConfig:
             "poll_interval_ms": int(self.poll_interval_ms),
             "max_wait_factor": float(self.max_wait_factor),
         }
+
+
 @dataclass
 class ExecConfig:
     """
     执行策略（宏引擎）相关配置：
 
-    - enabled: 是否启用执行启停热键
-    - toggle_hotkey: 启停热键（全局），由后续全局热键监听使用
-        * 空串或 enabled=False 表示禁用
-        * 格式同其他热键，使用 normalize() 规范化
-    - default_skill_gap_ms: 每个技能执行完成后到下一个节点之间的默认间隔
-        * 0 表示“尽快”（不主动插入 sleep）
+    - enabled / toggle_hotkey: 全局启停热键（仅热键控制用）
+    - default_skill_gap_ms: 技能成功/失败后到下一个节点间隔
+
+    新增（施法状态机 / 轮询 / 重试）：
+    - poll_not_ready_ms: ready=False 时的轮询间隔（推进节点，下轮 cycle 再判断）
+    - start_signal_mode: "pixel" | "cast_bar" | "none"
+    - start_timeout_ms / start_poll_ms: PREPARING -> CASTING 的判定窗口与轮询间隔
+    - max_retries / retry_gap_ms: 进入 CASTING 失败时的重试参数
     """
     enabled: bool = False
-    toggle_hotkey: str = ""  # 例如 "f9" / "ctrl+f9"
+    toggle_hotkey: str = ""
     default_skill_gap_ms: int = 50
+
+    poll_not_ready_ms: int = 50
+    start_signal_mode: str = "pixel"   # "pixel" | "cast_bar" | "none"
+    start_timeout_ms: int = 20
+    start_poll_ms: int = 10
+    max_retries: int = 3
+    retry_gap_ms: int = 30
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "ExecConfig":
         d = as_dict(d)
+
+        mode = as_str(d.get("start_signal_mode", "pixel"), "pixel").strip().lower()
+        if mode not in ("pixel", "cast_bar", "none"):
+            mode = "pixel"
+
         return ExecConfig(
             enabled=as_bool(d.get("enabled", False), False),
             toggle_hotkey=as_str(d.get("toggle_hotkey", ""), ""),
             default_skill_gap_ms=clamp_int(as_int(d.get("default_skill_gap_ms", 50), 50), 0, 10**6),
+
+            poll_not_ready_ms=clamp_int(as_int(d.get("poll_not_ready_ms", 50), 50), 10, 10**6),
+            start_signal_mode=mode,
+            start_timeout_ms=clamp_int(as_int(d.get("start_timeout_ms", 20), 20), 1, 10**6),
+            start_poll_ms=clamp_int(as_int(d.get("start_poll_ms", 10), 10), 5, 10**6),
+            max_retries=clamp_int(as_int(d.get("max_retries", 3), 3), 0, 1000),
+            retry_gap_ms=clamp_int(as_int(d.get("retry_gap_ms", 30), 30), 0, 10**6),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -211,24 +221,27 @@ class ExecConfig:
             "enabled": bool(self.enabled),
             "toggle_hotkey": self.toggle_hotkey,
             "default_skill_gap_ms": int(self.default_skill_gap_ms),
+
+            "poll_not_ready_ms": int(self.poll_not_ready_ms),
+            "start_signal_mode": self.start_signal_mode,
+            "start_timeout_ms": int(self.start_timeout_ms),
+            "start_poll_ms": int(self.start_poll_ms),
+            "max_retries": int(self.max_retries),
+            "retry_gap_ms": int(self.retry_gap_ms),
         }
+
 
 @dataclass
 class BaseFile:
     """
     Represents base.json root object.
-
-    Step 4 change:
-    - 删除 hotkeys 字段（不再存在全局进入/取消取色热键）
     """
     schema_version: int = 2
     ui: UIConfig = field(default_factory=UIConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     pick: PickConfig = field(default_factory=PickConfig)
     io: IOConfig = field(default_factory=IOConfig)
-    # 施法完成策略（定时 / 施法条像素）
     cast_bar: CastBarConfig = field(default_factory=CastBarConfig)
-    # 执行策略（启停热键等）
     exec: ExecConfig = field(default_factory=ExecConfig)
 
     @staticmethod
