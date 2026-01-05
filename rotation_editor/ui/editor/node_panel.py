@@ -205,7 +205,10 @@ class NodeListPanel(QWidget):
 
     def _rebuild_nodes(self) -> None:
         """
-        根据当前 preset/mode_id/track_id 重建节点列表。
+        根据当前 preset/mode_id/track_id 重建节点列表，并做编辑期告警：
+        - SkillNode.skill_id 缺失/不存在：标红 + 提示
+        - GatewayNode.condition_id 缺失/无效：标红 + 提示
+        - Condition.kind 非 groups 或引用缺：标红
         """
         self._tree.clear()
         t = self._current_track()
@@ -214,27 +217,92 @@ class NodeListPanel(QWidget):
             return
 
         p = self._preset
+
+        # 索引
+        skills_by_id = {s.id: s for s in (getattr(self._ctx.skills, "skills", []) or []) if getattr(s, "id", "")}
         modes_by_id = {m.id: m.name for m in (p.modes if p else [])}
-        cond_by_id = {c.id: (c.name or "(未命名条件)") for c in (p.conditions if p else [])}
+        cond_by_id = {c.id: c for c in (p.conditions if p else [])}
+
+        # 额外：判断 condition 是否“有效”
+        def cond_is_valid(c) -> tuple[bool, str]:
+            if c is None:
+                return False, "条件不存在"
+            if (c.kind or "").strip().lower() != "groups":
+                return False, f"条件 kind 非 groups：{c.kind}"
+            expr = c.expr or {}
+            if not isinstance(expr, dict):
+                return False, "条件 expr 非 dict"
+            groups = expr.get("groups", [])
+            if not isinstance(groups, list):
+                return False, "条件 groups 非 list"
+            # 引用检查（只做简单缺 ref）
+            points_by_id = {pp.id: pp for pp in (getattr(self._ctx.points, "points", []) or []) if getattr(pp, "id", "")}
+            for g in groups:
+                if not isinstance(g, dict):
+                    return False, "group 非 dict"
+                atoms = g.get("atoms", [])
+                if not isinstance(atoms, list):
+                    return False, "atoms 非 list"
+                for a in atoms:
+                    if not isinstance(a, dict):
+                        return False, "atom 非 dict"
+                    t = (a.get("type") or "").strip().lower()
+                    if t == "pixel_point":
+                        pid = (a.get("point_id") or "").strip()
+                        if not pid or pid not in points_by_id:
+                            return False, "引用了不存在的点位"
+                    if t in ("pixel_skill", "skill_cast_ge"):
+                        sid = (a.get("skill_id") or "").strip()
+                        if not sid or sid not in skills_by_id:
+                            return False, "引用了不存在的技能"
+            return True, ""
 
         for n in t.nodes:
-            # 列表显示
+            warn = False
+            warn_msgs: list[str] = []
+
             cond_text = ""
             if isinstance(n, SkillNode):
                 typ = "技能"
                 label = n.label or "Skill"
-                skill_id = n.skill_id or ""
+                sid = (n.skill_id or "").strip()
+                if not sid:
+                    skill_id = "(未设置)"
+                    warn = True
+                    warn_msgs.append("skill_id 为空")
+                elif sid not in skills_by_id:
+                    skill_id = f"(技能缺失:{sid[-6:]})"
+                    warn = True
+                    warn_msgs.append(f"skill_id 不存在：{sid}")
+                else:
+                    skill_id = sid
                 action = ""
                 target_mode = ""
             elif isinstance(n, GatewayNode):
                 typ = "网关"
                 label = n.label or "Gateway"
                 skill_id = ""
-                action = n.action or ""
+                action = (n.action or "").strip()
                 target_mode = modes_by_id.get(n.target_mode_id or "", "") if n.target_mode_id else ""
+
                 cid = getattr(n, "condition_id", None)
                 if cid:
-                    cond_text = cond_by_id.get(cid, f"(条件缺失: {cid[-6:]})")
+                    cobj = cond_by_id.get(cid)
+                    ok, reason = cond_is_valid(cobj)
+                    if cobj is None:
+                        cond_text = f"(条件缺失: {cid[-6:]})"
+                        warn = True
+                        warn_msgs.append(f"condition_id 不存在：{cid}")
+                    elif not ok:
+                        cname = getattr(cobj, "name", "") or "(未命名条件)"
+                        cond_text = f"{cname} [无效]"
+                        warn = True
+                        warn_msgs.append(f"条件无效：{reason}")
+                    else:
+                        cname = getattr(cobj, "name", "") or "(未命名条件)"
+                        cond_text = cname
+                else:
+                    cond_text = ""
             else:
                 typ = getattr(n, "kind", "") or "未知"
                 label = getattr(n, "label", "") or ""
@@ -242,7 +310,7 @@ class NodeListPanel(QWidget):
                 action = ""
                 target_mode = ""
 
-            # 步骤字段
+            # step
             try:
                 step_txt = str(int(getattr(n, "step_index", 0) or 0))
             except Exception:
@@ -250,10 +318,19 @@ class NodeListPanel(QWidget):
 
             item = QTreeWidgetItem([typ, step_txt, label, skill_id, action, target_mode, cond_text])
             item.setData(0, Qt.UserRole, getattr(n, "id", ""))
+
+            if warn:
+                # 整行标红 + tooltip
+                for col in range(0, 7):
+                    item.setForeground(col, QBrush(QColor(255, 90, 90)))
+                item.setToolTip(0, "\n".join(warn_msgs))
+                item.setToolTip(3, "\n".join(warn_msgs))
+                item.setToolTip(6, "\n".join(warn_msgs))
+
             self._tree.addTopLevelItem(item)
 
         self._btn_cond.setEnabled(False)
-        
+
     def _current_node_index(self) -> int:
         """
         返回当前选中节点在 Track.nodes 列表中的索引，若无选中或找不到则返回 -1。

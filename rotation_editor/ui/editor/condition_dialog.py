@@ -3,11 +3,12 @@ from __future__ import annotations
 import uuid
 import logging
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from functools import partial
 
 from PySide6.QtCore import Qt, QPoint
+from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -34,13 +35,10 @@ from core.models.skill import Skill
 
 from qtui.icons import load_icon
 from qtui.notify import UiNotify
-from rotation_editor.core.models import RotationPreset, Condition, GatewayNode, Track, Mode
+from rotation_editor.core.models import RotationPreset, Condition, GatewayNode, Track
 
 log = logging.getLogger(__name__)
 
-# -----------------------------
-# 数据模型（结构化，不走 AST 编辑）
-# -----------------------------
 
 @dataclass
 class Atom:
@@ -58,33 +56,17 @@ class Group:
     atoms: List[Atom]
 
 
-# -----------------------------
-# ConditionEditorDialog
-# -----------------------------
-
 class ConditionEditorDialog(QDialog):
     """
-    条件编辑对话框（稳定 ID 版，修复删除/新增 bug）：
+    条件编辑对话框（Groups-only + 编辑期校验）：
 
-    - Condition.kind 固定使用 "groups"
-    - Condition.expr 结构：
-        {
-          "groups": [
-            {
-              "id": "...",
-              "op": "and"|"or",
-              "atoms": [
-                {"id":"...","type":"pixel_point","point_id":"...","tolerance":10,"neg":false},
-                {"id":"...","type":"pixel_skill","skill_id":"...","tolerance":5,"neg":true},
-                {"id":"...","type":"skill_cast_ge","skill_id":"...","count":3,"neg":false}
-              ]
-            }
-          ]
-        }
+    - Condition.kind 固定为 "groups"
+    - Condition.expr:
+        {"groups":[{"id":"..","op":"and|or","atoms":[{...}]}]}
 
-    语义：
-    - 组与组之间固定 OR： (G1) OR (G2) OR ...
-    - 组内按 g.op 组合 atoms
+    编辑期校验：
+    - 缺 skill/point 引用、字段非法、op 非法：行标红 + tooltip
+    - 条件存在错误时：禁用“保存到当前网关”
     """
 
     def __init__(
@@ -99,7 +81,7 @@ class ConditionEditorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("编辑条件")
-        self.resize(860, 540)
+        self.resize(900, 560)
 
         self._ctx = ctx
         self._preset = preset
@@ -110,11 +92,12 @@ class ConditionEditorDialog(QDialog):
         self._current_cond_id: Optional[str] = None
         self._building: bool = False
 
-        # groups 为编辑时内存结构
         self._groups: List[Group] = []
-
-        # cond_id -> usage_count
         self._usage_by_id: Dict[str, int] = {}
+
+        # 当前表单校验结果
+        self._has_errors: bool = False
+        self._error_count: int = 0
 
         self._build_ui()
         self._reload_condition_list()
@@ -178,15 +161,19 @@ class ConditionEditorDialog(QDialog):
         right.setSpacing(6)
         body.addLayout(right, 2)
 
-        # 条件名称
+        # 条件名称 + 校验状态
         row_name = QHBoxLayout()
         row_name.addWidget(QLabel("名称:", self))
         self._edit_name = QLineEdit(self)
         self._edit_name.textChanged.connect(self._on_form_changed)
         row_name.addWidget(self._edit_name, 1)
+
+        self._lbl_validate = QLabel("", self)
+        self._lbl_validate.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        row_name.addWidget(self._lbl_validate)
         right.addLayout(row_name)
 
-        # 组内逻辑（针对当前 Tab）
+        # 组内逻辑（当前 Tab）
         row_logic = QHBoxLayout()
         row_logic.addWidget(QLabel("当前组合逻辑:", self))
         self._cmb_group_logic = QComboBox(self)
@@ -196,14 +183,14 @@ class ConditionEditorDialog(QDialog):
         row_logic.addWidget(self._cmb_group_logic, 1)
         right.addLayout(row_logic)
 
-        # Tabs：每个组一个 tab
+        # Tabs
         self._tabs = QTabWidget(self)
         self._tabs.setTabsClosable(True)
         self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tabs.currentChanged.connect(self._on_tab_changed)
         right.addWidget(self._tabs, 1)
 
-        # 原子条件按钮行
+        # 原子条件按钮
         icon_add_point = load_icon("point", style, QStyle.StandardPixmap.SP_FileIcon)
         icon_add_skill = load_icon("skill", style, QStyle.StandardPixmap.SP_FileIcon)
         icon_add_cast = load_icon("skill", style, QStyle.StandardPixmap.SP_FileDialogListView)
@@ -242,7 +229,7 @@ class ConditionEditorDialog(QDialog):
         row_atoms_btn.addStretch(1)
         right.addLayout(row_atoms_btn)
 
-        # 底部：保存到网关 / 清除网关 / 关闭
+        # 底部按钮
         row_bottom = QHBoxLayout()
         row_bottom.addStretch(1)
 
@@ -260,13 +247,12 @@ class ConditionEditorDialog(QDialog):
 
         right.addLayout(row_bottom)
 
-        # 若无 gateway，上面两个按钮不可用
         if self._gateway is None:
             self._btn_apply_gateway.setEnabled(False)
             self._btn_clear_gateway.setEnabled(False)
 
     # -----------------------------
-    # 条件列表 & 使用次数
+    # 条件列表 & usage
     # -----------------------------
 
     def _recompute_usage(self) -> None:
@@ -281,19 +267,66 @@ class ConditionEditorDialog(QDialog):
 
         for t in self._preset.global_tracks or []:
             scan_track(t)
-
         for m in self._preset.modes or []:
             for t in m.tracks or []:
                 scan_track(t)
 
         self._usage_by_id = usage
 
+    def _condition_errors_count(self, c: Condition) -> int:
+        if (c.kind or "").strip().lower() != "groups":
+            return 1
+        expr = c.expr or {}
+        if not isinstance(expr, dict):
+            return 1
+        groups = expr.get("groups", [])
+        if not isinstance(groups, list):
+            return 1
+        # 只统计“明显错误”：引用缺失、字段非法、type 非法
+        skills_by_id = {s.id: s for s in getattr(self._ctx.skills, "skills", []) or [] if getattr(s, "id", "")}
+        points_by_id = {p.id: p for p in getattr(self._ctx.points, "points", []) or [] if getattr(p, "id", "")}
+        cnt = 0
+        for g in groups:
+            if not isinstance(g, dict):
+                cnt += 1
+                continue
+            op = (g.get("op") or "and").strip().lower()
+            if op not in ("and", "or"):
+                cnt += 1
+            atoms = g.get("atoms", [])
+            if not isinstance(atoms, list):
+                cnt += 1
+                continue
+            for a in atoms:
+                if not isinstance(a, dict):
+                    cnt += 1
+                    continue
+                t = (a.get("type") or "").strip().lower()
+                if t not in ("pixel_point", "pixel_skill", "skill_cast_ge"):
+                    cnt += 1
+                    continue
+                if t == "pixel_point":
+                    pid = (a.get("point_id") or "").strip()
+                    if not pid or pid not in points_by_id:
+                        cnt += 1
+                if t in ("pixel_skill", "skill_cast_ge"):
+                    sid = (a.get("skill_id") or "").strip()
+                    if not sid or sid not in skills_by_id:
+                        cnt += 1
+        return cnt
+
     def _decorate_name(self, c: Condition) -> str:
         base = c.name or "(未命名)"
-        cnt = self._usage_by_id.get(c.id or "", 0)
-        if cnt <= 0:
-            return f"{base}  [未使用]"
-        return f"{base}  (使用 {cnt} 次)"
+        cnt_usage = self._usage_by_id.get(c.id or "", 0)
+        errs = self._condition_errors_count(c)
+        suffix = ""
+        if errs > 0:
+            suffix += f"  [无效:{errs}]"
+        if cnt_usage <= 0:
+            suffix += "  [未使用]"
+        else:
+            suffix += f"  (使用 {cnt_usage} 次)"
+        return base + suffix
 
     def _reload_condition_list(self) -> None:
         prev = self._current_cond_id
@@ -305,24 +338,17 @@ class ConditionEditorDialog(QDialog):
             for c in self._preset.conditions or []:
                 item = QListWidgetItem(self._decorate_name(c))
                 item.setData(Qt.UserRole, c.id)
-                cnt = self._usage_by_id.get(c.id or "", 0)
-                item.setToolTip("未被任何网关引用" if cnt <= 0 else f"被网关引用 {cnt} 次")
                 self._list.addItem(item)
         finally:
             self._building = False
 
-        # 恢复选择优先级：
-        # 1) 上一次选择
-        if prev:
-            if self._select_condition_in_list(prev):
-                return
+        if prev and self._select_condition_in_list(prev):
+            return
 
-        # 2) 若当前有 gateway 且已绑定
         if self._gateway is not None and self._gateway.condition_id:
             if self._select_condition_in_list(self._gateway.condition_id):
                 return
 
-        # 3) 默认选第一个
         if self._list.count() > 0:
             self._list.setCurrentRow(0)
         else:
@@ -351,7 +377,7 @@ class ConditionEditorDialog(QDialog):
         return None
 
     # -----------------------------
-    # 表单加载/保存
+    # 表单同步
     # -----------------------------
 
     def _clear_form(self) -> None:
@@ -361,6 +387,7 @@ class ConditionEditorDialog(QDialog):
             self._groups = []
             self._tabs.clear()
             self._cmb_group_logic.setEnabled(False)
+            self._set_validate_status(0, False)
         finally:
             self._building = False
 
@@ -374,19 +401,21 @@ class ConditionEditorDialog(QDialog):
                 self._clear_form()
                 return
 
+            # 不做 AST 兼容：遇到非 groups，直接重置为 groups 空结构
+            if (c.kind or "").strip().lower() != "groups" or not isinstance(c.expr, dict):
+                c.kind = "groups"
+                c.expr = {"groups": []}
+                self._mark_dirty()
+
             self._edit_name.setText(c.name or "")
 
-            # 只认 kind="groups"
-            if (c.kind or "").strip().lower() == "groups" and isinstance(c.expr, dict):
-                self._groups = self._parse_groups(c.expr)
-            else:
-                self._groups = []
-
+            self._groups = self._parse_groups(c.expr or {})
             self._rebuild_tabs(select_group_id=self._groups[0].id if self._groups else None)
         finally:
             self._building = False
 
         self._sync_group_logic_to_ui()
+        self._refresh_validation()
 
     def _apply_form_to_current(self) -> None:
         if self._building:
@@ -417,17 +446,19 @@ class ConditionEditorDialog(QDialog):
         if changed:
             self._mark_dirty()
 
-            # 更新列表显示名称/usage
-            self._recompute_usage()
-            for i in range(self._list.count()):
-                it = self._list.item(i)
-                val = it.data(Qt.UserRole)
-                if isinstance(val, str) and val == cid:
-                    it.setText(self._decorate_name(c))
-                    break
+        # 更新列表文字（包括无效计数）
+        self._recompute_usage()
+        for i in range(self._list.count()):
+            it = self._list.item(i)
+            val = it.data(Qt.UserRole)
+            if isinstance(val, str) and val == cid:
+                it.setText(self._decorate_name(c))
+                break
+
+        self._refresh_validation()
 
     # -----------------------------
-    # Tabs / Group UI
+    # Tabs & group
     # -----------------------------
 
     def _tab_title(self, g: Group, idx: int) -> str:
@@ -477,15 +508,13 @@ class ConditionEditorDialog(QDialog):
                 tree.setSelectionBehavior(QTreeWidget.SelectRows)
                 tree.setHeaderLabels(["类型", "目标", "数值/容差", "取反"])
                 tree.setColumnWidth(0, 120)
-                tree.setColumnWidth(1, 320)
-                tree.setColumnWidth(2, 90)
+                tree.setColumnWidth(1, 340)
+                tree.setColumnWidth(2, 100)
                 tree.setColumnWidth(3, 60)
                 tree.setContextMenuPolicy(Qt.CustomContextMenu)
                 tree.customContextMenuRequested.connect(partial(self._on_atoms_context_menu, g.id, tree))
-
                 v.addWidget(tree)
 
-                # 填充 atoms：每个 item 绑定 atom_id
                 for a in g.atoms:
                     it = QTreeWidgetItem()
                     it.setData(0, Qt.UserRole, a.id)
@@ -515,7 +544,6 @@ class ConditionEditorDialog(QDialog):
                     tree.addTopLevelItem(it)
 
                 tab_idx = self._tabs.addTab(page, self._tab_title(g, i))
-
                 if select_group_id and g.id == select_group_id:
                     self._tabs.setCurrentIndex(tab_idx)
 
@@ -526,6 +554,7 @@ class ConditionEditorDialog(QDialog):
             self._tabs.blockSignals(False)
 
         self._sync_group_logic_to_ui()
+        self._refresh_validation()
 
     def _sync_group_logic_to_ui(self) -> None:
         gid = self._current_group_id()
@@ -551,7 +580,7 @@ class ConditionEditorDialog(QDialog):
         self._cmb_group_logic.setEnabled(True)
 
     # -----------------------------
-    # 事件：选择/编辑
+    # 事件
     # -----------------------------
 
     def _on_select(self, curr: QListWidgetItem, prev: QListWidgetItem) -> None:  # type: ignore[override]
@@ -586,6 +615,7 @@ class ConditionEditorDialog(QDialog):
         if self._building:
             return
         self._sync_group_logic_to_ui()
+        self._refresh_validation()
 
     def _on_group_logic_changed(self) -> None:
         if self._building:
@@ -631,12 +661,7 @@ class ConditionEditorDialog(QDialog):
 
     def _on_new_condition(self) -> None:
         cid = uuid.uuid4().hex
-        cond = Condition(
-            id=cid,
-            name="新条件",
-            kind="groups",
-            expr={"groups": []},
-        )
+        cond = Condition(id=cid, name="新条件", kind="groups", expr={"groups": []})
         self._preset.conditions.append(cond)
         self._mark_dirty()
         self._reload_condition_list()
@@ -668,12 +693,10 @@ class ConditionEditorDialog(QDialog):
         if ok != QMessageBox.Yes:
             return
 
-        # 1) 删除条件
         before = len(self._preset.conditions)
         self._preset.conditions = [x for x in self._preset.conditions if x.id != cid]
         after = len(self._preset.conditions)
 
-        # 2) 清除所有 gateway 引用（避免 dangling）
         if used > 0:
             self._clear_condition_references(cid)
 
@@ -699,12 +722,11 @@ class ConditionEditorDialog(QDialog):
             for t in m.tracks or []:
                 scan_track(t)
 
-        # 如果当前 gateway 正好绑定此条件，也清掉
         if self._gateway is not None and self._gateway.condition_id == cond_id:
             self._gateway.condition_id = None
 
     # -----------------------------
-    # 组/原子条件 操作
+    # 组/原子条件操作
     # -----------------------------
 
     def _ensure_current_group(self) -> Group:
@@ -713,7 +735,6 @@ class ConditionEditorDialog(QDialog):
         if g is not None:
             return g
 
-        # 没有 group：自动建一个
         g = Group(id=uuid.uuid4().hex, op="and", atoms=[])
         self._groups.append(g)
         self._rebuild_tabs(select_group_id=g.id)
@@ -735,7 +756,6 @@ class ConditionEditorDialog(QDialog):
         choice, ok = QInputDialog.getItem(self, "选择点位", "请选择要匹配的点位：", items, 0, False)
         if not ok:
             return
-
         try:
             idx = items.index(choice)
         except Exception:
@@ -769,7 +789,6 @@ class ConditionEditorDialog(QDialog):
         choice, ok = QInputDialog.getItem(self, "选择技能", "请选择要匹配其像素的技能：", items, 0, False)
         if not ok:
             return
-
         try:
             idx = items.index(choice)
         except Exception:
@@ -803,7 +822,6 @@ class ConditionEditorDialog(QDialog):
         choice, ok = QInputDialog.getItem(self, "选择技能", "请选择要检查施放次数的技能：", items, 0, False)
         if not ok:
             return
-
         try:
             idx = items.index(choice)
         except Exception:
@@ -885,7 +903,6 @@ class ConditionEditorDialog(QDialog):
         act_del = menu.addAction("删除此原子条件")
         action = menu.exec(tree.viewport().mapToGlobal(pos))
         if action == act_del:
-            # 切到对应 group tab
             for i in range(self._tabs.count()):
                 gid = self._group_id_for_tab(i)
                 if gid == group_id:
@@ -900,6 +917,9 @@ class ConditionEditorDialog(QDialog):
     def _on_apply_to_gateway(self) -> None:
         if self._gateway is None:
             self._notify.error("当前没有网关节点上下文")
+            return
+        if self._has_errors:
+            self._notify.error("当前条件存在错误，已禁止保存到网关", detail="请先修复红色标记的原子条件（缺技能/点位或字段非法）。")
             return
         cid = self._current_cond_id
         if not cid:
@@ -965,7 +985,6 @@ class ConditionEditorDialog(QDialog):
                         continue
                     aid = str(ra.get("id") or "").strip() or uuid.uuid4().hex
                     t = str(ra.get("type") or "").strip().lower()
-
                     neg = bool(ra.get("neg", False))
 
                     if t == "pixel_point":
@@ -1014,18 +1033,141 @@ class ConditionEditorDialog(QDialog):
             if op not in ("and", "or"):
                 op = "and"
 
-            out_groups.append(
-                {
-                    "id": g.id,
-                    "op": op,
-                    "atoms": atoms_out,
-                }
-            )
+            out_groups.append({"id": g.id, "op": op, "atoms": atoms_out})
 
         return {"groups": out_groups}
 
     # -----------------------------
-    # 脏标记
+    # 编辑期校验（核心）
+    # -----------------------------
+
+    def _set_validate_status(self, error_count: int, has_errors: bool) -> None:
+        self._error_count = int(max(0, error_count))
+        self._has_errors = bool(has_errors)
+
+        if self._error_count <= 0:
+            self._lbl_validate.setText("校验通过")
+            self._lbl_validate.setStyleSheet("color: #6fdc6f;")
+        else:
+            self._lbl_validate.setText(f"存在 {self._error_count} 个错误")
+            self._lbl_validate.setStyleSheet("color: #ff6b6b;")
+
+        if self._gateway is not None:
+            self._btn_apply_gateway.setEnabled(not self._has_errors)
+            self._btn_clear_gateway.setEnabled(True)
+
+    def _validate_atom(self, a: Atom) -> List[str]:
+        errors: List[str] = []
+        kind = (a.kind or "").strip().lower()
+
+        skills_by_id = {s.id: s for s in getattr(self._ctx.skills, "skills", []) or [] if getattr(s, "id", "")}
+        points_by_id = {p.id: p for p in getattr(self._ctx.points, "points", []) or [] if getattr(p, "id", "")}
+
+        if kind not in ("pixel_point", "pixel_skill", "skill_cast_ge"):
+            errors.append(f"未知 atom kind: {a.kind}")
+            return errors
+
+        if kind == "pixel_point":
+            if not (a.ref_id or "").strip():
+                errors.append("point_id 为空")
+            elif a.ref_id not in points_by_id:
+                errors.append("point_id 不存在（点位已删除/未加载）")
+            if not (0 <= int(a.value) <= 255):
+                errors.append("tolerance 应在 0..255")
+
+        if kind == "pixel_skill":
+            if not (a.ref_id or "").strip():
+                errors.append("skill_id 为空")
+            elif a.ref_id not in skills_by_id:
+                errors.append("skill_id 不存在（技能已删除/未加载）")
+            if not (0 <= int(a.value) <= 255):
+                errors.append("tolerance 应在 0..255")
+
+        if kind == "skill_cast_ge":
+            if not (a.ref_id or "").strip():
+                errors.append("skill_id 为空")
+            elif a.ref_id not in skills_by_id:
+                errors.append("skill_id 不存在（技能已删除/未加载）")
+            if int(a.value) <= 0:
+                errors.append("count 必须 >= 1")
+
+        return errors
+
+    def _refresh_validation(self) -> None:
+        """
+        重新校验当前 groups，并把错误渲染到 UI（标红/tooltip）。
+        """
+        # 统计错误 + 标红 tree items
+        error_count = 0
+
+        # 建 atom_id -> errors
+        atom_err: Dict[str, List[str]] = {}
+        group_op_err: Dict[str, str] = {}
+
+        for g in self._groups:
+            op = (g.op or "").strip().lower()
+            if op not in ("and", "or"):
+                group_op_err[g.id] = "op 必须是 and/or"
+                error_count += 1
+            for a in g.atoms:
+                errs = self._validate_atom(a)
+                if errs:
+                    atom_err[a.id] = errs
+                    error_count += len(errs)
+
+        # 应用到 UI：遍历 tabs -> tree items
+        red = QBrush(QColor(255, 90, 90))
+        normal = QBrush(QColor(220, 220, 220))
+
+        for ti in range(self._tabs.count()):
+            page = self._tabs.widget(ti)
+            if page is None:
+                continue
+            gid = page.property("group_id")
+            gid_s = gid if isinstance(gid, str) else ""
+
+            tree = page.findChild(QTreeWidget)
+            if tree is None:
+                continue
+
+            # 更新 tab 标题（带叹号）
+            base_title = self._tabs.tabText(ti)
+            clean_title = base_title.replace(" !", "").replace("!", "").strip()
+            if gid_s and gid_s in group_op_err:
+                if "!" not in base_title:
+                    self._tabs.setTabText(ti, f"{clean_title} !")
+                self._tabs.setTabToolTip(ti, group_op_err[gid_s])
+            else:
+                self._tabs.setTabText(ti, clean_title)
+                self._tabs.setTabToolTip(ti, "")
+
+            for row in range(tree.topLevelItemCount()):
+                it = tree.topLevelItem(row)
+                if it is None:
+                    continue
+                aid = it.data(0, Qt.UserRole)
+                aid_s = aid if isinstance(aid, str) else ""
+                errs = atom_err.get(aid_s, [])
+
+                if errs:
+                    for col in range(0, 4):
+                        it.setForeground(col, red)
+                    it.setToolTip(0, "\n".join(errs))
+                    it.setToolTip(1, "\n".join(errs))
+                    it.setToolTip(2, "\n".join(errs))
+                    it.setToolTip(3, "\n".join(errs))
+                else:
+                    for col in range(0, 4):
+                        it.setForeground(col, normal)
+                    it.setToolTip(0, "")
+                    it.setToolTip(1, "")
+                    it.setToolTip(2, "")
+                    it.setToolTip(3, "")
+
+        self._set_validate_status(error_count, has_errors=(error_count > 0))
+
+    # -----------------------------
+    # 写回脏标记
     # -----------------------------
 
     def _mark_dirty(self) -> None:

@@ -484,32 +484,92 @@ class RotationEditorPage(QWidget):
             self._notify.error("请先在“循环/轨道方案”页面创建一个方案")
             return
 
+        # 规则 1：没有 mode 不允许新增任何轨道（包括全局）
+        modes = list(preset.modes or [])
+        if not modes:
+            self._notify.error("请先新增模式后再创建轨道")
+            return
+
+        # 当前 mode：优先用画布传入的 mode_id，其次用当前 UI 选中的 mode
+        preferred_mid = (mode_id or "").strip() or (self._current_mode_id or "").strip()
+
+        # 若仍为空，则回退到第一个有效 mode
+        if not preferred_mid:
+            for m in modes:
+                mid = (m.id or "").strip()
+                if mid:
+                    preferred_mid = mid
+                    break
+
+        if not preferred_mid:
+            # modes 列表存在但全是空 id（按你“不做兼容”的原则，直接禁止）
+            self._notify.error("模式 ID 无效：请先创建/修复模式（mode.id 不能为空）")
+            return
+
+        # 查当前 mode 名称
+        mode_name = ""
+        for m in modes:
+            if (m.id or "").strip() == preferred_mid:
+                mode_name = (m.name or "").strip()
+                break
+        if not mode_name:
+            mode_name = "当前模式"
+
+        # 规则 2：只允许选择“当前模式轨道 / 全局轨道”
+        scope_items = [
+            f"仅当前模式：{mode_name}",
+            "全局轨道",
+        ]
+        default_index = 0  # 默认选当前模式
+
+        choice, ok = QInputDialog.getItem(
+            self,
+            "新增轨道",
+            "请选择新增到：",
+            scope_items,
+            default_index,
+            False,
+        )
+        if not ok:
+            return
+
+        chosen_mid = preferred_mid if choice == scope_items[0] else None  # None => 全局
+
+        # 输入轨道名称
         name, ok = QInputDialog.getText(self, "新建轨道", "轨道名称：", text="新轨道")
         if not ok:
             return
 
-        mid = (mode_id or "").strip() or None
+        # 创建轨道
         track = self._edit_svc.create_track(
             preset=preset,
-            mode_id=mid,
+            mode_id=chosen_mid,  # None => 全局；否则仅当前模式
             name=name,
         )
+        if track is None:
+            self._notify.error("新建轨道失败")
+            return
 
-        if mid:
-            self._current_mode_id = mid
+        # 如果创建在模式下：切换到该模式 tab
+        if chosen_mid:
+            self._current_mode_id = chosen_mid
+
             self._tab_modes.blockSignals(True)
             try:
                 for i in range(self._tab_modes.count()):
-                    if self._tab_modes.tabData(i) == mid:
+                    if self._tab_modes.tabData(i) == chosen_mid:
                         self._tab_modes.setCurrentIndex(i)
                         break
             finally:
                 self._tab_modes.blockSignals(False)
 
+        # 刷新节点面板与时间轴
         self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._panel_nodes.set_target(mid, track.id if track else None)
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+        self._panel_nodes.set_target(chosen_mid, track.id)
 
+        # 重要：即便新建的是全局轨道，也保持当前模式视图不变（仍显示“全局 + 当前模式”）
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+        
     # ---------- Timeline / NodeList 联动 ----------
 
     def _on_timeline_node_clicked(self, mode_id: str, track_id: str, node_index: int) -> None:

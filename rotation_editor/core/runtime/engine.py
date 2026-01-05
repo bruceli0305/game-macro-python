@@ -39,6 +39,7 @@ class EngineCallbacks(Protocol):
 class EngineConfig:
     poll_interval_ms: int = 20
     default_skill_gap_ms: int = 50
+    poll_not_ready_ms: int = 50  # 新增：不可释放时轮询间隔
     stop_on_error: bool = True
 
 
@@ -51,10 +52,6 @@ class ExecutionCursor:
 
 
 class MacroEngine:
-    """
-    第七步：加入启动前校验（PresetValidator）
-    """
-
     def __init__(
         self,
         *,
@@ -80,8 +77,6 @@ class MacroEngine:
 
         self._capture_plan_dirty: bool = False
 
-    # ---------- 生命周期 ----------
-
     def is_running(self) -> bool:
         return self._running
 
@@ -89,14 +84,13 @@ class MacroEngine:
         if self._running:
             return
 
-        # 启动前校验：失败则拒绝启动
         issues = PresetValidator().validate(preset, ctx=self._ctx)
         if issues:
             lines = []
-            for it in issues[:30]:
+            for it in issues[:40]:
                 lines.append(f"- [{it.code}] {it.location}: {it.message}" + (f" ({it.detail})" if it.detail else ""))
-            if len(issues) > 30:
-                lines.append(f"... 还有 {len(issues) - 30} 条错误")
+            if len(issues) > 40:
+                lines.append(f"... 还有 {len(issues) - 40} 条错误")
             detail = "\n".join(lines)
             self._sch.call_soon(lambda d=detail: self._cb.on_error("循环方案校验失败，已拒绝启动", d))
             return
@@ -121,8 +115,6 @@ class MacroEngine:
             except Exception:
                 log.exception("MacroEngine thread join failed")
 
-    # ---------- 暂停 / 单步 ----------
-
     def pause(self) -> None:
         if not self._running:
             return
@@ -143,8 +135,6 @@ class MacroEngine:
     def invalidate_capture_plan(self) -> None:
         self._capture_plan_dirty = True
 
-    # ---------- 内部：模式入口选择 ----------
-
     def _select_entry_mode_id(self, preset: RotationPreset) -> Optional[str]:
         em = (preset.entry_mode_id or "").strip()
         if em:
@@ -164,8 +154,6 @@ class MacroEngine:
         if mode is None:
             return None
         return ModeRuntime(mode_id=mid, tracks=list(mode.tracks or []), now_ms=int(now))
-
-    # ---------- 主循环 ----------
 
     def _run_loop(self, preset: RotationPreset) -> None:
         cap = ScreenCapture()
@@ -195,6 +183,7 @@ class MacroEngine:
                 plan_getter=get_plan,
                 stop_evt=self._stop_evt,
                 default_skill_gap_ms=int(self._cfg.default_skill_gap_ms),
+                poll_not_ready_ms=int(self._cfg.poll_not_ready_ms),
             )
 
             global_rt = GlobalRuntime(list(preset.global_tracks or []), now_ms=mono_ms())
@@ -388,8 +377,6 @@ class MacroEngine:
 
             reason = self._stop_reason or "finished"
             self._sch.call_soon(lambda r=reason: self._cb.on_stopped(r))
-
-    # ---------- 回调封装 ----------
 
     def _emit_error(self, msg: str, detail: str) -> None:
         self._sch.call_soon(lambda: self._cb.on_error(msg, detail))
