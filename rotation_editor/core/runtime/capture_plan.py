@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from core.profiles import ProfileContext
 from core.pick.capture import ScreenCapture
 from core.pick.scanner import MonitorCapturePlan, CapturePlan
 
-from rotation_editor.core.models import (
-    RotationPreset,
-    Track,
-    SkillNode,
-    GatewayNode,
-)
+from rotation_editor.core.models import RotationPreset, Track, GatewayNode
 
 
 @dataclass(frozen=True)
@@ -25,10 +20,9 @@ class ProbeMeta:
 
 def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, List[ProbeMeta]]:
     """
-    Groups-only：从“运行时可能采样”的来源收集 Probe：
-
-    - cast_bar（若启用 bar 模式）：base.cast_bar.point_id 对应点位
-    - 条件（仅扫描被网关引用到的 conditions）：
+    Groups-only：
+    - cast_bar（若启用 bar 且 point_id 有效）：加入该点位
+    - 仅扫描被网关引用到的 conditions（避免 ROI 过大）：
         kind="groups" expr.groups[].atoms[]：
             - pixel_point.point_id -> 点位
             - pixel_skill.skill_id -> 技能 pixel
@@ -41,11 +35,10 @@ def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, Lis
             ProbeMeta(monitor=mk, vx=int(vx), vy=int(vy), radius=int(max(0, radius)))
         )
 
-    # id -> 对象索引
     points_by_id = {p.id: p for p in getattr(ctx.points, "points", []) or [] if getattr(p, "id", "")}
     skills_by_id = {s.id: s for s in getattr(ctx.skills, "skills", []) or [] if getattr(s, "id", "")}
 
-    # ---------- 0) cast_bar 点位 ----------
+    # 0) cast_bar 点位
     try:
         cb = getattr(ctx.base, "cast_bar", None)
         mode = (getattr(cb, "mode", "timer") or "timer").strip().lower() if cb is not None else "timer"
@@ -61,7 +54,7 @@ def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, Lis
     except Exception:
         pass
 
-    # ---------- 1) 找出被网关引用的 condition_id ----------
+    # 1) 找出被网关引用的 condition_id
     used_cond_ids: set[str] = set()
 
     def scan_track_for_conditions(track: Track) -> None:
@@ -83,7 +76,7 @@ def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, Lis
 
     cond_by_id = {c.id: c for c in preset.conditions or [] if getattr(c, "id", "")}
 
-    # ---------- 2) 扫描 groups atoms ----------
+    # 2) 扫描 groups atoms
     for cid in used_cond_ids:
         c = cond_by_id.get(cid)
         if c is None:
@@ -131,7 +124,7 @@ def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, Lis
                             rad = int(getattr(getattr(pix, "sample", None), "radius", 0) or 0)
                             _add(mon, vx, vy, rad)
 
-                # skill_cast_ge 不需要像素采样
+                # skill_cast_ge 不采样像素
 
     return by_mon
 
@@ -140,18 +133,15 @@ def build_capture_plan(
     ctx: ProfileContext,
     preset: RotationPreset,
     *,
+    capture: Optional[ScreenCapture] = None,
     roi_ratio_threshold: float = 0.4,
 ) -> CapturePlan:
     """
-    基于 ProfileContext + RotationPreset 构建 CapturePlan（ROI + 整屏混合）：
+    基于 ProfileContext + RotationPreset 构建 CapturePlan。
 
-    - collect_probes 按 monitor 收集所有 ProbeMeta。
-    - 对每个 monitor：
-        * 计算最小包围矩形 ROI（考虑半径）
-        * 与物理屏幕矩形求交集
-        * ROI面积/屏幕面积 < roi_ratio_threshold => ROI，否则整屏
+    关键：允许传入 capture 实例，避免在引擎循环中反复 new ScreenCapture。
     """
-    sc = ScreenCapture()
+    sc = capture or ScreenCapture()
     probes_by_mon = collect_probes(ctx, preset)
 
     plans: Dict[str, MonitorCapturePlan] = {}
@@ -174,9 +164,6 @@ def build_capture_plan(
             xs.append(int(m.vx) + r)
             ys.append(int(m.vy) - r)
             ys.append(int(m.vy) + r)
-
-        if not xs or not ys:
-            continue
 
         roi_left = max(int(rect.left), min(xs))
         roi_top = max(int(rect.top), min(ys))

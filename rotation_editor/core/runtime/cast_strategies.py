@@ -1,9 +1,9 @@
-# rotation_editor/core/runtime/cast_strategies.py
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 from core.pick.capture import SampleSpec
 from core.profiles import ProfileContext
@@ -14,6 +14,7 @@ class CastCompletionStrategy:
     """
     施法完成判定策略抽象：
     - wait_for_complete: 阻塞直到本次施法完成或超时
+    必须支持 stop_evt：一旦 stop_evt set，应尽快返回
     """
 
     def wait_for_complete(
@@ -22,8 +23,22 @@ class CastCompletionStrategy:
         skill_id: str,
         node_readbar_ms: int,
         rt_ctx_factory: Callable[[], RuntimeContext],
+        stop_evt: Optional[threading.Event] = None,
     ) -> None:
         raise NotImplementedError
+
+
+def _wait_ms(stop_evt: Optional[threading.Event], ms: int) -> bool:
+    """
+    等待 ms 毫秒。若 stop_evt 在等待期间被 set，则提前返回 True。
+    """
+    ms = int(ms)
+    if ms <= 0:
+        return bool(stop_evt and stop_evt.is_set())
+    if stop_evt is None:
+        time.sleep(ms / 1000.0)
+        return False
+    return bool(stop_evt.wait(ms / 1000.0))
 
 
 @dataclass
@@ -31,9 +46,11 @@ class TimerCastStrategy(CastCompletionStrategy):
     """
     纯时间模式：
     - 只根据 node_readbar_ms 等待，不做任何像素检查
+    - 支持 stop_evt 可中断
     """
 
     default_gap_ms: int = 50
+    chunk_ms: int = 30  # 分片 sleep，确保 stop 能快速生效
 
     def wait_for_complete(
         self,
@@ -41,19 +58,32 @@ class TimerCastStrategy(CastCompletionStrategy):
         skill_id: str,
         node_readbar_ms: int,
         rt_ctx_factory: Callable[[], RuntimeContext],
+        stop_evt: Optional[threading.Event] = None,
     ) -> None:
         total = max(0, int(node_readbar_ms))
-        if total > 0:
-            time.sleep(total / 1000.0)
+        if total <= 0:
+            return
+
+        remaining = total
+        chunk = max(5, int(self.chunk_ms))
+        while remaining > 0:
+            if stop_evt is not None and stop_evt.is_set():
+                return
+            step = chunk if remaining > chunk else remaining
+            stopped = _wait_ms(stop_evt, step)
+            if stopped:
+                return
+            remaining -= step
 
 
 @dataclass
 class BarCastStrategy(CastCompletionStrategy):
     """
-    施法条像素模式：
+    施法条像素模式（可中断）：
 
     - 使用 ProfileContext.points 中的某个点位作为“施法条读满时颜色”
     - 在 [0, node_readbar_ms * max_wait_factor] 内轮询该点颜色是否接近目标颜色
+    - stop_evt set 时立即返回
     """
 
     ctx: ProfileContext
@@ -68,19 +98,9 @@ class BarCastStrategy(CastCompletionStrategy):
         skill_id: str,
         node_readbar_ms: int,
         rt_ctx_factory: Callable[[], RuntimeContext],
+        stop_evt: Optional[threading.Event] = None,
     ) -> None:
-        """
-        施法条像素模式：
-
-        - 对于有读条时间的技能（node_readbar_ms > 0）：
-            * 使用 ProfileContext.points 中的某个点位作为“施法条读满时颜色”
-            * 在 [0, node_readbar_ms * max_wait_factor] 内轮询该点颜色是否接近目标颜色
-        - 对于瞬发技能（node_readbar_ms <= 0）：
-            * 不使用施法条，立即返回（不做额外等待），
-              实际节奏由 EngineConfig.default_skill_gap_ms 控制。
-        """
-
-        # 瞬发技能：不做施法条轮询，直接返回
+        # 瞬发技能：直接返回
         try:
             total_ms = int(node_readbar_ms)
         except Exception:
@@ -88,32 +108,45 @@ class BarCastStrategy(CastCompletionStrategy):
         if total_ms <= 0:
             return
 
+        if stop_evt is not None and stop_evt.is_set():
+            return
+
         # 找到施法条点位
         pts = getattr(self.ctx.points, "points", []) or []
         pt = next((p for p in pts if p.id == self.point_id), None)
         if pt is None:
-            # 找不到点位时退回 Timer 策略
+            # 找不到点位时退回 Timer
             TimerCastStrategy().wait_for_complete(
                 skill_id=skill_id,
                 node_readbar_ms=total_ms,
                 rt_ctx_factory=rt_ctx_factory,
+                stop_evt=stop_evt,
             )
             return
 
         target = pt.color
         tol = max(0, min(255, int(self.tolerance)))
-        # 最长等待时间：readbar_ms * max_wait_factor，兜底最少 500ms
-        max_wait = int(total_ms * self.max_wait_factor)
+
+        max_wait = int(total_ms * float(self.max_wait_factor))
         if max_wait <= 0:
             max_wait = 500
+
+        poll = int(self.poll_interval_ms)
+        if poll < 10:
+            poll = 10
+        if poll > 1000:
+            poll = 1000
 
         start = time.monotonic() * 1000.0
         sample = SampleSpec(mode=pt.sample.mode, radius=int(pt.sample.radius))
 
         while True:
+            if stop_evt is not None and stop_evt.is_set():
+                return
+
             now = time.monotonic() * 1000.0
-            if now - start >= max_wait:
-                break  # 超时视为完成
+            if now - start >= float(max_wait):
+                return  # 超时视为完成
 
             rt_ctx = rt_ctx_factory()
             try:
@@ -125,17 +158,17 @@ class BarCastStrategy(CastCompletionStrategy):
                     require_inside=False,
                 )
             except Exception:
-                # 采样失败时短暂等待重试
-                time.sleep(self.poll_interval_ms / 1000.0)
+                # 采样失败：短暂等待后重试（可被 stop 打断）
+                _wait_ms(stop_evt, poll)
                 continue
 
             dr = abs(int(r) - int(target.r))
             dg = abs(int(g) - int(target.g))
             db = abs(int(b) - int(target.b))
             if max(dr, dg, db) <= tol:
-                break
+                return
 
-            time.sleep(self.poll_interval_ms / 1000.0)
+            _wait_ms(stop_evt, poll)
 
 
 def make_cast_strategy(ctx: ProfileContext, *, default_gap_ms: int = 50) -> CastCompletionStrategy:
@@ -153,7 +186,6 @@ def make_cast_strategy(ctx: ProfileContext, *, default_gap_ms: int = 50) -> Cast
     if mode != "bar" or not pid:
         return TimerCastStrategy(default_gap_ms=default_gap_ms)
 
-    # 使用基础配置中的施法条轮询间隔和最长等待倍数
     try:
         poll = int(getattr(cb, "poll_interval_ms", 30) or 30)
     except Exception:

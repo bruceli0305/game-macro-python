@@ -7,6 +7,10 @@ import threading
 import mss
 
 
+# 模块级 TLS：同一线程内所有 ScreenCapture 实例共享一个 mss.mss()
+_TLS = threading.local()
+
+
 @dataclass(frozen=True)
 class SampleSpec:
     mode: str = "single"      # "single" | "mean_square"
@@ -34,46 +38,43 @@ class Rect:
 
 class ScreenCapture:
     """
-    Screen capture helper (mss) with thread-local instance.
+    Screen capture helper (mss), now using MODULE-LEVEL thread-local storage.
 
-    Key changes (lifecycle simplification):
-    - No global _instances tracking (no tid->mss map).
-    - One mss.mss() per thread via threading.local().
-    - close_current_thread(): close only this thread's instance (recommended if you create/destroy threads).
-    - close(): best-effort alias to close_current_thread() (kept for backwards compatibility).
+    Why:
+    - Avoid creating multiple mss.mss() instances per thread when different parts
+      of the app instantiate ScreenCapture independently.
+    - All ScreenCapture objects in the same thread reuse one shared mss.mss().
+
+    APIs:
+    - _get_sct(): get thread-local mss instance (created lazily)
+    - close_current_thread(): close only this thread's mss instance
+    - close(): alias of close_current_thread()
     """
 
     def __init__(self) -> None:
-        self._local = threading.local()
+        # no per-instance TLS anymore
+        pass
 
     def _get_sct(self) -> mss.mss:
-        sct = getattr(self._local, "sct", None)
+        sct = getattr(_TLS, "sct", None)
         if sct is None:
             sct = mss.mss()
-            self._local.sct = sct
+            _TLS.sct = sct
         return sct
 
     def close_current_thread(self) -> None:
-        """
-        Close the mss instance bound to the CURRENT thread (if any).
-        Safe to call multiple times.
-        """
-        sct = getattr(self._local, "sct", None)
+        sct = getattr(_TLS, "sct", None)
         if sct is not None:
             try:
                 sct.close()
             except Exception:
                 pass
             try:
-                delattr(self._local, "sct")
+                delattr(_TLS, "sct")
             except Exception:
-                self._local.sct = None  # type: ignore[attr-defined]
+                _TLS.sct = None  # type: ignore[attr-defined]
 
     def close(self) -> None:
-        """
-        Backward compatibility: closes only current thread instance.
-        Note: Without global tracking, we cannot close other threads' instances from here.
-        """
         self.close_current_thread()
 
     @staticmethod
@@ -114,11 +115,6 @@ class ScreenCapture:
         )
 
     def find_monitor_key_for_abs(self, x_abs: int, y_abs: int, *, default: str = "primary") -> str:
-        """
-        Find which physical monitor contains (x_abs, y_abs).
-        Returns "primary" for idx==1, otherwise "monitor_N".
-        If not found, returns default.
-        """
         sct = self._get_sct()
         monitors = sct.monitors  # type: ignore[attr-defined]
         x_abs = int(x_abs)
@@ -160,12 +156,6 @@ class ScreenCapture:
         *,
         require_inside: bool = True,
     ) -> Tuple[int, int, int]:
-        """
-        Sample RGB at absolute screen coordinate, scoped to a monitor rect.
-
-        - require_inside=True: raise if point outside rect
-        - require_inside=False: clamp into rect
-        """
         rect = self.get_monitor_rect(monitor_key)
         x_abs = int(x_abs)
         y_abs = int(y_abs)
