@@ -728,7 +728,6 @@ class MacroEngine:
         return NodeExecResult(cursor=next_cursor, next_time_ms=next_time)
 
     # ---------- GatewayNode 执行（增强版） ----------
-
     def _exec_gateway_node(
         self,
         *,
@@ -739,7 +738,7 @@ class MacroEngine:
         resolver: TrackResolver,
     ) -> NodeExecResult:
         """
-        网关节点：
+        网关节点（动作语义对齐版）：
 
         - 若 condition_id 为空：视为“无条件”，直接执行 action
         - 若 condition_id 非空：
@@ -748,13 +747,14 @@ class MacroEngine:
             * False => 不触发动作，顺序前进
             * True  => 执行动作
 
-        支持的 action：
+        支持的 action（与 UI 对齐）：
         - "switch_mode" : 切换到 target_mode_id 的第一条轨道
-        - "jump_track"  : 跳转到指定模式/轨道的起点：
-                          * mode_id = node.target_mode_id 或保持当前 cursor.mode_id
-                          * track_id = node.target_track_id（必需）
-        - "jump_node"   : 在当前轨道内按索引跳转：
-                          * target_node_index 超界时回到 0
+        - "jump_track"  : 跳转到指定作用域(mode/global)下的目标轨道 + 目标节点：
+                        * mode_id = node.target_mode_id 或保持当前 cursor.mode_id
+                        * track_id = node.target_track_id（必需）
+                        * node_index = node.target_node_index（可选，默认 0）
+        - "jump_node"   : 仅在当前轨道内按索引跳转：
+                        * node_index = node.target_node_index（可选，默认 0）
         - "end"         : 结束整个 MacroEngine 执行（相当于用户点击“停止”）
         """
 
@@ -797,17 +797,13 @@ class MacroEngine:
 
         # ------ end：结束整个执行引擎 ------
         if action == "end":
-            # 标记停止原因，并设置停止事件；
-            # _run_loop 将自然退出并在 finally 中触发 on_stopped("gateway_end") 回调。
             self._stop_reason = "gateway_end"
             self._stop_evt.set()
-
-            # 当前游标不再前进，给一个很短的 next_time_ms 即可；
-            # 主循环检测到 _stop_evt 已设置后会退出。
             return NodeExecResult(
                 cursor=cursor,
                 next_time_ms=now_ms() + 10,
             )
+
         # ------ switch_mode ------
         if action == "switch_mode":
             target_mode_id = (node.target_mode_id or "").strip()
@@ -853,7 +849,7 @@ class MacroEngine:
 
         # ------ jump_track ------
         if action == "jump_track":
-            # 目标模式：若未指定，则保持当前模式
+            # 目标模式：若未指定，则保持当前模式（全局时 cursor.mode_id 为空/None）
             target_mode_id = (node.target_mode_id or cursor.mode_id or "").strip()
             # 目标轨道：必须指定
             target_track_id = (node.target_track_id or "").strip()
@@ -869,7 +865,6 @@ class MacroEngine:
                     next_time_ms=now_ms() + 10,
                 )
 
-            # 不强制检查 track 是否存在，交给后续 resolver；也可以显式检查一次：
             t = resolver.track_for(target_mode_id or None, target_track_id)
             if t is None:
                 log.warning(
@@ -886,11 +881,25 @@ class MacroEngine:
                     next_time_ms=now_ms() + 10,
                 )
 
+            # 目标节点：可选（默认 0），并裁剪到合法范围
+            idx = node.target_node_index if node.target_node_index is not None else 0
+            try:
+                idx = int(idx)
+            except Exception:
+                idx = 0
+            if idx < 0:
+                idx = 0
+            if t.nodes:
+                if idx >= len(t.nodes):
+                    idx = 0
+            else:
+                idx = 0
+
             new_cursor = ExecutionCursor(
                 preset_id=cursor.preset_id,
                 mode_id=target_mode_id or None,
                 track_id=t.id or "",
-                node_index=0,
+                node_index=idx,
             )
             return NodeExecResult(cursor=new_cursor, next_time_ms=now_ms() + 10)
 
@@ -910,6 +919,10 @@ class MacroEngine:
                 )
 
             idx = node.target_node_index if node.target_node_index is not None else 0
+            try:
+                idx = int(idx)
+            except Exception:
+                idx = 0
             if idx < 0 or idx >= len(track.nodes):
                 idx = 0
 
@@ -932,7 +945,7 @@ class MacroEngine:
             ),
             next_time_ms=now_ms() + 10,
         )
-
+        
     # ---------- 回调封装 ----------
 
     def _emit_error(self, msg: str, detail: str) -> None:

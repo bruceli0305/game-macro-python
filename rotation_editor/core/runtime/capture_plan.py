@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from core.profiles import ProfileContext
 from core.pick.capture import ScreenCapture
@@ -9,21 +9,14 @@ from core.pick.scanner import MonitorCapturePlan, CapturePlan
 
 from rotation_editor.core.models import (
     RotationPreset,
-    Condition,
+    Track,
     SkillNode,
     GatewayNode,
-    SkillNode,
 )
 
 
 @dataclass(frozen=True)
 class ProbeMeta:
-    """
-    静态采样点描述（用于构建 ROI 包围框）：
-    - monitor: "primary" / "monitor_2" 等
-    - vx/vy:   虚拟屏绝对坐标
-    - radius:  采样半径（mean_square 时用，single 为 0）
-    """
     monitor: str
     vx: int
     vy: int
@@ -32,67 +25,32 @@ class ProbeMeta:
 
 def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, List[ProbeMeta]]:
     """
-    从 ProfileContext + RotationPreset 中收集所有“可能用到的”采样点，
-    按 monitor 分组返回：monitor_key -> List[ProbeMeta]。
+    Groups-only：从“运行时可能采样”的来源收集 Probe：
 
-    来源：
-    - 所有 Points（points.json）
-    - 所有 Skills.pixel（skills.json）
-    - 所有 Conditions.expr_tree_v1 中的 pixel_point / pixel_skill
-      （通过 point_id / skill_id 回溯到上述两类）
+    - cast_bar（若启用 bar 模式）：base.cast_bar.point_id 对应点位
+    - 条件（仅扫描被网关引用到的 conditions）：
+        kind="groups" expr.groups[].atoms[]：
+            - pixel_point.point_id -> 点位
+            - pixel_skill.skill_id -> 技能 pixel
     """
     by_mon: Dict[str, List[ProbeMeta]] = {}
 
     def _add(monitor: str, vx: int, vy: int, radius: int) -> None:
         mk = (monitor or "primary").strip().lower() or "primary"
-        pm = ProbeMeta(monitor=mk, vx=int(vx), vy=int(vy), radius=int(max(0, radius)))
-        by_mon.setdefault(mk, []).append(pm)
+        by_mon.setdefault(mk, []).append(
+            ProbeMeta(monitor=mk, vx=int(vx), vy=int(vy), radius=int(max(0, radius)))
+        )
 
-    # ---------- 1) 所有点位 ----------
+    # id -> 对象索引
+    points_by_id = {p.id: p for p in getattr(ctx.points, "points", []) or [] if getattr(p, "id", "")}
+    skills_by_id = {s.id: s for s in getattr(ctx.skills, "skills", []) or [] if getattr(s, "id", "")}
+
+    # ---------- 0) cast_bar 点位 ----------
     try:
-        for p in getattr(ctx.points, "points", []) or []:
-            mon = p.monitor or "primary"
-            vx = int(getattr(p, "vx", 0))
-            vy = int(getattr(p, "vy", 0))
-            rad = int(getattr(getattr(p, "sample", None), "radius", 0) or 0)
-            _add(mon, vx, vy, rad)
-    except Exception:
-        pass
-
-    # ---------- 2) 所有技能像素 ----------
-    try:
-        for s in getattr(ctx.skills, "skills", []) or []:
-            pix = getattr(s, "pixel", None)
-            if pix is None:
-                continue
-            mon = pix.monitor or "primary"
-            vx = int(getattr(pix, "vx", 0))
-            vy = int(getattr(pix, "vy", 0))
-            rad = int(getattr(getattr(pix, "sample", None), "radius", 0) or 0)
-            _add(mon, vx, vy, rad)
-    except Exception:
-        pass
-
-    # 为 condition 中的 pixel_point / pixel_skill 做一个 id -> 对象 的索引
-    points_by_id = {p.id: p for p in getattr(ctx.points, "points", []) or [] if p.id}
-    skills_by_id = {s.id: s for s in getattr(ctx.skills, "skills", []) or [] if s.id}
-
-    # ---------- 3) Condition AST ----------
-    def _scan_expr(node, *, cond_name: str) -> None:
-        if not isinstance(node, dict):
-            return
-        t = (node.get("type") or "").strip().lower()
-        if t in ("logic_and", "logic_or"):
-            for ch in node.get("children", []) or []:
-                _scan_expr(ch, cond_name=cond_name)
-            return
-        if t == "logic_not":
-            ch = node.get("child")
-            if isinstance(ch, dict):
-                _scan_expr(ch, cond_name=cond_name)
-            return
-        if t == "pixel_point":
-            pid = (node.get("point_id") or "").strip()
+        cb = getattr(ctx.base, "cast_bar", None)
+        mode = (getattr(cb, "mode", "timer") or "timer").strip().lower() if cb is not None else "timer"
+        pid = (getattr(cb, "point_id", "") or "").strip() if cb is not None else ""
+        if mode == "bar" and pid:
             p = points_by_id.get(pid)
             if p is not None:
                 mon = p.monitor or "primary"
@@ -100,29 +58,80 @@ def collect_probes(ctx: ProfileContext, preset: RotationPreset) -> Dict[str, Lis
                 vy = int(getattr(p, "vy", 0))
                 rad = int(getattr(getattr(p, "sample", None), "radius", 0) or 0)
                 _add(mon, vx, vy, rad)
-            return
-        if t == "pixel_skill":
-            sid = (node.get("skill_id") or "").strip()
-            s = skills_by_id.get(sid)
-            if s is not None:
-                pix = getattr(s, "pixel", None)
-                if pix is not None:
-                    mon = pix.monitor or "primary"
-                    vx = int(getattr(pix, "vx", 0))
-                    vy = int(getattr(pix, "vy", 0))
-                    rad = int(getattr(getattr(pix, "sample", None), "radius", 0) or 0)
-                    _add(mon, vx, vy, rad)
-            return
-        # skill_cast_ge 等与像素无关，这里先忽略
-        return
-
-    try:
-        for c in preset.conditions or []:
-            kind = (c.kind or "").strip().lower()
-            if kind == "expr_tree_v1" and isinstance(c.expr, dict):
-                _scan_expr(c.expr, cond_name=c.name or "")
     except Exception:
         pass
+
+    # ---------- 1) 找出被网关引用的 condition_id ----------
+    used_cond_ids: set[str] = set()
+
+    def scan_track_for_conditions(track: Track) -> None:
+        for n in track.nodes or []:
+            if isinstance(n, GatewayNode):
+                cid = (getattr(n, "condition_id", "") or "").strip()
+                if cid:
+                    used_cond_ids.add(cid)
+
+    for t in preset.global_tracks or []:
+        scan_track_for_conditions(t)
+
+    for m in preset.modes or []:
+        for t in m.tracks or []:
+            scan_track_for_conditions(t)
+
+    if not used_cond_ids:
+        return by_mon
+
+    cond_by_id = {c.id: c for c in preset.conditions or [] if getattr(c, "id", "")}
+
+    # ---------- 2) 扫描 groups atoms ----------
+    for cid in used_cond_ids:
+        c = cond_by_id.get(cid)
+        if c is None:
+            continue
+        if (c.kind or "").strip().lower() != "groups":
+            continue
+        expr = c.expr or {}
+        if not isinstance(expr, dict):
+            continue
+        groups = expr.get("groups", [])
+        if not isinstance(groups, list):
+            continue
+
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            atoms = g.get("atoms", [])
+            if not isinstance(atoms, list):
+                continue
+
+            for a in atoms:
+                if not isinstance(a, dict):
+                    continue
+                t = (a.get("type") or "").strip().lower()
+
+                if t == "pixel_point":
+                    pid = (a.get("point_id") or "").strip()
+                    p = points_by_id.get(pid)
+                    if p is not None:
+                        mon = p.monitor or "primary"
+                        vx = int(getattr(p, "vx", 0))
+                        vy = int(getattr(p, "vy", 0))
+                        rad = int(getattr(getattr(p, "sample", None), "radius", 0) or 0)
+                        _add(mon, vx, vy, rad)
+
+                elif t == "pixel_skill":
+                    sid = (a.get("skill_id") or "").strip()
+                    s = skills_by_id.get(sid)
+                    if s is not None:
+                        pix = getattr(s, "pixel", None)
+                        if pix is not None:
+                            mon = pix.monitor or "primary"
+                            vx = int(getattr(pix, "vx", 0))
+                            vy = int(getattr(pix, "vy", 0))
+                            rad = int(getattr(getattr(pix, "sample", None), "radius", 0) or 0)
+                            _add(mon, vx, vy, rad)
+
+                # skill_cast_ge 不需要像素采样
 
     return by_mon
 
@@ -136,12 +145,11 @@ def build_capture_plan(
     """
     基于 ProfileContext + RotationPreset 构建 CapturePlan（ROI + 整屏混合）：
 
-    - 先调用 collect_probes 按 monitor 收集所有 ProbeMeta。
+    - collect_probes 按 monitor 收集所有 ProbeMeta。
     - 对每个 monitor：
-        * 根据 ProbeMeta 计算最小包围矩形 ROI（考虑半径）
+        * 计算最小包围矩形 ROI（考虑半径）
         * 与物理屏幕矩形求交集
-        * 计算 ROI 面积 / 屏幕面积，比值 < roi_ratio_threshold 时使用 ROI，否则使用整屏。
-    - 返回的 CapturePlan 只包含“有采样点”的 monitor 计划。
+        * ROI面积/屏幕面积 < roi_ratio_threshold => ROI，否则整屏
     """
     sc = ScreenCapture()
     probes_by_mon = collect_probes(ctx, preset)
@@ -156,10 +164,8 @@ def build_capture_plan(
         if W <= 0 or H <= 0:
             continue
         if not metas:
-            # 没有采样点：当前版本可以选择不截取这个屏幕
             continue
 
-        # 计算最小包围矩形（考虑半径）
         xs: List[int] = []
         ys: List[int] = []
         for m in metas:
@@ -182,7 +188,6 @@ def build_capture_plan(
         if roi_w <= 0 or roi_h <= 0:
             continue
 
-        # 面积比，决定 ROI vs 整屏
         ratio = (roi_w * roi_h) / float(max(1, W * H))
         if ratio < float(roi_ratio_threshold):
             mode = "roi"
