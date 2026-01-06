@@ -716,3 +716,37 @@ class StateStore:
             if st is None:
                 return []
             return list(st.recent_attempt_ids[: max(0, int(limit))])
+    # -------------------------
+    # Metric 重置（供网关触发）
+    # -------------------------
+
+    def reset_metric(self, skill_id: str, metric: SkillMetric) -> None:
+        """
+        将指定技能的某个聚合指标重置为 0。
+
+        当前支持：
+        - success
+        - attempt_started
+        - key_sent_ok
+        - cast_started
+        - fail（同时清空 fail_by_reason）
+        """
+        sid = (skill_id or "").strip()
+        if not sid:
+            return
+        m = (metric or "").strip()
+        with self._lock:
+            st = self._skills.get(sid)
+            if st is None:
+                return
+            if m == "success":
+                st.success = 0
+            elif m == "attempt_started":
+                st.attempt_started = 0
+            elif m == "key_sent_ok":
+                st.key_sent_ok = 0
+            elif m == "cast_started":
+                st.cast_started = 0
+            elif m == "fail":
+                st.fail = 0
+                st.fail_by_reason.clear()

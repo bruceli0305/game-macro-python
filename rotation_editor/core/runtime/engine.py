@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, Any
+from typing import Callable, Optional, Protocol, Any, Dict
 
 from core.profiles import ProfileContext
 
@@ -15,6 +15,7 @@ from rotation_editor.core.runtime.executor.skill_attempt import SkillAttemptExec
 
 from rotation_editor.ast.codec import decode_expr
 from rotation_editor.ast import collect_probes_from_expr
+from rotation_editor.ast.nodes import And, Or, Not, Const, SkillMetricGE
 from rotation_editor.core.runtime.capture.eval_bridge import eval_expr_with_capture, ensure_plan_for_probes
 
 from rotation_editor.core.services.validation_service import ValidationService
@@ -474,6 +475,9 @@ class MacroEngineNew:
             )
             return
 
+        # 条件已成立：若配置了 reset_metrics_on_fire，则重置条件中涉及的所有 skill_metric 计数
+        self._reset_metrics_for_gateway(preset, gw)
+
         act = (getattr(gw, "action", "") or "switch_mode").strip().lower() or "switch_mode"
 
         if act == "end":
@@ -592,6 +596,42 @@ class MacroEngineNew:
             )
             return
 
+        if act == "exec_skill":
+            # 条件已成立，尝试执行指定技能（不做模式跳转）
+            exec_sid = (getattr(gw, "exec_skill_id", "") or "").strip()
+            if not exec_sid:
+                # 理论上 ValidationService 应已阻止；这里防御性处理
+                self._apply_exec_result(
+                    scope=scope,
+                    track_id=track_id,
+                    res=ExecutionResult(
+                        outcome="ERROR",
+                        advance="ADVANCE",
+                        next_delay_ms=int(self._cfg.gateway_poll_delay_ms),
+                        reason="gw_exec_skill_no_id",
+                    ),
+                    now_ms=now_ms,
+                )
+                return
+
+            # 使用 SkillAttemptExecutor 执行该技能：
+            # - skill_id 按 exec_skill_id
+            # - node_id 用网关自身 id，便于在调试里区分这是“网关触发”的技能
+            res = self._attempt_exec.exec_skill_node(
+                skill_id=exec_sid,
+                node_id=(getattr(gw, "id", "") or "").strip(),
+                override_cast_ms=None,
+                node_start_expr_json=None,
+                node_complete_expr_json=None,
+            )
+            self._apply_exec_result(
+                scope=scope,
+                track_id=track_id,
+                res=res,
+                now_ms=now_ms,
+            )
+            return
+
         self._apply_exec_result(
             scope=scope,
             track_id=track_id,
@@ -678,5 +718,64 @@ class MacroEngineNew:
             self._capman.invalidate_plan()
         except Exception:
             logging.getLogger(__name__).exception("invalidate_capture_plan failed")
+
+    def get_engine_state_snapshot(self) -> Dict[str, Any]:
+        """
+        给 UI 调试面板使用：返回 StateStore 的引擎状态快照。
+        字段包括：
+            running / paused / preset_id / started_ms / stop_reason /
+            last_error / last_error_detail
+        """
+        try:
+            return self._store.get_engine_state()
+        except Exception:
+            return {}
+
+    def _reset_metrics_for_gateway(self, preset: RotationPreset, gw: GatewayNode) -> None:
+        """
+        若 gw.reset_metrics_on_fire=True，则解析其条件 AST，
+        找出其中所有 SkillMetricGE(skill_id, metric)，并重置对应计数。
+
+        - 使用 condition_expr（内联）优先；
+        - 若无内联，则使用 condition_id 引用的 Condition.expr。
+        """
+        if not getattr(gw, "reset_metrics_on_fire", False):
+            return
+
+        expr_json = self._load_gateway_condition_expr(preset, gw)
+        if not isinstance(expr_json, dict) or not expr_json:
+            return
+
+        expr, _diags = decode_expr(expr_json, path="$.gateway.condition")
+        if expr is None:
+            return
+
+        pairs: set[tuple[str, str]] = set()
+
+        def walk(e) -> None:
+            if isinstance(e, (And, Or)):
+                for c in e.children:
+                    walk(c)
+                return
+            if isinstance(e, Not):
+                walk(e.child)
+                return
+            if isinstance(e, SkillMetricGE):
+                sid = (e.skill_id or "").strip()
+                metric = str(e.metric or "").strip().lower()
+                if sid and metric:
+                    pairs.add((sid, metric))
+                return
+            # 其它节点（Const, PixelMatchPoint, PixelMatchSkill, CastBarChanged 等）忽略
+
+        walk(expr)
+
+        for sid, metric in pairs:
+            try:
+                # 类型上 metric 是 str，但 SkillMetric 是 Literal[str]，这里忽略类型检查
+                self._store.reset_metric(sid, metric)  # type: ignore[arg-type]
+            except Exception:
+                # 重置失败不应该中断引擎流程，最多记个日志（按需）
+                pass
 
 MacroEngine = MacroEngineNew

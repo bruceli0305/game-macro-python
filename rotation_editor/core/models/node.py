@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from core.models.common import as_dict, as_str, as_int
+from core.models.common import as_dict, as_str, as_int, as_bool
 
 
 @dataclass
@@ -109,8 +109,10 @@ class GatewayNode(Node):
 
     - condition_id: 引用 Condition.id（可选）
     - condition_expr: 内联 AST JSON（可选，优先于 condition_id）
-    - action: switch_mode / jump_track / jump_node / end
-    - target_*：跳转目标（稳定使用 node_id，不再支持 index）
+    - action: switch_mode / jump_track / jump_node / exec_skill / end
+    - target_*：跳转目标（switch_mode / jump_track / jump_node 用）
+    - exec_skill_id: action=exec_skill 时，要执行的技能 ID（SkillsFile.skills[].id）
+    - reset_metrics_on_fire: 条件成立并执行动作后，是否重置条件中所有 skill_metric_ge 的计数
     """
     condition_id: Optional[str] = None
     condition_expr: Optional[Dict[str, Any]] = None
@@ -119,6 +121,9 @@ class GatewayNode(Node):
     target_mode_id: Optional[str] = None
     target_track_id: Optional[str] = None
     target_node_id: Optional[str] = None
+
+    exec_skill_id: Optional[str] = None
+    reset_metrics_on_fire: bool = False
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "GatewayNode":
@@ -150,8 +155,11 @@ class GatewayNode(Node):
         if t_node_id is not None:
             t_node_id = as_str(t_node_id, "")
 
-        # 旧字段 target_node_index：彻底忽略（不兼容，不再使用）
-        # d.get("target_node_index", None)
+        exec_skill_id = d.get("exec_skill_id", None)
+        if exec_skill_id is not None:
+            exec_skill_id = as_str(exec_skill_id, "")
+
+        reset_flag = as_bool(d.get("reset_metrics_on_fire", False), False)
 
         return GatewayNode(
             id=node_id,
@@ -165,6 +173,8 @@ class GatewayNode(Node):
             target_mode_id=t_mode or None,
             target_track_id=t_track or None,
             target_node_id=(t_node_id or None),
+            exec_skill_id=exec_skill_id or None,
+            reset_metrics_on_fire=bool(reset_flag),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -187,5 +197,11 @@ class GatewayNode(Node):
             out["target_track_id"] = self.target_track_id
         if self.target_node_id:
             out["target_node_id"] = self.target_node_id
+
+        if self.exec_skill_id:
+            out["exec_skill_id"] = self.exec_skill_id
+
+        if self.reset_metrics_on_fire:
+            out["reset_metrics_on_fire"] = bool(self.reset_metrics_on_fire)
 
         return out

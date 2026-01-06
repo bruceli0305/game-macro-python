@@ -44,7 +44,7 @@ class ValidationReport:
 
 
 class ValidationService:
-    ALLOWED_GW_ACTIONS: Set[str] = {"switch_mode", "jump_track", "jump_node", "end"}
+    ALLOWED_GW_ACTIONS: Set[str] = {"switch_mode", "jump_track", "jump_node", "exec_skill", "end"}
 
     def validate_preset(self, preset: RotationPreset, *, ctx: Optional[ProfileContext] = None) -> ValidationReport:
         diags: List[Diagnostic] = []
@@ -313,4 +313,35 @@ class ValidationService:
                 diags.append(err("gw.jump_track.no_track", f"{path}.target_track_id", "jump_track 必须设置 target_track_id"))
             if not tn:
                 diags.append(err("gw.jump_track.no_node", f"{path}.target_node_id", "jump_track 必须设置 target_node_id"))
+            return
+
+        if action == "exec_skill":
+            exec_sid = (getattr(gw, "exec_skill_id", "") or "").strip()
+            if not exec_sid:
+                diags.append(
+                    err(
+                        "gw.exec_skill.no_id",
+                        f"{path}.exec_skill_id",
+                        "exec_skill 必须设置 exec_skill_id（要执行的技能 ID）",
+                    )
+                )
+                return
+
+            # ctx 若提供，则检查该技能是否存在
+            if ctx is not None:
+                try:
+                    skill_ids = set(
+                        (s.id or "") for s in (ctx.skills.skills or []) if getattr(s, "id", "")
+                    )
+                except Exception:
+                    skill_ids = set()
+                if exec_sid not in skill_ids:
+                    diags.append(
+                        err(
+                            "gw.exec_skill.bad_skill",
+                            f"{path}.exec_skill_id",
+                            "exec_skill_id 指向不存在的技能",
+                            detail=exec_sid,
+                        )
+                    )
             return

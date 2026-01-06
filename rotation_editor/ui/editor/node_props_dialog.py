@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QMessageBox,
     QGroupBox,
+    QCheckBox,
 )
 
 from core.profiles import ProfileContext
@@ -149,10 +150,12 @@ class NodePropertiesDialog(QDialog):
         self._cmb_action.addItem("切换模式 (switch_mode)", userData="switch_mode")
         self._cmb_action.addItem("跳转轨道 (jump_track)", userData="jump_track")
         self._cmb_action.addItem("跳转节点 (jump_node，仅当前轨道)", userData="jump_node")
+        self._cmb_action.addItem("执行技能 (exec_skill)", userData="exec_skill")
         self._cmb_action.addItem("结束执行 (end)", userData="end")
         row_action.addWidget(self._cmb_action, 1)
         gw_layout.addLayout(row_action)
 
+        # 目标模式
         row_target_mode = QHBoxLayout()
         self._lbl_target_mode = QLabel("目标模式:", self._panel_gw)
         row_target_mode.addWidget(self._lbl_target_mode)
@@ -160,6 +163,7 @@ class NodePropertiesDialog(QDialog):
         row_target_mode.addWidget(self._cmb_target_mode, 1)
         gw_layout.addLayout(row_target_mode)
 
+        # 目标轨道
         row_target_track = QHBoxLayout()
         self._lbl_target_track = QLabel("目标轨道:", self._panel_gw)
         row_target_track.addWidget(self._lbl_target_track)
@@ -167,12 +171,27 @@ class NodePropertiesDialog(QDialog):
         row_target_track.addWidget(self._cmb_target_track, 1)
         gw_layout.addLayout(row_target_track)
 
+        # 目标节点
         row_target_node = QHBoxLayout()
         self._lbl_target_node = QLabel("目标节点:", self._panel_gw)
         row_target_node.addWidget(self._lbl_target_node)
         self._cmb_target_node = QComboBox(self._panel_gw)
         row_target_node.addWidget(self._cmb_target_node, 1)
         gw_layout.addLayout(row_target_node)
+
+        # 执行技能（exec_skill 专用）
+        row_exec_skill = QHBoxLayout()
+        self._lbl_exec_skill = QLabel("执行技能:", self._panel_gw)
+
+        row_exec_skill.addWidget(self._lbl_exec_skill)
+        self._cmb_exec_skill = QComboBox(self._panel_gw)
+
+        row_exec_skill.addWidget(self._cmb_exec_skill, 1)
+        gw_layout.addLayout(row_exec_skill)
+
+        # 触发后重置计数（适用于条件中的 skill_metric_ge）
+        self._chk_reset_metrics = QCheckBox("动作执行后重置条件中的技能计数", self._panel_gw)
+        gw_layout.addWidget(self._chk_reset_metrics)
 
         self._grp_gw_cond = QGroupBox("内联条件 condition_expr（可选，AST JSON；优先于引用条件）", self._panel_gw)
         cg = QVBoxLayout(self._grp_gw_cond)
@@ -254,6 +273,8 @@ class NodePropertiesDialog(QDialog):
             lines.append(f"... 还有 {len(res.diagnostics) - 80} 条")
         return False, "\n".join(lines) if lines else "校验失败"
 
+    # ---------- 校验按钮 ----------
+
     def _on_check_start_expr(self) -> None:
         expr, msg = self._parse_expr_text(self._txt_start_expr.toPlainText())
         if msg:
@@ -326,6 +347,20 @@ class NodePropertiesDialog(QDialog):
         self._cmb_skill.setEnabled(True)
         for s in skills:
             self._cmb_skill.addItem(f"{s.name or '(未命名)'} [{(s.id or '')[-6:]}]", userData=s.id or "")
+
+    def _load_exec_skills(self) -> None:
+        """
+        加载可用于 exec_skill 的技能列表到网关面板的 _cmb_exec_skill。
+        """
+        self._cmb_exec_skill.clear()
+        skills: List[Skill] = list(getattr(self._ctx.skills, "skills", []) or [])
+        self._cmb_exec_skill.addItem("（未选择）", userData="")
+        if not skills:
+            self._cmb_exec_skill.setEnabled(False)
+            return
+        self._cmb_exec_skill.setEnabled(True)
+        for s in skills:
+            self._cmb_exec_skill.addItem(f"{s.name or '(未命名)'} [{(s.id or '')[-6:]}]", userData=s.id or "")
 
     def _load_modes(self) -> None:
         self._cmb_target_mode.clear()
@@ -419,13 +454,22 @@ class NodePropertiesDialog(QDialog):
             label = getattr(nn, "label", "") or getattr(nn, "kind", "") or f"节点{idx}"
             self._cmb_target_node.addItem(f"{idx}: {label} [{nid[-6:]}]", userData=nid)
 
+    # ---------- action 切换 ----------
+
     def _on_action_changed(self) -> None:
         act = self._cmb_action.currentData()
         act = act.strip().lower() if isinstance(act, str) else "switch_mode"
 
+        # 仅在 switch_mode / jump_track / jump_node 时显示 mode/track/node
         show_mode = act in ("switch_mode", "jump_track")
-        show_track = act in ("switch_mode", "jump_track")
+        show_track = act in ("switch_mode", "jump_track", "jump_node")
         show_node = act in ("switch_mode", "jump_track", "jump_node")
+        # 重置计数选项：只要有条件表达式，exec_skill / jump_track / jump_node / switch_mode 都可以使用
+        # 这里简单起见，对除 "end" 之外的所有动作都显示
+        show_reset = act in ("switch_mode", "jump_track", "jump_node", "exec_skill")
+        self._chk_reset_metrics.setVisible(show_reset)
+        # exec_skill 时仅需要 exec_skill_id，不需要 target_mode/track/node
+        show_exec_skill = (act == "exec_skill")
 
         if act == "switch_mode":
             self._lbl_target_mode.setText("目标模式(必选):")
@@ -439,10 +483,16 @@ class NodePropertiesDialog(QDialog):
         self._lbl_target_node.setVisible(show_node)
         self._cmb_target_node.setVisible(show_node)
 
+        self._lbl_exec_skill.setVisible(show_exec_skill)
+        self._cmb_exec_skill.setVisible(show_exec_skill)
+
         if show_mode:
             self._load_modes()
         self._rebuild_jump_tracks()
         self._rebuild_jump_nodes()
+
+        if show_exec_skill:
+            self._load_exec_skills()
 
     def _on_target_mode_changed(self) -> None:
         self._rebuild_jump_tracks()
@@ -516,9 +566,19 @@ class NodePropertiesDialog(QDialog):
                         self._cmb_target_node.setCurrentIndex(i)
                         break
 
+            # restore exec_skill_id
+            exec_sid = (n.exec_skill_id or "").strip()
+            if exec_sid:
+                self._load_exec_skills()
+                for i in range(self._cmb_exec_skill.count()):
+                    if self._cmb_exec_skill.itemData(i) == exec_sid:
+                        self._cmb_exec_skill.setCurrentIndex(i)
+                        break
+
             ce = getattr(n, "condition_expr", None)
             self._txt_gw_cond_expr.setPlainText(self._pretty_json(ce) if isinstance(ce, dict) else "")
-
+            # 恢复 reset_metrics_on_fire
+            self._chk_reset_metrics.setChecked(bool(getattr(n, "reset_metrics_on_fire", False)))
         else:
             self._lbl_type.setText("节点类型：未知")
             self._panel_skill.setVisible(False)
@@ -572,9 +632,11 @@ class NodePropertiesDialog(QDialog):
 
             act = self._cmb_action.currentData()
             act = act.strip().lower() if isinstance(act, str) else "switch_mode"
-            if act not in ("switch_mode", "jump_track", "jump_node", "end"):
+            if act not in ("switch_mode", "jump_track", "jump_node", "exec_skill", "end"):
                 act = "switch_mode"
             n.action = act
+            # 写回 reset_metrics_on_fire
+            n.reset_metrics_on_fire = bool(self._chk_reset_metrics.isChecked())
 
             cond_dict, cond_err = self._parse_expr_text(self._txt_gw_cond_expr.toPlainText())
             if cond_err:
@@ -590,10 +652,11 @@ class NodePropertiesDialog(QDialog):
             else:
                 n.condition_expr = None
 
-            # reset targets
+            # reset targets / exec_skill_id
             n.target_mode_id = None
             n.target_track_id = None
             n.target_node_id = None
+            n.exec_skill_id = None
 
             if act == "end":
                 self.accept()
@@ -652,6 +715,17 @@ class NodePropertiesDialog(QDialog):
                     QMessageBox.warning(self, "错误", "jump_node 必须选择目标节点。")
                     return
                 n.target_node_id = nid
+                self.accept()
+                return
+
+            if act == "exec_skill":
+                sid = self._cmb_exec_skill.currentData()
+                sid = sid if isinstance(sid, str) else ""
+                sid = sid.strip()
+                if not sid:
+                    QMessageBox.warning(self, "错误", "exec_skill 必须选择一个要执行的技能。")
+                    return
+                n.exec_skill_id = sid
                 self.accept()
                 return
 

@@ -70,9 +70,40 @@ def _fmt_reason(v: object) -> str:
     return f"{cn}({s})"
 
 
+_ENGINE_STOP_REASON_CN = {
+    "": "未运行",
+    "finished": "正常结束",
+    "user_stop": "手动停止",
+    "gateway_end": "网关结束",
+    "max_exec_nodes": "达到最大节点数",
+    "max_run_seconds": "达到最长时间",
+    "no_tracks": "没有可执行轨道",
+    "error": "执行错误",
+    "internal_error": "引擎内部错误",
+    "stopped": "停止",
+}
+
+
+def _fmt_engine_state(d: Dict[str, Any]) -> str:
+    running = bool(d.get("running", False))
+    paused = bool(d.get("paused", False))
+    reason = (str(d.get("stop_reason", "") or "")).strip().lower()
+
+    if running:
+        return _bi("运行中", "running")
+    if paused:
+        return _bi("暂停", "paused")
+
+    if not reason:
+        return _bi("未运行", "not running")
+    cn = _ENGINE_STOP_REASON_CN.get(reason, f"未知原因({reason})")
+    return f"{_bi('已停止', 'stopped')} - {cn}"
+
+
 class DebugStatsDialog(QDialog):
     """
     调试面板（适配 StateStore 快照）：
+    - 顶部：引擎状态（运行中 / 已停止 + 原因） + 施法锁状态
     - 上表：技能统计 + 当前状态
     - 下表：选中技能的最近 attempt 明细
     """
@@ -82,6 +113,7 @@ class DebugStatsDialog(QDialog):
         *,
         get_snapshot: Callable[[], List[Dict[str, Any]]],
         get_lock_state: Callable[[], bool],
+        get_engine_state: Callable[[], Dict[str, Any]],
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -90,6 +122,7 @@ class DebugStatsDialog(QDialog):
 
         self._get_snapshot = get_snapshot
         self._get_lock_state = get_lock_state
+        self._get_engine_state = get_engine_state
         self._rows: List[Dict[str, Any]] = []
 
         root = QVBoxLayout(self)
@@ -97,6 +130,14 @@ class DebugStatsDialog(QDialog):
         root.setSpacing(6)
 
         top = QHBoxLayout()
+
+        # 引擎状态标签
+        self._lbl_engine = QLabel(_bi("引擎状态", "Engine") + ": ?", self)
+        top.addWidget(self._lbl_engine)
+
+        top.addSpacing(18)
+
+        # 施法锁状态
         self._lbl_lock = QLabel(_bi("施法锁", "Cast Lock") + ": ?", self)
         top.addWidget(self._lbl_lock)
 
@@ -115,7 +156,7 @@ class DebugStatsDialog(QDialog):
         splitter = QSplitter(Qt.Vertical, self)
         root.addWidget(splitter, 1)
 
-        # 上表：技能统计（适配新字段）
+        # 上表：技能统计
         self._table = QTableWidget(self)
         self._table.setColumnCount(14)
         self._table.setHorizontalHeaderLabels([
@@ -185,6 +226,13 @@ class DebugStatsDialog(QDialog):
         return it
 
     def refresh_now(self) -> None:
+        # 引擎状态
+        try:
+            state = self._get_engine_state() or {}
+        except Exception:
+            state = {}
+        self._lbl_engine.setText(_fmt_engine_state(state))
+
         # 施法锁状态
         locked = False
         try:

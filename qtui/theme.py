@@ -12,22 +12,47 @@ LIGHT_THEMES = [
 ]
 
 
+from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QPalette, QColor
+
+
+DARK_THEMES = ["darkly", "superhero", "cyborg", "solar", "vapor"]
+LIGHT_THEMES = [
+    "flatly", "litera", "cosmo", "journal", "minty",
+    "lumen", "pulse", "sandstone", "simplex", "yeti",
+]
+
+
 def _apply_dark_palette(app: QApplication) -> None:
     palette = QPalette()
 
+    # 背景 / 窗口
     palette.setColor(QPalette.Window, QColor(53, 53, 53))
     palette.setColor(QPalette.WindowText, QColor(220, 220, 220))
     palette.setColor(QPalette.Base, QColor(42, 42, 42))
     palette.setColor(QPalette.AlternateBase, QColor(66, 66, 66))
-    palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 220))
-    palette.setColor(QPalette.ToolTipText, QColor(0, 0, 0))
+
+    # 文本 / 按钮
     palette.setColor(QPalette.Text, QColor(220, 220, 220))
     palette.setColor(QPalette.Button, QColor(53, 53, 53))
     palette.setColor(QPalette.ButtonText, QColor(220, 220, 220))
     palette.setColor(QPalette.BrightText, QColor(255, 0, 0))
+
+    # 提示
+    palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 220))
+    palette.setColor(QPalette.ToolTipText, QColor(0, 0, 0))
+
+    # 链接 / 选中
     palette.setColor(QPalette.Link, QColor(42, 130, 218))
     palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
     palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+
+    # 关键：占位文本颜色（placeholder），在深色背景上用较亮的灰色
+    try:
+        palette.setColor(QPalette.PlaceholderText, QColor(160, 160, 160))
+    except Exception:
+        # 某些旧平台可能没有 PlaceholderText，忽略
+        pass
 
     app.setPalette(palette)
 

@@ -737,6 +737,7 @@ class RotationEditorPage(QWidget):
             return
 
         if action == act_debug:
+            # 打开调试面板：传入技能快照、施法锁状态和引擎状态三类回调
             try:
                 from rotation_editor.ui.editor.debug_stats_dialog import DebugStatsDialog
             except Exception as e:
@@ -747,17 +748,28 @@ class RotationEditorPage(QWidget):
 
             def get_snapshot():
                 try:
-                    return eng.get_skill_stats_snapshot()  # type: ignore[attr-defined]
+                    return eng.get_skill_stats_snapshot()
                 except Exception:
                     return []
 
             def get_lock():
                 try:
-                    return bool(eng.is_cast_locked())  # type: ignore[attr-defined]
+                    return bool(eng.is_cast_locked())
                 except Exception:
                     return False
 
-            dlg = DebugStatsDialog(get_snapshot=get_snapshot, get_lock_state=get_lock, parent=self)
+            def get_engine_state():
+                try:
+                    return eng.get_engine_state_snapshot()
+                except Exception:
+                    return {}
+
+            dlg = DebugStatsDialog(
+                get_snapshot=get_snapshot,
+                get_lock_state=get_lock,
+                get_engine_state=get_engine_state,
+                parent=self,
+            )
             dlg.setAttribute(Qt.WA_DeleteOnClose, True)
             dlg.show()
             return
