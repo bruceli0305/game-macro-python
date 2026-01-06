@@ -82,7 +82,8 @@ class BaseSettingsService:
             raise ValueError("confirm_hotkey: 确认热键不能使用 Esc（Esc 固定为取消）")
 
         _ = clamp_int(int(patch.avoid_delay_ms), 0, 5000)
-        _ = clamp_int(int(patch.mouse_avoid_offset_y), 0, 500)
+        # 鼠标避让 Y 偏移允许负数：向上为负，向下为正
+        _ = clamp_int(int(patch.mouse_avoid_offset_y), -500, 500)
         _ = clamp_int(int(patch.mouse_avoid_settle_ms), 0, 500)
 
         # 施法完成模式 / 容差校验
@@ -143,7 +144,8 @@ class BaseSettingsService:
 
         b.pick.confirm_hotkey = normalize(patch.pick_confirm_hotkey) or "f8"
         b.pick.mouse_avoid = bool(patch.mouse_avoid)
-        b.pick.mouse_avoid_offset_y = clamp_int(int(patch.mouse_avoid_offset_y), 0, 500)
+        # 这里允许 -500..500
+        b.pick.mouse_avoid_offset_y = clamp_int(int(patch.mouse_avoid_offset_y), -500, 500)
         b.pick.mouse_avoid_settle_ms = clamp_int(int(patch.mouse_avoid_settle_ms), 0, 500)
 
         b.io.auto_save = bool(patch.auto_save)

@@ -430,3 +430,63 @@ class NodeListPanel(QWidget):
         - 内部复用 _on_add_gateway_node 的逻辑
         """
         self._on_add_gateway_node()
+
+    def add_skill_node(self) -> None:
+        """
+        对外公开的“新增技能节点”接口：
+        - 供 RotationEditorPage / 时间轴右键菜单调用
+        - 内部复用 _on_add_skill_node 的逻辑
+        """
+        self._on_add_skill_node()
+
+    def add_gateway_node(self) -> None:
+        """
+        对外公开的“新增网关节点”接口：
+        - 供 RotationEditorPage / 时间轴右键菜单调用
+        - 内部复用 _on_add_gateway_node 的逻辑
+        """
+        self._on_add_gateway_node()
+
+    def edit_current_node(self) -> None:
+        """
+        对外公开的“编辑当前选中节点”接口：
+        - 供 RotationEditorPage 右键“编辑节点属性...”调用
+        """
+        self._on_edit_node()
+
+    def delete_current_node(self) -> None:
+        """
+        对外公开的“删除当前选中节点”接口：
+        - 供 RotationEditorPage 右键“删除节点”调用
+        """
+        self._on_delete_node()
+
+    def set_condition_for_current(self) -> None:
+        """
+        对外公开的“为当前选中节点设置条件”接口（仅网关节点有效）：
+        - 供 RotationEditorPage 右键“设置条件...”调用
+        """
+        self._on_set_condition()
+
+    def select_node_index(self, index: int) -> None:
+        """
+        根据节点在 Track.nodes 中的索引，在列表中选中对应行。
+        - 供 RotationEditorPage 在点击时间轴节点时联动调用。
+        """
+        t = self._current_track()
+        if t is None:
+            return
+        if index < 0 or index >= len(t.nodes):
+            return
+
+        nid = getattr(t.nodes[index], "id", "")
+        if not nid:
+            return
+
+        # 遍历 QTreeWidget，找到对应 id 的 item 并选中
+        for i in range(self._tree.topLevelItemCount()):
+            it = self._tree.topLevelItem(i)
+            val = it.data(0, Qt.UserRole)
+            if isinstance(val, str) and val == nid:
+                self._tree.setCurrentItem(it)
+                break

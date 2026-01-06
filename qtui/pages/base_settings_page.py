@@ -186,7 +186,7 @@ class BaseSettingsPage(QWidget):
         form_pick.addRow("", self.chk_mouse_avoid)
 
         self.spin_mouse_avoid_offset_y = QSpinBox(g_pick)
-        self.spin_mouse_avoid_offset_y.setRange(0, 500)
+        self.spin_mouse_avoid_offset_y.setRange(-500, 500)
         self.spin_mouse_avoid_offset_y.setSingleStep(5)
         form_pick.addRow("避让 Y 偏移(px)", self.spin_mouse_avoid_offset_y)
 
@@ -437,7 +437,7 @@ class BaseSettingsPage(QWidget):
             preview_anchor=preview_anchor,
 
             mouse_avoid=bool(self.chk_mouse_avoid.isChecked()),
-            mouse_avoid_offset_y=clamp_int(int(self.spin_mouse_avoid_offset_y.value()), 0, 500),
+            mouse_avoid_offset_y=clamp_int(int(self.spin_mouse_avoid_offset_y.value()), -500, 500),
             mouse_avoid_settle_ms=clamp_int(int(self.spin_mouse_avoid_settle_ms.value()), 0, 500),
 
             auto_save=bool(self.chk_auto_save.isChecked()),

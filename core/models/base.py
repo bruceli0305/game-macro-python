@@ -87,7 +87,8 @@ class PickConfig:
             avoidance=PickAvoidanceConfig.from_dict(d.get("avoidance", {}) or {}),
             confirm_hotkey=as_str(d.get("confirm_hotkey", "f8"), "f8"),
             mouse_avoid=as_bool(d.get("mouse_avoid", True), True),
-            mouse_avoid_offset_y=clamp_int(as_int(d.get("mouse_avoid_offset_y", 80), 80), 0, 500),
+            # 这里允许 -500..500，而不是原来的 0..500
+            mouse_avoid_offset_y=clamp_int(as_int(d.get("mouse_avoid_offset_y", 80), 80), -500, 500),
             mouse_avoid_settle_ms=clamp_int(as_int(d.get("mouse_avoid_settle_ms", 80), 80), 0, 500),
         )
 
@@ -99,7 +100,6 @@ class PickConfig:
             "mouse_avoid_offset_y": int(self.mouse_avoid_offset_y),
             "mouse_avoid_settle_ms": int(self.mouse_avoid_settle_ms),
         }
-
 
 @dataclass
 class IOConfig:

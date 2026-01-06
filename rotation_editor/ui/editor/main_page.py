@@ -866,12 +866,17 @@ class RotationEditorPage(QWidget):
     # ---------- 引擎控制 ----------
     def _ensure_engine(self) -> MacroEngine:
         """
-        新引擎（MacroEngine）：
-        - 启动前会做 ValidationService 校验（入口 node_id 必须设置）
-        - 参数从 ctx.base.exec 与 ctx.base.cast_bar 读取
-        - 若旧引擎不在运行，则丢弃并重建，确保参数立即生效
+        获取或创建执行引擎 (MacroEngine)：
+
+        - 若已有引擎实例（无论是否在运行），则直接返回该实例；
+        - 若尚未创建过，则按当前 ctx.base.exec / ctx.base.cast_bar 配置构造一个新的引擎。
+
+        注意：
+        - 为避免 UI（调试面板等）持有旧实例导致状态不同步，这里不再在“未运行时”自动重建引擎。
+          若需要让新配置生效，可在未来显式实现“重建引擎”按钮。
         """
-        if self._engine is not None and self._engine.is_running():
+        # 修复点：只要已有 _engine，就一律复用，不再在 is_running()==False 时重建
+        if self._engine is not None:
             return self._engine
 
         ex = getattr(self._ctx.base, "exec", None)
@@ -934,7 +939,7 @@ class RotationEditorPage(QWidget):
         if cb_factor > 10.0:
             cb_factor = 10.0
 
-        # completion policy: bar -> require signal；否则 assume success（对应旧逻辑）
+        # completion policy: bar -> require signal；否则 assume success
         if cb_mode == "bar" and cb_point:
             complete_policy = "REQUIRE_SIGNAL"
         else:
