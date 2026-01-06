@@ -665,3 +665,16 @@ class MacroEngineNew:
             return bool(self._cast_lock.locked())
         except Exception:
             return False
+            
+    def invalidate_capture_plan(self) -> None:
+        """
+        供 UI 在 points/skills/rotations 变更时显式刷新 capture plan。
+        - 调用 CaptureManager.invalidate_plan()
+        - 若失败仅记录日志，不抛到 UI
+        """
+        import logging
+
+        try:
+            self._capman.invalidate_plan()
+        except Exception:
+            logging.getLogger(__name__).exception("invalidate_capture_plan failed")

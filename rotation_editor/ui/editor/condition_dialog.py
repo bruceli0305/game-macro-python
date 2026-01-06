@@ -378,6 +378,14 @@ class ConditionEditorDialog(QDialog):
             self._building = False
 
     def _load_into_form(self, cid: str) -> None:
+        """
+        将给定 Condition.id 加载到右侧编辑表单：
+
+        行为：
+        - 强制将 Condition.kind 统一为 "ast"
+        - 若 expr 不是合法 AST JSON（非 dict 或缺少 "type"），会弹出一次提示，
+          然后重置为一个空的 AST 结构（_empty_expr），并标记为脏数据
+        """
         c = self._find_condition(cid)
         self._current_cond_id = cid if c is not None else None
 
@@ -387,24 +395,41 @@ class ConditionEditorDialog(QDialog):
                 self._clear_form()
                 return
 
-            # 强制 AST 模式
+            # 统一为 AST 模式
             c.kind = "ast"
 
             expr = getattr(c, "expr", None)
-            if not isinstance(expr, dict) or not expr or "type" not in expr:
-                # 不兼容旧 groups：直接重置为空
+            expr_valid = isinstance(expr, dict) and bool(expr) and ("type" in expr)
+
+            if not expr_valid:
+                # 旧格式或空表达式：给出一次友好提示，然后重置为空 AST
+                try:
+                    QMessageBox.warning(
+                        self,
+                        "条件格式已更新",
+                        (
+                            "当前条件的 expr 不是新的 AST JSON 格式，"
+                            "已重置为一个空的 AST 条件。\n\n"
+                            "你可以在右侧重新编辑该条件。"
+                        ),
+                    )
+                except Exception:
+                    # UI 提示失败不影响后续逻辑
+                    pass
+
                 c.expr = self._empty_expr()
                 self._mark_dirty()
+                expr = c.expr
 
             self._edit_name.setText(c.name or "")
-            self._groups = self._parse_ast_to_groups(c.expr or {})
+            self._groups = self._parse_ast_to_groups(expr or {})
             self._rebuild_tabs(select_group_id=self._groups[0].id if self._groups else None)
         finally:
             self._building = False
 
         self._sync_group_logic_to_ui()
         self._refresh_validation()
-
+        
     def _apply_form_to_current(self) -> None:
         if self._building:
             return

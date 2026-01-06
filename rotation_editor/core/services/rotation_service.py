@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from core.app.session import ProfileSession
-from rotation_editor.core.models import RotationsFile, RotationPreset
+from rotation_editor.core.models import RotationsFile, RotationPreset, EntryPoint
 
 
 @dataclass
@@ -132,10 +132,14 @@ class RotationService:
         """
         更新 preset 的基础字段：
         - name / description
-        - entry_mode_id / entry_track_id（旧字段，现有 UI 使用）
-        - entry_node_id（新字段：入口节点 node_id；新引擎强制要求）
-        - 同步写入 preset.entry（新入口结构）
+        - 入口信息：通过 entry_mode_id / entry_track_id / entry_node_id 传入，
+          实际写入 RotationPreset.entry（EntryPoint）
         - max_exec_nodes / max_run_seconds
+
+        兼容行为：
+        - entry_mode_id 为空 => 入口 scope="global"，不使用 mode_id
+        - entry_track_id 为空 => entry.track_id=""，由 ValidationService 决定是否合法
+        - entry_node_id 为空 => entry.node_id=""，由 ValidationService 决定是否合法
         """
         p = self.find_preset(pid)
         if p is None:
@@ -143,6 +147,7 @@ class RotationService:
 
         nm = (name or "").strip()
         desc = (description or "").rstrip("\n")
+
         em = (entry_mode_id or "").strip()
         et = (entry_track_id or "").strip()
         en = (entry_node_id or "").strip()
@@ -155,88 +160,69 @@ class RotationService:
             p.description = desc
             changed = True
 
-        # ---- 旧字段 ----
-        if em != (p.entry_mode_id or ""):
-            p.entry_mode_id = em
-            changed = True
-        if et != (p.entry_track_id or ""):
-            p.entry_track_id = et
-            changed = True
-
-        # ---- 新入口结构：同步写入 ----
+        # ---- 新入口结构：只操作 preset.entry ----
         entry = getattr(p, "entry", None)
         if entry is None:
-            try:
-                from rotation_editor.core.models.entry import EntryPoint
-                entry = EntryPoint()
-                p.entry = entry  # type: ignore[attr-defined]
-                changed = True
-            except Exception:
-                entry = None
+            entry = EntryPoint()
+            p.entry = entry  # type: ignore[assignment]
+            changed = True
 
         # 记录“轨道是否发生变化”，用于 node_id 合法性检查
-        prev_scope = (getattr(entry, "scope", "global") if entry is not None else "global") if True else "global"
-        prev_mode = (getattr(entry, "mode_id", "") if entry is not None else "")
-        prev_track = (getattr(entry, "track_id", "") if entry is not None else "")
-        prev_node = (getattr(entry, "node_id", "") if entry is not None else "")
+        prev_scope = (getattr(entry, "scope", "global") or "global").strip().lower()
+        prev_mode = (getattr(entry, "mode_id", "") or "")
+        prev_track = (getattr(entry, "track_id", "") or "")
+        prev_node = (getattr(entry, "node_id", "") or "")
 
-        if entry is not None:
-            if em:
-                if entry.scope != "mode":
-                    entry.scope = "mode"
-                    changed = True
-                if entry.mode_id != em:
-                    entry.mode_id = em
-                    changed = True
-                if entry.track_id != et:
-                    entry.track_id = et
-                    changed = True
-            else:
-                if entry.scope != "global":
-                    entry.scope = "global"
-                    changed = True
-                if entry.mode_id != "":
-                    entry.mode_id = ""
-                    changed = True
-                if entry.track_id != et:
-                    entry.track_id = et
-                    changed = True
+        # 根据 entry_mode_id 判定 scope/mode_id
+        if em:
+            scope_now = "mode"
+            mode_now = em
+        else:
+            scope_now = "global"
+            mode_now = ""
 
-            # node_id：如果 UI 传了就写；没传就不写
-            if en:
-                if entry.node_id != en:
-                    entry.node_id = en
-                    changed = True
+        track_now = et
+        node_now = en
 
-            # 如果 scope/mode/track 改了，且现有 node_id 不属于新轨道，则清空 node_id
-            scope_now = (entry.scope or "global").strip().lower()
-            mode_now = (entry.mode_id or "").strip()
-            track_now = (entry.track_id or "").strip()
-            node_now = (entry.node_id or "").strip()
+        # 应用到 entry
+        if entry.scope != scope_now:
+            entry.scope = scope_now
+            changed = True
+        if (entry.mode_id or "") != mode_now:
+            entry.mode_id = mode_now
+            changed = True
+        if (entry.track_id or "") != track_now:
+            entry.track_id = track_now
+            changed = True
 
-            scope_changed = (scope_now != (prev_scope or "global").strip().lower())
-            mode_changed = ((mode_now or "") != (prev_mode or ""))
-            track_changed = ((track_now or "") != (prev_track or ""))
+        # node_id：总是按 UI 传入的值覆盖（支持“清空入口节点”）
+        if (entry.node_id or "") != node_now:
+            entry.node_id = node_now
+            changed = True
 
-            if (scope_changed or mode_changed or track_changed) and node_now:
-                # 检查 node 是否仍在该轨道
-                tr = None
-                if scope_now == "global":
-                    tr = next((t for t in (p.global_tracks or []) if (t.id or "").strip() == track_now), None)
-                else:
-                    m = next((m for m in (p.modes or []) if (m.id or "").strip() == mode_now), None)
-                    if m is not None:
-                        tr = next((t for t in (m.tracks or []) if (t.id or "").strip() == track_now), None)
+        # 如果 scope/mode/track 改了，且现有 node_id 不属于新轨道，则清空 node_id
+        scope_before = prev_scope
+        mode_before = (prev_mode or "").strip()
+        track_before = (prev_track or "").strip()
 
-                ok_node = False
-                if tr is not None:
-                    for n in (tr.nodes or []):
-                        if (getattr(n, "id", "") or "").strip() == node_now:
-                            ok_node = True
-                            break
-                if not ok_node:
-                    entry.node_id = ""
-                    changed = True
+        scope_now2 = (entry.scope or "global").strip().lower()
+        mode_now2 = (entry.mode_id or "").strip()
+        track_now2 = (entry.track_id or "").strip()
+        node_now2 = (entry.node_id or "").strip()
+
+        scope_changed = (scope_now2 != scope_before)
+        mode_changed = (mode_now2 != mode_before)
+        track_changed = (track_now2 != track_before)
+
+        if (scope_changed or mode_changed or track_changed) and node_now2:
+            # 检查 node 是否仍在该轨道（若不在则清空）
+            from rotation_editor.core.runtime.runtime_state import find_track_in_preset, track_has_node
+
+            tr = find_track_in_preset(p, scope=scope_now2, mode_id=mode_now2, track_id=track_now2)
+            ok_node = bool(tr and track_has_node(tr, node_now2))
+            if not ok_node:
+                entry.node_id = ""
+                changed = True
 
         # ---- limits ----
         if max_exec_nodes is not None:

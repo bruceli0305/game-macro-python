@@ -2,34 +2,62 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import pytest
 
 from core.models.point import Point, PointsFile
 from core.models.skill import Skill, SkillsFile, ColorRGB
-from rotation_editor.core.models import Condition
-from rotation_editor.core.runtime.context import RuntimeContext
-from rotation_editor.core.runtime.condition_eval import eval_condition
-from core.pick.capture import SampleSpec
-from core.profiles import ProfileContext
-from core.domain.profile import Profile
+
+from rotation_editor.ast import (
+    decode_expr,
+    evaluate,
+    EvalContext,
+    TriBool,
+)
+
+
+RGB = Tuple[int, int, int]
 
 
 @dataclass
-class DummyCapture:
-    """只返回固定颜色的假 ScreenCapture 替身。"""
+class DummySampler:
+    """
+    简单的 PixelSampler 替身：
+    - 无论坐标/monitor/sample 为何，都返回固定的 RGB
+    """
     r: int
     g: int
     b: int
 
-    def get_rgb_scoped_abs(self, x_abs, y_abs, sample, monitor_key, *, require_inside=True):
-        return self.r, self.g, self.b
+    def sample_rgb_abs(
+        self,
+        *,
+        monitor_key: str,
+        x_abs: int,
+        y_abs: int,
+        sample,
+        require_inside: bool = False,
+    ) -> Optional[RGB]:
+        return int(self.r), int(self.g), int(self.b)
 
 
-def make_profile_with_point_and_skill() -> Profile:
-    # 构造 profile，带一个点位和一个技能像素
-    p = Profile()
+@dataclass
+class DummyProfile:
+    """
+    只提供 .points.points / .skills.skills 两个属性，
+    供 AST evaluator 使用。
+    """
+    points: PointsFile
+    skills: SkillsFile
+
+
+def make_profile_with_point_and_skill() -> DummyProfile:
+    """
+    构造一个 profile，带一个点位和一个技能像素：
+    - point id="pt1", color=(100,150,200)
+    - skill id="sk1", pixel.color=(50,60,70)
+    """
     pt = Point(
         id="pt1",
         name="P1",
@@ -40,115 +68,138 @@ def make_profile_with_point_and_skill() -> Profile:
         tolerance=0,
         captured_at="",
     )
-    p.points = PointsFile(points=[pt])
+    points = PointsFile(points=[pt])
 
     sk = Skill(id="sk1", name="S1", enabled=True)
     sk.pixel.monitor = "primary"
     sk.pixel.vx = 0
     sk.pixel.vy = 0
     sk.pixel.color = ColorRGB(50, 60, 70)
-    p.skills = SkillsFile(skills=[sk])
+    skills = SkillsFile(skills=[sk])
 
-    return p
-
-
-class DummyCtx(ProfileContext):
-    """只为了 RuntimeContext.profile 类型匹配，实际不会用到 ProfileContext 的其它字段。"""
-    pass  # 在测试中不会真正调用 ProfileContext 的方法
+    return DummyProfile(points=points, skills=skills)
 
 
-def make_runtime_context(rgb=(100, 150, 200)) -> RuntimeContext:
+def make_eval_ctx(rgb: RGB) -> EvalContext:
+    """
+    构造 EvalContext：
+    - profile: DummyProfile（只要 .points/.skills）
+    - sampler: DummySampler（返回固定 RGB）
+    - metrics/baseline 暂不使用
+    """
     prof = make_profile_with_point_and_skill()
-    # 构造一个假的 ProfileContext，只挂 profile
-    dummy = object.__new__(ProfileContext)
-    dummy.profile = prof  # type: ignore[attr-defined]
-    cap = DummyCapture(*rgb)
-    return RuntimeContext(profile=dummy, capture=cap)  # type: ignore[arg-type]
+    sampler = DummySampler(*rgb)
+    # EvalContext.profile 类型标注是 ProfileContext，这里传 DummyProfile 也可工作
+    return EvalContext(profile=prof, sampler=sampler)  # type: ignore[arg-type]
+
+
+def tri_is_true(v: TriBool) -> bool:
+    return v.value is True
+
+
+def tri_is_false(v: TriBool) -> bool:
+    return v.value is False
 
 
 def test_logic_and_or_not() -> None:
-    ctx = make_runtime_context()
+    """
+    纯逻辑节点（const/and/or/not）的求值：
+    - AND: 任一 False -> False
+    - OR : 任一 True  -> True
+    - NOT: 取反
+    """
+    ctx = make_eval_ctx((0, 0, 0))  # sampler 在本测试中不会真正用到
 
-    # 子节点全部为 False
-    cond_false = Condition(
-        id="c1",
-        name="c1",
-        kind="expr_tree_v1",
-        expr={
-            "type": "logic_and",
-            "children": [
-                {"type": "pixel_point", "point_id": "non_exist", "tolerance": 10},
-                {"type": "pixel_skill", "skill_id": "non_exist", "tolerance": 10},
-            ],
-        },
-    )
-    assert eval_condition(cond_false, ctx) is False
+    # (False AND True) -> False
+    expr_json_and = {
+        "type": "and",
+        "children": [
+            {"type": "const", "value": False},
+            {"type": "const", "value": True},
+        ],
+    }
+    expr_and, diags_and = decode_expr(expr_json_and)
+    assert expr_and is not None
+    assert not any(d.is_error() for d in diags_and)
+    r_and = evaluate(expr_and, ctx)
+    assert tri_is_false(r_and)
 
-    cond_or = Condition(
-        id="c2",
-        name="c2",
-        kind="expr_tree_v1",
-        expr={
-            "type": "logic_or",
-            "children": [
-                {"type": "pixel_point", "point_id": "non_exist", "tolerance": 10},
-                {"type": "pixel_point", "point_id": "pt1", "tolerance": 10},
-            ],
-        },
-    )
-    # 模拟点位 pt1 颜色匹配 => runtime context 已设置相同颜色
-    assert eval_condition(cond_or, ctx) is True
+    # (False OR True) -> True
+    expr_json_or = {
+        "type": "or",
+        "children": [
+            {"type": "const", "value": False},
+            {"type": "const", "value": True},
+        ],
+    }
+    expr_or, diags_or = decode_expr(expr_json_or)
+    assert expr_or is not None
+    assert not any(d.is_error() for d in diags_or)
+    r_or = evaluate(expr_or, ctx)
+    assert tri_is_true(r_or)
 
-    cond_not = Condition(
-        id="c3",
-        name="c3",
-        kind="expr_tree_v1",
-        expr={
-            "type": "logic_not",
-            "child": {"type": "pixel_point", "point_id": "pt1", "tolerance": 0},
-        },
-    )
-    # 颜色完全相同，tolerance=0 => 内部应为 True，not True => False
-    assert eval_condition(cond_not, ctx) is False
+    # NOT(True) -> False
+    expr_json_not = {
+        "type": "not",
+        "child": {"type": "const", "value": True},
+    }
+    expr_not, diags_not = decode_expr(expr_json_not)
+    assert expr_not is not None
+    assert not any(d.is_error() for d in diags_not)
+    r_not = evaluate(expr_not, ctx)
+    assert tri_is_false(r_not)
 
 
 def test_pixel_point_tolerance() -> None:
-    # pt1 颜色是 (100,150,200)
-    ctx_match = make_runtime_context(rgb=(100, 150, 200))
-    ctx_miss = make_runtime_context(rgb=(130, 150, 200))
+    """
+    PixelMatchPoint 容差测试：
+    - 点位 pt1 颜色 (100,150,200)
+    - 当前采样 rgb=(100,150,200) 时，tolerance=20 应该匹配
+    - 当前采样 rgb=(130,150,200) 时，最大通道差=30>20，应判定为 False
+    """
+    # 颜色匹配
+    ctx_match = make_eval_ctx((100, 150, 200))
+    # 颜色不匹配（R 差 30）
+    ctx_miss = make_eval_ctx((130, 150, 200))
 
-    cond = Condition(
-        id="cp",
-        name="cp",
-        kind="expr_tree_v1",
-        expr={
-            "type": "pixel_point",
-            "point_id": "pt1",
-            "tolerance": 20,
-        },
-    )
+    expr_json = {
+        "type": "pixel_point",
+        "point_id": "pt1",
+        "tolerance": 20,
+    }
+    expr, diags = decode_expr(expr_json)
+    assert expr is not None
+    assert not any(d.is_error() for d in diags)
 
-    assert eval_condition(cond, ctx_match) is True
-    # 最大通道差为 30 > 20 => False
-    assert eval_condition(cond, ctx_miss) is False
+    r_match = evaluate(expr, ctx_match)
+    assert tri_is_true(r_match)
+
+    r_miss = evaluate(expr, ctx_miss)
+    # 最大通道差 30 > 20 -> False
+    assert tri_is_false(r_miss)
 
 
 def test_pixel_skill_tolerance() -> None:
-    # sk1 像素颜色 (50,60,70)
-    ctx_match = make_runtime_context(rgb=(50, 60, 70))
-    ctx_miss = make_runtime_context(rgb=(80, 60, 70))
+    """
+    PixelMatchSkill 容差测试：
+    - 技能 sk1 像素颜色 (50,60,70)
+    - 当前采样 rgb=(50,60,70) 时，tolerance=20 应该匹配
+    - 当前采样 rgb=(80,60,70) 时，最大通道差=30>20，应判定为 False
+    """
+    ctx_match = make_eval_ctx((50, 60, 70))
+    ctx_miss = make_eval_ctx((80, 60, 70))
 
-    cond = Condition(
-        id="cs",
-        name="cs",
-        kind="expr_tree_v1",
-        expr={
-            "type": "pixel_skill",
-            "skill_id": "sk1",
-            "tolerance": 20,
-        },
-    )
+    expr_json = {
+        "type": "pixel_skill",
+        "skill_id": "sk1",
+        "tolerance": 20,
+    }
+    expr, diags = decode_expr(expr_json)
+    assert expr is not None
+    assert not any(d.is_error() for d in diags)
 
-    assert eval_condition(cond, ctx_match) is True
-    # 最大通道差为 30 > 20 => False
-    assert eval_condition(cond, ctx_miss) is False
+    r_match = evaluate(expr, ctx_match)
+    assert tri_is_true(r_match)
+
+    r_miss = evaluate(expr, ctx_miss)
+    assert tri_is_false(r_miss)

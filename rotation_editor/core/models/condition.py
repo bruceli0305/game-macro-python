@@ -9,19 +9,22 @@ from core.models.common import as_dict, as_str
 @dataclass
 class Condition:
     """
-    条件定义（占位结构）：
+    条件定义（AST 版）：
+
     - id: 条件唯一 ID，供节点引用
     - name: 简短名称，UI 展示用
-    - kind: 条件类型（例如 "pixel" / "buff_remain_lt" / "hp_lt" / "expr"...）
-    - expr: 具体参数（结构后续可扩展）
+    - kind: 条件类型，目前固定为 "ast"
+    - expr: AST JSON dict（由 ConditionEditorDialog 维护）
 
-    当前实现：
-    - expr 是任意 dict，通常由 UI 的 ConditionEditorDialog 维护。
+    说明：
+    - 旧版曾使用 kind="expr_tree_v1" + 非 AST 结构；本轮重构后不再支持：
+      * from_dict 时会忽略旧 kind 值，一律视为 "ast"
+      * expr 不是 dict 或缺少 "type" 时，UI 会提示并重置为一个空的 AST 结构
     """
 
     id: str = ""
     name: str = ""
-    kind: str = ""
+    kind: str = "ast"
     expr: Dict[str, Any] = field(default_factory=dict)
 
     # ---------- 序列化 ----------
@@ -29,17 +32,26 @@ class Condition:
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Condition":
         d = as_dict(d)
+
+        # 旧数据里可能有 kind="expr_tree_v1" 等，这里一律收敛为 "ast"
+        kind_raw = as_str(d.get("kind", "ast"), "ast").strip().lower()
+        kind = "ast"  # 统一成 ast
+
+        expr_raw = d.get("expr", {})
+        expr = as_dict(expr_raw) if isinstance(expr_raw, dict) else {}
+
         return Condition(
             id=as_str(d.get("id", "")),
             name=as_str(d.get("name", "")),
-            kind=as_str(d.get("kind", "")),
-            expr=as_dict(d.get("expr", {})),
+            kind=kind,
+            expr=expr,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
-            "kind": self.kind,
+            # 永远写出 "ast"，避免再产生新的旧格式
+            "kind": "ast",
             "expr": dict(self.expr or {}),
         }

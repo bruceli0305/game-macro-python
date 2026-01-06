@@ -200,6 +200,19 @@ class NodeListPanel(QWidget):
                 label = n.label or "Gateway"
                 action = (n.action or "switch_mode").strip()
 
+                # 目标描述：模式 / 轨道 / 节点 后 6 位
+                tm = (getattr(n, "target_mode_id", "") or "").strip()
+                tt = (getattr(n, "target_track_id", "") or "").strip()
+                tn = (getattr(n, "target_node_id", "") or "").strip()
+                parts: List[str] = []
+                if tm:
+                    parts.append(f"模式:{tm[-6:]}")
+                if tt:
+                    parts.append(f"轨道:{tt[-6:]}")
+                if tn:
+                    parts.append(f"节点:{tn[-6:]}")
+                target_text = " / ".join(parts)
+
                 ctext, okc, ctip = self._gateway_condition_text(n)
                 cond_text = ctext
                 if not okc:
@@ -228,7 +241,7 @@ class NodeListPanel(QWidget):
             self._tree.addTopLevelItem(item)
 
         self._btn_cond.setEnabled(False)
-
+        
     def _current_node_index(self) -> int:
         t = self._current_track()
         if t is None:

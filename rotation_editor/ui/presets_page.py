@@ -361,6 +361,9 @@ class RotationPresetsPage(QWidget):
             self._building_form = False
 
     def _load_entry_mode_track_for_preset(self, p: RotationPreset) -> None:
+        """
+        根据 RotationPreset.entry（EntryPoint）加载入口模式/轨道/节点到三个下拉框。
+        """
         self._cmb_entry_mode.blockSignals(True)
         self._cmb_entry_track.blockSignals(True)
         self._cmb_entry_node.blockSignals(True)
@@ -369,11 +372,23 @@ class RotationPresetsPage(QWidget):
             self._cmb_entry_track.clear()
             self._cmb_entry_node.clear()
 
+            # 入口模式：第一个为“全局”，后面为各 Mode
             self._cmb_entry_mode.addItem("（全局）", userData="")
             for m in (p.modes or []):
                 self._cmb_entry_mode.addItem(m.name or "(未命名)", userData=m.id or "")
 
-            em = (p.entry_mode_id or "").strip()
+            entry = getattr(p, "entry", None)
+            scope = (getattr(entry, "scope", "global") or "global").strip().lower() if entry is not None else "global"
+            em = ""
+            et = ""
+            en = ""
+            if entry is not None:
+                if scope == "mode":
+                    em = (getattr(entry, "mode_id", "") or "").strip()
+                et = (getattr(entry, "track_id", "") or "").strip()
+                en = (getattr(entry, "node_id", "") or "").strip()
+
+            # 选中入口模式
             idx_mode = 0
             if em:
                 for i in range(self._cmb_entry_mode.count()):
@@ -383,18 +398,17 @@ class RotationPresetsPage(QWidget):
                         break
             self._cmb_entry_mode.setCurrentIndex(idx_mode)
 
-            # rebuild tracks + nodes
+            # 按入口模式构建轨道下拉
             self._rebuild_entry_track_combo(p, em)
 
-            # 取当前轨道选择
+            # 当前轨道选择
             et_data = self._cmb_entry_track.currentData()
-            et = et_data if isinstance(et_data, str) else ""
+            cur_track = et_data if isinstance(et_data, str) else ""
 
-            self._rebuild_entry_node_combo(p, em, et)
+            # 按模式+轨道构建节点下拉
+            self._rebuild_entry_node_combo(p, em, cur_track)
 
-            # 定位到 preset.entry.node_id（若存在）
-            entry = getattr(p, "entry", None)
-            en = (getattr(entry, "node_id", "") or "").strip() if entry is not None else ""
+            # 定位到 entry.node_id（若存在）
             if en:
                 for i in range(self._cmb_entry_node.count()):
                     data = self._cmb_entry_node.itemData(i)
@@ -408,6 +422,12 @@ class RotationPresetsPage(QWidget):
             self._cmb_entry_node.blockSignals(False)
 
     def _rebuild_entry_track_combo(self, p: RotationPreset, mode_id: str) -> None:
+        """
+        重建“入口轨道”下拉框：
+        - mode_id 为空 => 使用 global_tracks
+        - mode_id 非空 => 使用对应 Mode.tracks
+        初始选中：尽量与 preset.entry.track_id 对齐。
+        """
         self._cmb_entry_track.clear()
         self._cmb_entry_track.addItem("（未指定）", userData="")
 
@@ -416,14 +436,16 @@ class RotationPresetsPage(QWidget):
         if not mid:
             tracks = list(p.global_tracks or [])
         else:
-            m = next((m for m in (p.modes or []) if m.id == mid), None)
+            m = next((m for m in (p.modes or []) if (m.id or "") == mid), None)
             if m is not None:
                 tracks = list(m.tracks or [])
 
         for t in tracks:
             self._cmb_entry_track.addItem(t.name or "(未命名)", userData=t.id or "")
 
-        et = (p.entry_track_id or "").strip()
+        # 根据 entry.track_id 尝试选中
+        entry = getattr(p, "entry", None)
+        et = (getattr(entry, "track_id", "") or "").strip() if entry is not None else ""
         if et:
             for i in range(self._cmb_entry_track.count()):
                 data = self._cmb_entry_track.itemData(i)

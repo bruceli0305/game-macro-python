@@ -86,7 +86,7 @@ class RotationEditorPage(QWidget):
         self._dirty_ui = False
 
         # 执行引擎
-        self._engine: Optional[MacroEngine] = None
+        self._engine: Optional[MacroEngineNew] = None   # <<< 这里改成 MacroEngineNew
         self._engine_running: bool = False
         self._engine_paused: bool = False
 

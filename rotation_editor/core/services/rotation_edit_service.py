@@ -181,22 +181,30 @@ class RotationEditService:
         """
         删除指定 mode_id 的模式及其下所有轨道/节点。
 
-        当前实现：
-        - 简单从 preset.modes 列表中移除；
-        - 若 entry_mode_id 指向被删模式，则清空 entry_mode_id/entry_track_id。
+        新行为：
+        - 只操作 preset.modes 和 preset.entry（EntryPoint）；
+        - 若入口 entry.scope=mode 且 entry.mode_id 指向被删模式，则重置入口为 global，
+          并清空 track_id / node_id。
         """
         mid = (mode_id or "").strip()
         if not mid:
             return False
+
         before = len(preset.modes)
-        preset.modes = [m for m in preset.modes if m.id != mid]
+        preset.modes = [m for m in preset.modes if (m.id or "") != mid]
         after = len(preset.modes)
         if after == before:
             return False
 
-        if preset.entry_mode_id == mid:
-            preset.entry_mode_id = ""
-            preset.entry_track_id = ""
+        entry = getattr(preset, "entry", None)
+        if entry is not None:
+            scope = (getattr(entry, "scope", "global") or "global").strip().lower()
+            em = (getattr(entry, "mode_id", "") or "").strip()
+            if scope == "mode" and em == mid:
+                entry.scope = "global"
+                entry.mode_id = ""
+                entry.track_id = ""
+                entry.node_id = ""
 
         self._mark_dirty()
         return True
@@ -562,8 +570,7 @@ class RotationEditService:
         - mode_id 非空 => 从对应 Mode.tracks 中删除 track_id；
         - mode_id 为空 => 从 preset.global_tracks 中删除 track_id。
         删除成功时：
-        - 若 entry_mode_id/entry_track_id 指向该轨道，则清空 entry_track_id；
-          （全局轨道的情况：entry_mode_id 为空且 entry_track_id 匹配）
+        - 若 preset.entry 指向该轨道，则清空 entry.track_id / entry.node_id。
         """
         tid = (track_id or "").strip()
         if not tid:
@@ -587,17 +594,23 @@ class RotationEditService:
         if not deleted:
             return False
 
-        # 处理入口轨道引用
-        em = (preset.entry_mode_id or "").strip()
-        et = (preset.entry_track_id or "").strip()
-        if mid:
-            # 模式轨道：只有 entry_mode_id 与 mode_id 且 entry_track_id 匹配时才清空
-            if em == mid and et == tid:
-                preset.entry_track_id = ""
-        else:
-            # 全局轨道：entry_mode_id 为空且 entry_track_id 匹配时清空
-            if (not em) and et == tid:
-                preset.entry_track_id = ""
+        # 处理入口轨道引用（仅操作新的 entry 结构）
+        entry = getattr(preset, "entry", None)
+        if entry is not None:
+            scope = (getattr(entry, "scope", "global") or "global").strip().lower()
+            em = (getattr(entry, "mode_id", "") or "").strip()
+            et = (getattr(entry, "track_id", "") or "").strip()
+
+            if mid:
+                # 模式轨道：scope=mode && mode_id/track_id 匹配时清空 track/node
+                if scope == "mode" and em == mid and et == tid:
+                    entry.track_id = ""
+                    entry.node_id = ""
+            else:
+                # 全局轨道：scope=global && track_id 匹配时清空 track/node
+                if scope == "global" and et == tid:
+                    entry.track_id = ""
+                    entry.node_id = ""
 
         self._mark_dirty()
         return True
