@@ -30,12 +30,17 @@ from rotation_editor.ui.editor.node_panel import NodeListPanel
 from rotation_editor.ui.editor.timeline_canvas import TimelineCanvas
 from rotation_editor.ui.editor.mode_bar import ModeTabBar
 
-from rotation_editor.core.runtime.engine import (
-    MacroEngine,
+from rotation_editor.runtime.engine import (
+    MacroEngineNew,
     EngineConfig,
     ExecutionCursor,
-    Scheduler,
 )
+from rotation_editor.runtime.executor.skill_attempt import (
+    SkillAttemptConfig,
+    StartSignalConfig,
+    CompleteSignalConfig,
+)
+from rotation_editor.runtime.executor.lock_policy import LockPolicyConfig
 
 
 class RotationEditorPage(QWidget):
@@ -840,17 +845,18 @@ class RotationEditorPage(QWidget):
         pass
 
     # ---------- 引擎控制 ----------
-    def _ensure_engine(self) -> MacroEngine:
+    def _ensure_engine(self) -> MacroEngineNew:
         """
-        每次启动前根据当前 ctx.base.exec 生成最新 EngineConfig。
-        若旧引擎不在运行，则直接丢弃并重建，确保参数更新立即生效。
+        新引擎（MacroEngineNew）：
+        - 启动前会做 ValidationService 校验（入口 node_id 必须设置）
+        - 参数从 ctx.base.exec 与 ctx.base.cast_bar 读取
+        - 若旧引擎不在运行，则丢弃并重建，确保参数立即生效
         """
-        # 如果已有引擎且正在运行，直接复用
         if self._engine is not None and self._engine.is_running():
             return self._engine
 
-        # 读取 base.exec 的可选参数（不存在则用默认值）
         ex = getattr(self._ctx.base, "exec", None)
+        cb = getattr(self._ctx.base, "cast_bar", None)
 
         def _get_int(name: str, default: int, lo: int = 0, hi: int = 10**9) -> int:
             try:
@@ -871,39 +877,88 @@ class RotationEditorPage(QWidget):
             v = (v or "").strip()
             return v or default
 
-        # 技能间默认间隔
+        # gap / poll
         gap = _get_int("default_skill_gap_ms", 50, 0, 10**6)
-
-        # ready=False 跳过后的轮询间隔
         poll_not_ready = _get_int("poll_not_ready_ms", 50, 10, 10**6)
 
-        # 开始施法信号模式：pixel / cast_bar / none
+        # start signal mode
         start_mode = _get_str("start_signal_mode", "pixel").lower()
         if start_mode not in ("pixel", "cast_bar", "none"):
             start_mode = "pixel"
 
-        # PREPARING -> CASTING 判定与重试
         start_timeout = _get_int("start_timeout_ms", 20, 1, 10**6)
         start_poll = _get_int("start_poll_ms", 10, 5, 10**6)
         max_retries = _get_int("max_retries", 3, 0, 1000)
         retry_gap = _get_int("retry_gap_ms", 30, 0, 10**6)
 
-        # 重建引擎（确保参数刷新）
-        self._engine = MacroEngine(
+        # cast_bar settings for complete policy
+        cb_mode = (getattr(cb, "mode", "timer") or "timer").strip().lower() if cb is not None else "timer"
+        cb_point = (getattr(cb, "point_id", "") or "").strip() if cb is not None else ""
+        try:
+            cb_tol = int(getattr(cb, "tolerance", 15) or 15) if cb is not None else 15
+        except Exception:
+            cb_tol = 15
+        cb_tol = max(0, min(255, cb_tol))
+
+        try:
+            cb_poll = int(getattr(cb, "poll_interval_ms", 30) or 30) if cb is not None else 30
+        except Exception:
+            cb_poll = 30
+        cb_poll = max(10, min(1000, cb_poll))
+
+        try:
+            cb_factor = float(getattr(cb, "max_wait_factor", 1.5) or 1.5) if cb is not None else 1.5
+        except Exception:
+            cb_factor = 1.5
+        if cb_factor < 0.1:
+            cb_factor = 0.1
+        if cb_factor > 10.0:
+            cb_factor = 10.0
+
+        # completion policy: bar -> require signal；否则 assume success（对应旧逻辑）
+        if cb_mode == "bar" and cb_point:
+            complete_policy = "REQUIRE_SIGNAL"
+        else:
+            complete_policy = "ASSUME_SUCCESS"
+
+        attempt_cfg = SkillAttemptConfig(
+            default_gap_ms=gap,
+            poll_not_ready_ms=poll_not_ready,
+            lock=LockPolicyConfig(
+                policy="SKIP_AND_ADVANCE",
+                wait_timeout_ms=300,
+                wait_poll_ms=15,
+                skip_delay_ms=poll_not_ready,
+            ),
+            start=StartSignalConfig(
+                mode=start_mode,  # pixel/cast_bar/none
+                timeout_ms=start_timeout,
+                poll_ms=start_poll,
+                max_retries=max_retries,
+                retry_gap_ms=retry_gap,
+                cast_bar_point_id=cb_point,
+                cast_bar_tolerance=cb_tol,
+            ),
+            complete=CompleteSignalConfig(
+                policy=complete_policy,  # ASSUME_SUCCESS / REQUIRE_SIGNAL
+                poll_ms=cb_poll,
+                max_wait_factor=cb_factor,
+                cast_bar_point_id=cb_point,
+                cast_bar_tolerance=cb_tol,
+            ),
+            sample_log_throttle_ms=80,
+        )
+
+        self._engine = MacroEngineNew(
             ctx=self._ctx,
             scheduler=self._dispatcher,
             callbacks=self,
             config=EngineConfig(
                 poll_interval_ms=20,
-                default_skill_gap_ms=gap,
-                poll_not_ready_ms=poll_not_ready,
-                start_signal_mode=start_mode,
-                start_timeout_ms=start_timeout,
-                start_poll_ms=start_poll,
-                max_retries=max_retries,
-                retry_gap_ms=retry_gap,
                 stop_on_error=True,
+                gateway_poll_delay_ms=10,
             ),
+            attempt_cfg=attempt_cfg,
         )
         return self._engine
 

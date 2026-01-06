@@ -1,57 +1,48 @@
 from __future__ import annotations
 
-import logging
 import threading
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, List, Tuple, Dict, Any
+from typing import Callable, Optional, Protocol, Any
 
 from core.profiles import ProfileContext
-from core.pick.capture import ScreenCapture
-from core.pick.scanner import PixelScanner
 
-from rotation_editor.core.models import RotationPreset, SkillNode, GatewayNode
-
+from rotation_editor.core.models import RotationPreset, SkillNode, GatewayNode, Condition
 from rotation_editor.core.runtime.keyboard import KeySender, PynputKeySender
-from rotation_editor.core.runtime.capture_plan import build_capture_plan
-from rotation_editor.core.runtime.cast_strategies import make_cast_strategy
 
-from rotation_editor.core.runtime.clock import mono_ms
-from rotation_editor.core.runtime.state import GlobalRuntime, ModeRuntime
-from rotation_editor.core.runtime.executor import NodeExecutor, SimpleSkillState
-from rotation_editor.core.runtime.gateway_actions import apply_gateway_global, apply_gateway_mode
-from rotation_editor.core.runtime.validation import PresetValidator
+from rotation_editor.runtime.state import StateStore
+from rotation_editor.runtime.capture import CaptureManager, StateStoreCaptureSink
+from rotation_editor.runtime.executor.skill_attempt import SkillAttemptExecutor, SkillAttemptConfig
 
-log = logging.getLogger(__name__)
+from rotation_editor.ast.codec import decode_expr
+from rotation_editor.ast import collect_probes_from_expr
+from rotation_editor.runtime.eval_bridge import eval_expr_with_capture, ensure_plan_for_probes
+
+from rotation_editor.core.services.validation_service import ValidationService
+
+from .runtime_state import (
+    build_global_runtime,
+    build_mode_runtime,
+    find_track_in_preset,
+    track_has_node,
+    GlobalRuntimeState,
+    ModeRuntimeState,
+)
+from .scheduler import Scheduler
+from .executor.types import ExecutionResult
 
 
-class Scheduler(Protocol):
+class SchedulerLike(Protocol):
     def call_soon(self, fn: Callable[[], None]) -> None: ...
 
 
 class EngineCallbacks(Protocol):
     def on_started(self, preset_id: str) -> None: ...
     def on_stopped(self, reason: str) -> None: ...
-    def on_node_executed(self, cursor, node) -> None: ...
     def on_error(self, msg: str, detail: str) -> None: ...
+    def on_node_executed(self, cursor, node) -> None: ...
 
 
-@dataclass
-class EngineConfig:
-    poll_interval_ms: int = 20
-    default_skill_gap_ms: int = 50
-
-    poll_not_ready_ms: int = 50
-
-    start_signal_mode: str = "pixel"  # pixel / cast_bar / none
-    start_timeout_ms: int = 20
-    start_poll_ms: int = 10
-    max_retries: int = 3
-    retry_gap_ms: int = 30
-
-    stop_on_error: bool = True
-
-
-@dataclass
+@dataclass(frozen=True)
 class ExecutionCursor:
     preset_id: str
     mode_id: Optional[str]
@@ -59,183 +50,249 @@ class ExecutionCursor:
     node_index: int
 
 
-class MacroEngine:
+@dataclass
+class EngineConfig:
+    poll_interval_ms: int = 20
+    stop_on_error: bool = True
+    gateway_poll_delay_ms: int = 10
+
+
+class MacroEngineNew:
     def __init__(
         self,
         *,
         ctx: ProfileContext,
-        scheduler: Scheduler,
+        scheduler: SchedulerLike,
         callbacks: EngineCallbacks,
+        store: Optional[StateStore] = None,
         key_sender: Optional[KeySender] = None,
         config: Optional[EngineConfig] = None,
+        attempt_cfg: Optional[SkillAttemptConfig] = None,
     ) -> None:
         self._ctx = ctx
         self._sch = scheduler
         self._cb = callbacks
         self._cfg = config or EngineConfig()
+
+        self._store = store or StateStore()
         self._key_sender = key_sender or PynputKeySender()
 
-        self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
-        self._running = False
+        self._paused = False
+        self._step_once = False
+        self._stop_reason = "finished"
 
-        self._paused: bool = False
-        self._step_once: bool = False
-        self._stop_reason: str = "finished"
+        self._thread: Optional[threading.Thread] = None
 
-        self._capture_plan_dirty: bool = False
-
-        # 调试面板数据源
         self._cast_lock = threading.Lock()
-        self._skill_state: Optional[SimpleSkillState] = None
+        self._capman = CaptureManager(ctx=self._ctx, sink=StateStoreCaptureSink(store=self._store))
+        self._attempt_exec = SkillAttemptExecutor(
+            ctx=self._ctx,
+            store=self._store,
+            key_sender=self._key_sender,
+            cast_lock=self._cast_lock,
+            capman=self._capman,
+            cfg=attempt_cfg or SkillAttemptConfig(),
+            stop_evt=self._stop_evt,
+        )
 
-    # ---- debug API ----
-    def get_skill_stats_snapshot(self) -> List[Dict[str, Any]]:
-        ss = self._skill_state
-        if ss is None:
-            return []
-        try:
-            return ss.snapshot_for_ui(self._ctx)
-        except Exception:
-            return []
+        self._scheduler = Scheduler()
 
-    def is_cast_locked(self) -> bool:
-        try:
-            return bool(self._cast_lock.locked())
-        except Exception:
-            return False
+        self._global_rt: Optional[GlobalRuntimeState] = None
+        self._active_mode_id: Optional[str] = None
+        self._mode_rt: Optional[ModeRuntimeState] = None
 
-    # ---------- 生命周期 ----------
+        self._validator = ValidationService()
+
+    @property
+    def store(self) -> StateStore:
+        return self._store
+
     def is_running(self) -> bool:
-        return self._running
+        th = self._thread
+        return bool(th is not None and th.is_alive())
 
     def start(self, preset: RotationPreset) -> None:
-        if self._running:
+        if self.is_running():
             return
 
-        issues = PresetValidator().validate(preset, ctx=self._ctx)
-        if issues:
-            lines = []
-            for it in issues[:40]:
-                lines.append(f"- [{it.code}] {it.location}: {it.message}" + (f" ({it.detail})" if it.detail else ""))
-            if len(issues) > 40:
-                lines.append(f"... 还有 {len(issues) - 40} 条错误")
-            detail = "\n".join(lines)
+        report = self._validator.validate_preset(preset, ctx=self._ctx)
+        if report.has_errors():
+            detail = report.format_text(max_lines=80)
             self._sch.call_soon(lambda d=detail: self._cb.on_error("循环方案校验失败，已拒绝启动", d))
             return
 
+        # 预热 capture plan（减少启动后第一帧延迟；并让 capture 错误尽早出现在事件流）
+        try:
+            ensure_plan_for_probes(capman=self._capman, probes=report.probes)
+        except Exception:
+            pass
+
         self._stop_evt.clear()
+        self._paused = False
+        self._step_once = False
         self._stop_reason = "finished"
+
         self._thread = threading.Thread(target=self._run_loop, args=(preset,), daemon=True)
-        self._running = True
         self._thread.start()
-        self._sch.call_soon(lambda: self._cb.on_started(preset.id or ""))
 
     def stop(self, reason: str = "user_stop") -> None:
-        if not self._running:
+        if not self.is_running():
             return
         self._stop_reason = reason
+        self._store.engine_stopping(reason)
         self._stop_evt.set()
         th = self._thread
-        self._thread = None
         if th is not None:
             try:
-                th.join(timeout=0.5)
+                th.join(timeout=0.2)
             except Exception:
-                log.exception("MacroEngine thread join failed")
+                pass
 
     def pause(self) -> None:
-        if not self._running:
+        if not self.is_running():
             return
         self._paused = True
         self._step_once = False
+        self._store.engine_paused()
 
     def resume(self) -> None:
-        if not self._running:
+        if not self.is_running():
             return
         self._paused = False
         self._step_once = False
+        self._store.engine_resumed()
 
     def step(self) -> None:
-        if not self._running:
+        if not self.is_running():
             return
+        self._paused = True
         self._step_once = True
+        self._store.engine_paused()
 
-    def invalidate_capture_plan(self) -> None:
-        self._capture_plan_dirty = True
+    # ---------------- internal ----------------
 
-    # ---------- 内部：模式入口 ----------
-    def _select_entry_mode_id(self, preset: RotationPreset) -> Optional[str]:
-        em = (preset.entry_mode_id or "").strip()
-        if em:
-            for m in preset.modes or []:
-                if (m.id or "").strip() == em and (m.tracks or []):
-                    return em
-        for m in preset.modes or []:
-            if (m.id or "").strip() and (m.tracks or []):
-                return (m.id or "").strip()
-        return None
+    def _emit_started(self, preset_id: str) -> None:
+        self._sch.call_soon(lambda: self._cb.on_started(preset_id))
 
-    def _build_mode_rt(self, preset: RotationPreset, mode_id: str, now: int) -> Optional[ModeRuntime]:
+    def _emit_stopped(self, reason: str) -> None:
+        self._sch.call_soon(lambda: self._cb.on_stopped(reason))
+
+    def _emit_error(self, msg: str, detail: str) -> None:
+        self._sch.call_soon(lambda: self._cb.on_error(msg, detail))
+
+    def _emit_node(self, cursor: ExecutionCursor, node: Any) -> None:
+        self._sch.call_soon(lambda: self._cb.on_node_executed(cursor, node))
+
+    def _now(self) -> int:
+        from rotation_editor.runtime.state.store import mono_ms as _mono
+        return int(_mono())
+
+    def _ensure_mode_runtime(self, preset: RotationPreset, mode_id: str, *, now_ms: int) -> Optional[ModeRuntimeState]:
         mid = (mode_id or "").strip()
         if not mid:
             return None
-        mode = next((m for m in (preset.modes or []) if (m.id or "").strip() == mid), None)
-        if mode is None:
+        if self._mode_rt is not None and (self._mode_rt.mode_id or "").strip() == mid:
+            return self._mode_rt
+        self._mode_rt = build_mode_runtime(preset, mid, now_ms=now_ms)
+        self._active_mode_id = mid if self._mode_rt is not None else None
+        return self._mode_rt
+
+    def _apply_entry(self, preset: RotationPreset, *, now_ms: int) -> None:
+        self._global_rt = build_global_runtime(preset, now_ms=now_ms)
+
+        entry = preset.entry
+        scope = (entry.scope or "global").strip().lower()
+        mode_id = (entry.mode_id or "").strip()
+        track_id = (entry.track_id or "").strip()
+        node_id = (entry.node_id or "").strip()
+
+        if scope == "global":
+            self._active_mode_id = None
+            self._mode_rt = None
+            rt = self._global_rt.get(track_id) if self._global_rt is not None else None
+            if rt is not None:
+                rt.jump_to_node_id(node_id)
+                rt.next_time_ms = int(now_ms)
+            return
+
+        self._ensure_mode_runtime(preset, mode_id, now_ms=now_ms)
+        if self._mode_rt is None:
+            return
+        rt2 = self._mode_rt.tracks.get(track_id)
+        if rt2 is not None:
+            rt2.jump_to_node_id(node_id)
+            rt2.next_time_ms = int(now_ms)
+            self._mode_rt.maybe_backstep(track_id)
+
+    # ---------------- Gateway condition (AST) ----------------
+
+    def _load_gateway_condition_expr(self, preset: RotationPreset, gw: GatewayNode) -> Optional[dict]:
+        try:
+            ce = getattr(gw, "condition_expr", None)
+        except Exception:
+            ce = None
+        if isinstance(ce, dict) and ce:
+            return ce
+
+        cid = (getattr(gw, "condition_id", "") or "").strip()
+        if not cid:
             return None
-        return ModeRuntime(mode_id=mid, tracks=list(mode.tracks or []), now_ms=int(now))
+        c = next((x for x in (preset.conditions or []) if (getattr(x, "id", "") or "").strip() == cid), None)
+        if c is None:
+            return None
+        expr = getattr(c, "expr", None)
+        if isinstance(expr, dict) and expr:
+            return expr
+        return None
 
-    # ---------- 主循环 ----------
+    def _gateway_condition_ok(self, preset: RotationPreset, gw: GatewayNode) -> bool:
+        has_inline = False
+        try:
+            has_inline = isinstance(getattr(gw, "condition_expr", None), dict)
+        except Exception:
+            has_inline = False
+        cid = (getattr(gw, "condition_id", "") or "").strip()
+        if not cid and not has_inline:
+            return True
+
+        expr_json = self._load_gateway_condition_expr(preset, gw)
+        if not isinstance(expr_json, dict) or not expr_json:
+            return False
+
+        expr, _diags = decode_expr(expr_json, path="$")
+        if expr is None:
+            return False
+
+        probes = collect_probes_from_expr(expr)
+        ensure_plan_for_probes(capman=self._capman, probes=probes)
+
+        out = eval_expr_with_capture(expr, profile=self._ctx, capman=self._capman, metrics=self._store, baseline=None)
+        return out.tri.value is True
+
+    # ---------------- Engine loop ----------------
+
     def _run_loop(self, preset: RotationPreset) -> None:
-        cap = ScreenCapture()
-        scanner = PixelScanner(cap)
-
-        plan = None
-
-        def set_stop_reason(r: str) -> None:
-            self._stop_reason = r
+        preset_id = (preset.id or "").strip()
+        self._store.engine_started(preset_id)
+        self._emit_started(preset_id)
 
         try:
-            plan = build_capture_plan(self._ctx, preset, capture=cap)
-            self._capture_plan_dirty = False
+            now = self._now()
+            self._apply_entry(preset, now_ms=now)
 
-            cast_strategy = make_cast_strategy(self._ctx, default_gap_ms=self._cfg.default_skill_gap_ms)
-            skill_state = SimpleSkillState()
-            self._skill_state = skill_state  # 供 UI 读取
-
-            def get_plan():
-                return plan
-
-            executor = NodeExecutor(
-                ctx=self._ctx,
-                key_sender=self._key_sender,
-                cast_strategy=cast_strategy,
-                skill_state=skill_state,
-                scanner=scanner,
-                plan_getter=get_plan,
-                stop_evt=self._stop_evt,
-                cast_lock=self._cast_lock,
-                default_skill_gap_ms=int(self._cfg.default_skill_gap_ms),
-                poll_not_ready_ms=int(self._cfg.poll_not_ready_ms),
-                start_signal_mode=str(self._cfg.start_signal_mode or "pixel"),
-                start_timeout_ms=int(self._cfg.start_timeout_ms),
-                start_poll_ms=int(self._cfg.start_poll_ms),
-                max_retries=int(self._cfg.max_retries),
-                retry_gap_ms=int(self._cfg.retry_gap_ms),
-            )
-
-            global_rt = GlobalRuntime(list(preset.global_tracks or []), now_ms=mono_ms())
-
-            mode_rt: Optional[ModeRuntime] = None
-            entry_mode_id = self._select_entry_mode_id(preset)
-            if entry_mode_id:
-                mode_rt = self._build_mode_rt(preset, entry_mode_id, mono_ms())
-
-            if not global_rt.has_tracks() and mode_rt is None:
-                self._emit_error("没有可用轨道", "Preset 下没有任何可执行的全局轨道或模式轨道")
+            global_rt = self._global_rt
+            if global_rt is None:
+                self._emit_error("引擎内部错误", "global_rt is None")
+                self._stop_reason = "internal_error"
                 return
 
-            start_ms = mono_ms()
+            if not global_rt.tracks and (self._mode_rt is None or not self._mode_rt.has_tracks()):
+                self._emit_error("没有可执行轨道", "global_tracks 为空，且入口模式也没有可执行轨道")
+                self._stop_reason = "no_tracks"
+                return
+
+            start_ms = self._now()
             exec_nodes = 0
 
             while not self._stop_evt.is_set():
@@ -243,7 +300,7 @@ class MacroEngine:
                     self._stop_evt.wait(self._cfg.poll_interval_ms / 1000.0)
                     continue
 
-                now = mono_ms()
+                now = self._now()
 
                 if getattr(preset, "max_run_seconds", 0) > 0:
                     if now - start_ms >= int(preset.max_run_seconds) * 1000:
@@ -256,168 +313,355 @@ class MacroEngine:
                     self._stop_evt.set()
                     break
 
-                if self._capture_plan_dirty:
-                    try:
-                        plan = build_capture_plan(self._ctx, preset, capture=cap)
-                    except Exception:
-                        log.exception("rebuild capture_plan failed")
-                    self._capture_plan_dirty = False
-
-                if mode_rt is not None:
-                    mode_rt.ensure_step_runnable()
-                    if not mode_rt.has_tracks():
-                        mode_rt = None
-
-                next_times: List[int] = []
-                next_times.extend(global_rt.all_next_times())
-                if mode_rt is not None:
-                    next_times.extend(mode_rt.eligible_next_times())
-
-                if not next_times:
-                    break
-
-                min_next = min(next_times)
-                if now < min_next:
-                    sleep_ms = min(self._cfg.poll_interval_ms, min_next - now)
-                    self._stop_evt.wait(sleep_ms / 1000.0)
+                item = self._scheduler.choose_next(now_ms=now, global_rt=global_rt, mode_rt=self._mode_rt)
+                if item is None:
+                    wake = self._scheduler.next_wakeup_ms(global_rt=global_rt, mode_rt=self._mode_rt)
+                    if wake is None:
+                        break
+                    if now < wake:
+                        sleep_ms = min(int(self._cfg.poll_interval_ms), int(wake - now))
+                        self._stop_evt.wait(sleep_ms / 1000.0)
+                    else:
+                        self._stop_evt.wait(self._cfg.poll_interval_ms / 1000.0)
                     continue
 
-                candidates: List[Tuple[str, int, str]] = []
-                for nt, tid in global_rt.ready_candidates(now):
-                    candidates.append(("global", nt, tid))
-                if mode_rt is not None:
-                    for nt, tid in mode_rt.ready_candidates(now):
-                        candidates.append(("mode", nt, tid))
-
-                if not candidates:
-                    self._stop_evt.wait(self._cfg.poll_interval_ms / 1000.0)
-                    continue
-
-                candidates.sort(key=lambda x: (x[1], 0 if x[0] == "global" else 1))
-                kind, _nt, tid = candidates[0]
-
-                if self._stop_evt.is_set():
-                    break
-
-                if kind == "global":
-                    tr = global_rt.get_track(tid)
-                    st = global_rt.get_state(tid)
-                    if tr is None or st is None or not tr.nodes:
-                        global_rt.remove_track(tid)
+                if item.scope == "global":
+                    rt = global_rt.get(item.track_id)
+                    if rt is None or not rt.track.nodes:
+                        global_rt.remove(item.track_id)
+                        continue
+                    node = rt.current_node()
+                    idx = rt.current_node_index()
+                    if node is None or idx < 0:
+                        global_rt.remove(item.track_id)
                         continue
 
-                    idx = int(st.node_index)
-                    if idx < 0 or idx >= len(tr.nodes):
-                        idx = 0
-                        st.node_index = 0
-
-                    node = tr.nodes[idx]
-                    cursor = ExecutionCursor(preset_id=preset.id or "", mode_id=None, track_id=tid, node_index=idx)
-
-                    try:
-                        if isinstance(node, SkillNode):
-                            st.next_time_ms = executor.exec_skill_node(node)
-                            st.advance(tr)  # ready=False 也推进（符合需求）
-                        elif isinstance(node, GatewayNode):
-                            ok = executor.gateway_condition_ok(preset, node)
-                            if not ok:
-                                st.advance(tr)
-                                st.next_time_ms = mono_ms() + 10
-                            else:
-                                mode_rt = apply_gateway_global(
-                                    node=node,
-                                    current_track_id=tid,
-                                    global_rt=global_rt,
-                                    mode_rt=mode_rt,
-                                    build_mode_rt=lambda mid: self._build_mode_rt(preset, mid, mono_ms()),
-                                    stop_evt=self._stop_evt,
-                                    set_stop_reason=set_stop_reason,
-                                )
-                        else:
-                            st.advance(tr)
-                            st.next_time_ms = mono_ms() + 10
-
-                    except Exception as e:
-                        log.exception("global node execution failed")
-                        self._emit_error("节点执行失败", str(e))
-                        if self._cfg.stop_on_error:
-                            raise
-                        st.next_time_ms = mono_ms() + 200
-
-                    self._emit_node_executed(cursor, node)
+                    cursor = ExecutionCursor(preset_id=preset_id, mode_id=None, track_id=item.track_id, node_index=idx)
+                    self._exec_one_node(preset=preset, scope="global", track_id=item.track_id, node=node, node_index=idx, now_ms=now)
+                    self._emit_node(cursor, node)
                     exec_nodes += 1
 
                 else:
-                    if mode_rt is None:
+                    if self._mode_rt is None:
                         continue
-                    st = mode_rt.states.get(tid)
-                    tr = mode_rt.tracks_by_id.get(tid)
-                    if st is None or tr is None or not tr.nodes:
-                        mode_rt.states.pop(tid, None)
-                        mode_rt.tracks_by_id.pop(tid, None)
+                    self._mode_rt.ensure_step_runnable()
+                    rt = self._mode_rt.tracks.get(item.track_id)
+                    if rt is None or not rt.track.nodes:
+                        self._mode_rt.tracks.pop(item.track_id, None)
                         continue
-                    if st.done():
+                    if rt.done():
+                        continue
+                    node = rt.current_node()
+                    idx = rt.current_node_index()
+                    if node is None or idx < 0:
+                        rt.advance()
                         continue
 
-                    idx = st.current_node_index()
-                    if idx < 0 or idx >= len(tr.nodes):
-                        st.advance()
-                        continue
-
-                    node = tr.nodes[idx]
-                    cursor = ExecutionCursor(preset_id=preset.id or "", mode_id=mode_rt.mode_id, track_id=tid, node_index=idx)
-
-                    try:
-                        if isinstance(node, SkillNode):
-                            st.next_time_ms = executor.exec_skill_node(node)
-                            st.advance()  # ready=False 也推进（符合需求）
-                        elif isinstance(node, GatewayNode):
-                            ok = executor.gateway_condition_ok(preset, node)
-                            if not ok:
-                                st.advance()
-                                st.next_time_ms = mono_ms() + 10
-                            else:
-                                mode_rt = apply_gateway_mode(
-                                    node=node,
-                                    current_track_id=tid,
-                                    mode_rt=mode_rt,
-                                    build_mode_rt=lambda mid: self._build_mode_rt(preset, mid, mono_ms()),
-                                    stop_evt=self._stop_evt,
-                                    set_stop_reason=set_stop_reason,
-                                )
-                        else:
-                            st.advance()
-                            st.next_time_ms = mono_ms() + 10
-
-                    except Exception as e:
-                        log.exception("mode node execution failed")
-                        self._emit_error("节点执行失败", str(e))
-                        if self._cfg.stop_on_error:
-                            raise
-                        st.next_time_ms = mono_ms() + 200
-
-                    self._emit_node_executed(cursor, node)
+                    cursor = ExecutionCursor(preset_id=preset_id, mode_id=self._mode_rt.mode_id, track_id=item.track_id, node_index=idx)
+                    self._exec_one_node(preset=preset, scope="mode", track_id=item.track_id, node=node, node_index=idx, now_ms=now)
+                    self._emit_node(cursor, node)
                     exec_nodes += 1
 
                 if self._step_once:
                     self._paused = True
                     self._step_once = False
 
+        except Exception as e:
+            self._store.engine_error("engine_crash", str(e))
+            self._emit_error("引擎异常退出", str(e))
+            if self._cfg.stop_on_error:
+                self._stop_reason = "error"
+                self._stop_evt.set()
         finally:
             try:
-                cap.close_current_thread()
+                self._capman.close_current_thread()
             except Exception:
                 pass
 
-            self._running = False
-            self._paused = False
-            self._step_once = False
-
             reason = self._stop_reason or "finished"
-            self._sch.call_soon(lambda r=reason: self._cb.on_stopped(r))
+            self._store.engine_stopped(reason)
+            self._emit_stopped(reason)
 
-    def _emit_error(self, msg: str, detail: str) -> None:
-        self._sch.call_soon(lambda: self._cb.on_error(msg, detail))
+    # ---------------- Execute one node ----------------
 
-    def _emit_node_executed(self, cursor: ExecutionCursor, node) -> None:
-        self._sch.call_soon(lambda: self._cb.on_node_executed(cursor, node))
+    def _exec_one_node(
+        self,
+        *,
+        preset: RotationPreset,
+        scope: str,
+        track_id: str,
+        node: Any,
+        node_index: int,
+        now_ms: int,
+    ) -> None:
+        if isinstance(node, SkillNode):
+            res: ExecutionResult = self._attempt_exec.exec_skill_node(
+                skill_id=(node.skill_id or "").strip(),
+                node_id=(node.id or "").strip(),
+                override_cast_ms=node.override_cast_ms,
+                node_start_expr_json=getattr(node, "start_expr", None),
+                node_complete_expr_json=getattr(node, "complete_expr", None),
+            )
+            self._apply_exec_result(scope=scope, track_id=track_id, res=res, now_ms=now_ms)
+            return
+
+        if isinstance(node, GatewayNode):
+            self._exec_gateway(preset=preset, scope=scope, track_id=track_id, gw=node, now_ms=now_ms)
+            return
+
+        self._apply_exec_result(
+            scope=scope,
+            track_id=track_id,
+            res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="unknown_node"),
+            now_ms=now_ms,
+        )
+
+    def _apply_exec_result(
+        self,
+        *,
+        scope: str,
+        track_id: str,
+        res: ExecutionResult,
+        now_ms: int,
+    ) -> None:
+        global_rt = self._global_rt
+        if global_rt is None:
+            return
+
+        if res.outcome == "STOPPED":
+            self._stop_reason = "stopped"
+            self._stop_evt.set()
+            return
+
+        delay = int(max(0, res.next_delay_ms))
+
+        if scope == "global":
+            rt = global_rt.get(track_id)
+            if rt is None:
+                return
+            rt.next_time_ms = int(now_ms + delay)
+            if res.advance == "ADVANCE":
+                rt.advance()
+            return
+
+        if self._mode_rt is None:
+            return
+        rt2 = self._mode_rt.tracks.get(track_id)
+        if rt2 is None:
+            return
+        rt2.next_time_ms = int(now_ms + delay)
+        if res.advance == "ADVANCE":
+            rt2.advance()
+            self._mode_rt.ensure_step_runnable()
+
+    # ---------------- Gateway actions ----------------
+
+    def _exec_gateway(
+        self,
+        *,
+        preset: RotationPreset,
+        scope: str,
+        track_id: str,
+        gw: GatewayNode,
+        now_ms: int,
+    ) -> None:
+        if not self._gateway_condition_ok(preset, gw):
+            self._apply_exec_result(
+                scope=scope,
+                track_id=track_id,
+                res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_cond_false"),
+                now_ms=now_ms,
+            )
+            return
+
+        act = (getattr(gw, "action", "") or "switch_mode").strip().lower() or "switch_mode"
+
+        if act == "end":
+            self._stop_reason = "gateway_end"
+            self._stop_evt.set()
+            return
+
+        if act == "switch_mode":
+            target_mode = (getattr(gw, "target_mode_id", "") or "").strip()
+            if not target_mode:
+                self._apply_exec_result(
+                    scope=scope,
+                    track_id=track_id,
+                    res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_switch_mode_missing"),
+                    now_ms=now_ms,
+                )
+                return
+
+            new_rt = self._ensure_mode_runtime(preset, target_mode, now_ms=now_ms)
+            if new_rt is None or not new_rt.has_tracks():
+                self._apply_exec_result(
+                    scope=scope,
+                    track_id=track_id,
+                    res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_switch_mode_failed"),
+                    now_ms=now_ms,
+                )
+                return
+
+            tgt_track = (getattr(gw, "target_track_id", "") or "").strip()
+            tgt_node = (getattr(gw, "target_node_id", "") or "").strip()
+            if tgt_track and tgt_node:
+                rt = new_rt.tracks.get(tgt_track)
+                if rt is not None:
+                    rt.jump_to_node_id(tgt_node)
+                    rt.next_time_ms = int(now_ms + int(self._cfg.gateway_poll_delay_ms))
+                    new_rt.maybe_backstep(tgt_track)
+
+            self._apply_exec_result(
+                scope=scope,
+                track_id=track_id,
+                res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_switch_mode_consume"),
+                now_ms=now_ms,
+            )
+            return
+
+        if act == "jump_node":
+            target_node_id = (getattr(gw, "target_node_id", "") or "").strip()
+            if not target_node_id:
+                self._apply_exec_result(
+                    scope=scope,
+                    track_id=track_id,
+                    res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_jump_node_no_target"),
+                    now_ms=now_ms,
+                )
+                return
+
+            self._jump_same_scope(scope=scope, track_id=track_id, node_id=target_node_id)
+            self._set_next_time(scope=scope, track_id=track_id, next_time_ms=now_ms + int(self._cfg.gateway_poll_delay_ms))
+            return
+
+        if act == "jump_track":
+            target_mode = (getattr(gw, "target_mode_id", "") or "").strip()
+            target_track = (getattr(gw, "target_track_id", "") or "").strip()
+            target_node = (getattr(gw, "target_node_id", "") or "").strip()
+
+            if not target_track or not target_node:
+                self._apply_exec_result(
+                    scope=scope,
+                    track_id=track_id,
+                    res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_jump_track_missing_target"),
+                    now_ms=now_ms,
+                )
+                return
+
+            if target_mode:
+                mrt = self._ensure_mode_runtime(preset, target_mode, now_ms=now_ms)
+                if mrt is None:
+                    self._apply_exec_result(
+                        scope=scope,
+                        track_id=track_id,
+                        res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_jump_track_bad_mode"),
+                        now_ms=now_ms,
+                    )
+                    return
+
+                self_mode = self._mode_rt.mode_id if self._mode_rt is not None else ""
+                if scope == "mode" and self._mode_rt is not None and self_mode == target_mode and (track_id or "") == target_track:
+                    self._jump_mode_track(target_track, target_node)
+                    self._set_next_time(scope="mode", track_id=target_track, next_time_ms=now_ms + int(self._cfg.gateway_poll_delay_ms))
+                    return
+
+                self._jump_mode_track(target_track, target_node)
+                self._set_next_time(scope="mode", track_id=target_track, next_time_ms=now_ms + int(self._cfg.gateway_poll_delay_ms))
+
+                self._apply_exec_result(
+                    scope=scope,
+                    track_id=track_id,
+                    res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_jump_track_consume"),
+                    now_ms=now_ms,
+                )
+                return
+
+            if (target_track or "") == (track_id or ""):
+                self._jump_same_scope(scope=scope, track_id=track_id, node_id=target_node)
+                self._set_next_time(scope=scope, track_id=track_id, next_time_ms=now_ms + int(self._cfg.gateway_poll_delay_ms))
+                return
+
+            self._jump_same_scope(scope=scope, track_id=target_track, node_id=target_node)
+            self._set_next_time(scope=scope, track_id=target_track, next_time_ms=now_ms + int(self._cfg.gateway_poll_delay_ms))
+
+            self._apply_exec_result(
+                scope=scope,
+                track_id=track_id,
+                res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason="gw_jump_track_consume"),
+                now_ms=now_ms,
+            )
+            return
+
+        self._apply_exec_result(
+            scope=scope,
+            track_id=track_id,
+            res=ExecutionResult(outcome="ERROR", advance="ADVANCE", next_delay_ms=int(self._cfg.gateway_poll_delay_ms), reason=f"gw_unknown_action:{act}"),
+            now_ms=now_ms,
+        )
+
+    def _jump_same_scope(self, *, scope: str, track_id: str, node_id: str) -> None:
+        tid = (track_id or "").strip()
+        nid = (node_id or "").strip()
+        if not tid or not nid:
+            return
+
+        if scope == "global":
+            rt = self._global_rt.get(tid) if self._global_rt is not None else None
+            if rt is not None:
+                rt.jump_to_node_id(nid)
+            return
+
+        if self._mode_rt is None:
+            return
+        rt2 = self._mode_rt.tracks.get(tid)
+        if rt2 is None:
+            return
+        if rt2.jump_to_node_id(nid):
+            self._mode_rt.maybe_backstep(tid)
+
+    def _jump_mode_track(self, track_id: str, node_id: str) -> None:
+        if self._mode_rt is None:
+            return
+        tid = (track_id or "").strip()
+        nid = (node_id or "").strip()
+        if not tid or not nid:
+            return
+        rt = self._mode_rt.tracks.get(tid)
+        if rt is None:
+            return
+        if rt.jump_to_node_id(nid):
+            self._mode_rt.maybe_backstep(tid)
+
+    def _set_next_time(self, *, scope: str, track_id: str, next_time_ms: int) -> None:
+        tid = (track_id or "").strip()
+        if not tid:
+            return
+        if scope == "global":
+            rt = self._global_rt.get(tid) if self._global_rt is not None else None
+            if rt is not None:
+                rt.next_time_ms = int(next_time_ms)
+            return
+        if self._mode_rt is None:
+            return
+        rt2 = self._mode_rt.tracks.get(tid)
+        if rt2 is not None:
+            rt2.next_time_ms = int(next_time_ms)
+            
+    def get_skill_stats_snapshot(self):
+        """
+        给 UI 调试面板使用：返回 StateStore 的技能快照。
+        """
+        try:
+            return self._store.snapshot_skills(ctx=self._ctx)
+        except Exception:
+            return []
+
+
+    def is_cast_locked(self) -> bool:
+        """
+        给 UI 调试面板显示施法锁状态。
+        """
+        try:
+            return bool(self._cast_lock.locked())
+        except Exception:
+            return False

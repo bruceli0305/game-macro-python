@@ -29,7 +29,6 @@ from rotation_editor.ui.editor.timeline_layout import (
     build_timeline_layout,
 )
 from rotation_editor.ui.editor.timeline_reflow import (
-    reflow_row_items_for_drag,
     compute_insert_index_for_cross_track,
 )
 

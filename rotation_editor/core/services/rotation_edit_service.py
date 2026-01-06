@@ -277,24 +277,45 @@ class RotationEditService:
         target_mode_id: str,
     ) -> Optional[GatewayNode]:
         """
-        在指定轨道末尾新增一个 GatewayNode（action="switch_mode"）。
-        UI 负责选择 label 和 target_mode_id。
+        在指定轨道末尾新增一个 GatewayNode。
+
+        - target_mode_id 有效：action="switch_mode"，仅写 target_mode_id
+        - target_mode_id 为空：action="end"
+        - 不写 target_node_index（已移除）
         """
         t = self.get_track(preset, mode_id, track_id)
         if t is None:
             return None
 
         nid = self._new_id()
-        gw = GatewayNode(
-            id=nid,
-            kind="gateway",
-            label=label or "Gateway",
-            condition_id=None,
-            action="switch_mode",
-            target_mode_id=(target_mode_id or "").strip() or "",
-            target_track_id=None,
-            target_node_index=None,
-        )
+        nm = (label or "").strip() or "Gateway"
+        tm = (target_mode_id or "").strip()
+
+        if tm:
+            gw = GatewayNode(
+                id=nid,
+                kind="gateway",
+                label=nm,
+                condition_id=None,
+                condition_expr=None,
+                action="switch_mode",
+                target_mode_id=tm,
+                target_track_id=None,
+                target_node_id=None,
+            )
+        else:
+            gw = GatewayNode(
+                id=nid,
+                kind="gateway",
+                label=nm,
+                condition_id=None,
+                condition_expr=None,
+                action="end",
+                target_mode_id=None,
+                target_track_id=None,
+                target_node_id=None,
+            )
+
         t.nodes.append(gw)
         self._mark_dirty()
         return gw

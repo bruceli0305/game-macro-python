@@ -29,11 +29,7 @@ from qtui.icons import load_icon
 
 from rotation_editor.core.services.rotation_service import RotationService
 from rotation_editor.core.models import RotationPreset
-from rotation_editor.core.analysis.reference_check import (
-    analyze_preset_references,
-    ReferenceReport,
-    RefUsage,
-)
+from rotation_editor.core.services.validation_service import ValidationService
 
 
 class RotationPresetsPage(QWidget):
@@ -69,6 +65,9 @@ class RotationPresetsPage(QWidget):
             notify_error=lambda m, d="": self._notify.error(m, detail=d),
         )
 
+        # 新增：统一校验器（包含引用检查 + 入口/网关/expr 校验）
+        self._validator = ValidationService()
+
         self._current_id: Optional[str] = None
         self._building_form = False
 
@@ -79,7 +78,6 @@ class RotationPresetsPage(QWidget):
         self.refresh_list()
 
     # ---------- UI 构建 ----------
-
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -101,7 +99,6 @@ class RotationPresetsPage(QWidget):
 
         root.addLayout(header)
 
-        # 分割器：左列表 + 右表单
         splitter = QSplitter(Qt.Horizontal, self)
         root.addWidget(splitter, 1)
 
@@ -113,7 +110,6 @@ class RotationPresetsPage(QWidget):
 
         style = self.style()
 
-        # 按钮行
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 0, 0, 0)
         btn_row.setSpacing(6)
@@ -150,7 +146,6 @@ class RotationPresetsPage(QWidget):
         btn_row.addStretch(1)
         left_layout.addLayout(btn_row)
 
-        # 列表
         self._list = QListWidget(self)
         self._list.setSelectionMode(QListWidget.SingleSelection)
         self._list.currentItemChanged.connect(self._on_select)
@@ -193,7 +188,14 @@ class RotationPresetsPage(QWidget):
         row_entry_track.addWidget(self._cmb_entry_track, 1)
         right_layout.addLayout(row_entry_track)
 
-        # 安全限制：最大执行节点数 / 最长运行时间
+        # 入口节点（新增）
+        row_entry_node = QHBoxLayout()
+        row_entry_node.addWidget(QLabel("入口节点:", right))
+        self._cmb_entry_node = QComboBox(right)
+        row_entry_node.addWidget(self._cmb_entry_node, 1)
+        right_layout.addLayout(row_entry_node)
+
+        # 安全限制
         row_max_exec = QHBoxLayout()
         row_max_exec.addWidget(QLabel("最大执行节点数(0=无限):", right))
         self._spin_max_exec_nodes = QSpinBox(right)
@@ -210,7 +212,7 @@ class RotationPresetsPage(QWidget):
         row_max_time.addWidget(self._spin_max_run_secs)
         right_layout.addLayout(row_max_time)
 
-        # 编辑 & 检查引用 按钮行
+        # 编辑 & 检查引用
         action_row = QHBoxLayout()
 
         self._btn_edit = QPushButton("编辑此方案...", right)
@@ -246,21 +248,26 @@ class RotationPresetsPage(QWidget):
 
         splitter.addWidget(right)
 
-        # 调整左右比例
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
         splitter.setSizes([600, 400])
 
-        # 表单变更 -> 写回模型（标记 dirty）
+        # 表单变更 -> 写回模型
         self._edit_name.textChanged.connect(self._on_form_changed)
         self._edit_desc.textChanged.connect(self._on_form_changed)
         self._cmb_entry_mode.currentIndexChanged.connect(self._on_entry_mode_changed)
-        self._cmb_entry_track.currentIndexChanged.connect(self._on_form_changed)
+
+        # 入口轨道变化时：重建 entry_node 并写回
+        self._cmb_entry_track.currentIndexChanged.connect(self._on_entry_track_changed)
+
+        # 入口节点变化：直接写回
+        self._cmb_entry_node.currentIndexChanged.connect(self._on_form_changed)
+
         self._spin_max_exec_nodes.valueChanged.connect(self._on_form_changed)
         self._spin_max_run_secs.valueChanged.connect(self._on_form_changed)
-
+    
     # ---------- Store dirty 订阅 ----------
 
     def _subscribe_store_dirty(self) -> None:
@@ -356,9 +363,11 @@ class RotationPresetsPage(QWidget):
     def _load_entry_mode_track_for_preset(self, p: RotationPreset) -> None:
         self._cmb_entry_mode.blockSignals(True)
         self._cmb_entry_track.blockSignals(True)
+        self._cmb_entry_node.blockSignals(True)
         try:
             self._cmb_entry_mode.clear()
             self._cmb_entry_track.clear()
+            self._cmb_entry_node.clear()
 
             self._cmb_entry_mode.addItem("（全局）", userData="")
             for m in (p.modes or []):
@@ -374,10 +383,29 @@ class RotationPresetsPage(QWidget):
                         break
             self._cmb_entry_mode.setCurrentIndex(idx_mode)
 
+            # rebuild tracks + nodes
             self._rebuild_entry_track_combo(p, em)
+
+            # 取当前轨道选择
+            et_data = self._cmb_entry_track.currentData()
+            et = et_data if isinstance(et_data, str) else ""
+
+            self._rebuild_entry_node_combo(p, em, et)
+
+            # 定位到 preset.entry.node_id（若存在）
+            entry = getattr(p, "entry", None)
+            en = (getattr(entry, "node_id", "") or "").strip() if entry is not None else ""
+            if en:
+                for i in range(self._cmb_entry_node.count()):
+                    data = self._cmb_entry_node.itemData(i)
+                    if isinstance(data, str) and data == en:
+                        self._cmb_entry_node.setCurrentIndex(i)
+                        break
+
         finally:
             self._cmb_entry_mode.blockSignals(False)
             self._cmb_entry_track.blockSignals(False)
+            self._cmb_entry_node.blockSignals(False)
 
     def _rebuild_entry_track_combo(self, p: RotationPreset, mode_id: str) -> None:
         self._cmb_entry_track.clear()
@@ -436,8 +464,11 @@ class RotationPresetsPage(QWidget):
 
         em_data = self._cmb_entry_mode.currentData() if hasattr(self, "_cmb_entry_mode") else ""
         et_data = self._cmb_entry_track.currentData() if hasattr(self, "_cmb_entry_track") else ""
+        en_data = self._cmb_entry_node.currentData() if hasattr(self, "_cmb_entry_node") else ""
+
         em = em_data if isinstance(em_data, str) else ""
         et = et_data if isinstance(et_data, str) else ""
+        en = en_data if isinstance(en_data, str) else ""
 
         max_exec = int(self._spin_max_exec_nodes.value()) if hasattr(self, "_spin_max_exec_nodes") else 0
         max_secs = int(self._spin_max_run_secs.value()) if hasattr(self, "_spin_max_run_secs") else 0
@@ -448,6 +479,7 @@ class RotationPresetsPage(QWidget):
             description=desc,
             entry_mode_id=em,
             entry_track_id=et,
+            entry_node_id=en,
             max_exec_nodes=max_exec,
             max_run_seconds=max_secs,
         )
@@ -499,9 +531,15 @@ class RotationPresetsPage(QWidget):
 
         data = self._cmb_entry_mode.currentData()
         mid = data if isinstance(data, str) else ""
+
         self._building_form = True
         try:
             self._rebuild_entry_track_combo(p, mid)
+
+            # track rebuild 后，按当前 track 再 rebuild node
+            et_data = self._cmb_entry_track.currentData()
+            et = et_data if isinstance(et_data, str) else ""
+            self._rebuild_entry_node_combo(p, mid, et)
         finally:
             self._building_form = False
 
@@ -532,47 +570,41 @@ class RotationPresetsPage(QWidget):
             return
 
         try:
-            report = analyze_preset_references(ctx=self._ctx, preset=p)
+            report = self._validator.validate_preset(p, ctx=self._ctx)
         except Exception as e:
-            self._notify.error("引用检查失败", detail=str(e))
+            self._notify.error("校验失败", detail=str(e))
             return
 
-        text = self._format_report_text(report)
-        has_issue = bool(report.missing_skills or report.missing_points)
+        ds = list(report.diagnostics or [])
+        err_cnt = sum(1 for d in ds if d.level == "error")
+        warn_cnt = sum(1 for d in ds if d.level == "warning")
+        info_cnt = sum(1 for d in ds if d.level == "info")
+
+        preset_name = p.name or "(未命名)"
+        summary_lines = [
+            f"方案：{preset_name}",
+            f"错误：{err_cnt}，警告：{warn_cnt}，信息：{info_cnt}",
+        ]
+
+        # 简短摘要（MessageBox 主文本）
+        if err_cnt == 0 and warn_cnt == 0:
+            summary_lines.append("")
+            summary_lines.append("校验通过：未发现问题。")
+            icon = QMessageBox.Information
+        else:
+            summary_lines.append("")
+            summary_lines.append("发现问题：请展开“详细信息”查看具体位置与原因。")
+            icon = QMessageBox.Warning if err_cnt > 0 else QMessageBox.Information
+
+        # 详细信息（可滚动复制）
+        detail = report.format_text(max_lines=400)
 
         box = QMessageBox(self)
-        box.setWindowTitle("引用检查结果")
-        box.setText(text)
-        box.setIcon(QMessageBox.Warning if has_issue else QMessageBox.Information)
+        box.setWindowTitle("校验 / 引用检查结果")
+        box.setIcon(icon)
+        box.setText("\n".join(summary_lines))
+        box.setDetailedText(detail)
         box.exec()
-
-    def _format_report_text(self, report: ReferenceReport) -> str:
-        lines: List[str] = []
-        name = report.preset_name or "(未命名)"
-        lines.append(f"方案：{name}")
-        lines.append("")
-
-        if not report.missing_skills and not report.missing_points:
-            lines.append("引用检查通过：未发现缺失的技能或点位引用。")
-            return "\n".join(lines)
-
-        if report.missing_skills:
-            lines.append("缺失的技能引用：")
-            for r in report.missing_skills:
-                lines.append(f"- 技能ID={r.ref_id}")
-                for loc in r.locations:
-                    lines.append(f"    · {loc}")
-            lines.append("")
-
-        if report.missing_points:
-            lines.append("缺失的点位引用：")
-            for r in report.missing_points:
-                lines.append(f"- 点位ID={r.ref_id}")
-                for loc in r.locations:
-                    lines.append(f"    · {loc}")
-            lines.append("")
-
-        return "\n".join(lines)
 
     # ---------- 按钮行为：新建/复制/重命名/删除 ----------
 
@@ -721,3 +753,56 @@ class RotationPresetsPage(QWidget):
             self._apply_form_to_current()
         except Exception:
             pass
+
+    def _on_entry_track_changed(self) -> None:
+        if self._building_form:
+            return
+        pid = self._current_id
+        if not pid:
+            return
+        p = self._svc.find_preset(pid)
+        if p is None:
+            return
+
+        em_data = self._cmb_entry_mode.currentData()
+        et_data = self._cmb_entry_track.currentData()
+        em = em_data if isinstance(em_data, str) else ""
+        et = et_data if isinstance(et_data, str) else ""
+
+        self._building_form = True
+        try:
+            self._rebuild_entry_node_combo(p, em, et)
+        finally:
+            self._building_form = False
+
+        self._apply_form_to_current()
+
+    def _rebuild_entry_node_combo(self, p: RotationPreset, mode_id: str, track_id: str) -> None:
+        self._cmb_entry_node.clear()
+        self._cmb_entry_node.addItem("（未指定）", userData="")
+
+        mid = (mode_id or "").strip()
+        tid = (track_id or "").strip()
+        if not tid:
+            return
+
+        # 找轨道
+        tr = None
+        if not mid:
+            tr = next((t for t in (p.global_tracks or []) if (t.id or "").strip() == tid), None)
+        else:
+            m = next((m for m in (p.modes or []) if (m.id or "").strip() == mid), None)
+            if m is not None:
+                tr = next((t for t in (m.tracks or []) if (t.id or "").strip() == tid), None)
+
+        if tr is None or not (tr.nodes or []):
+            return
+
+        for n in (tr.nodes or []):
+            nid = (getattr(n, "id", "") or "").strip()
+            if not nid:
+                continue
+            label = (getattr(n, "label", "") or "").strip()
+            kind = (getattr(n, "kind", "") or "").strip()
+            text = label or kind or "(节点)"
+            self._cmb_entry_node.addItem(f"{text} [{nid[-6:]}]", userData=nid)

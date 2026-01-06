@@ -37,8 +37,14 @@ from qtui.icons import load_icon
 from qtui.notify import UiNotify
 from rotation_editor.core.models import RotationPreset, Condition, GatewayNode, Track
 
+from rotation_editor.ast import compile_expr_json
+
 log = logging.getLogger(__name__)
 
+
+# -----------------------------
+# UI 层数据结构（仍是“组/原子”体验）
+# -----------------------------
 
 @dataclass
 class Atom:
@@ -58,15 +64,26 @@ class Group:
 
 class ConditionEditorDialog(QDialog):
     """
-    条件编辑对话框（Groups-only + 编辑期校验）：
+    条件编辑对话框（AST-only + 编辑期校验）：
 
-    - Condition.kind 固定为 "groups"
-    - Condition.expr:
-        {"groups":[{"id":"..","op":"and|or","atoms":[{...}]}]}
+    语义（与原先 groups UI 一致）：
+    - 组与组之间固定 OR
+    - 组内可选 AND/OR
+    - atom 支持 neg（取反）
 
-    编辑期校验：
-    - 缺 skill/point 引用、字段非法、op 非法：行标红 + tooltip
-    - 条件存在错误时：禁用“保存到当前网关”
+    存储格式（AST JSON dict）：
+    - Condition.kind: "ast"
+    - Condition.expr: AST JSON
+        * 顶层：{"type":"or","children":[group1, group2, ...]}
+        * group：{"type":"and|or","children":[atom1, atom2, ...]}
+        * atom：
+            - pixel_point: {"type":"pixel_point","point_id":"...","tolerance":10}
+            - pixel_skill: {"type":"pixel_skill","skill_id":"...","tolerance":5}
+            - skill_cast_ge: {"type":"skill_metric_ge","skill_id":"...","metric":"success","count":N}
+          neg：{"type":"not","child": atom}
+
+    注意：
+    - 不考虑旧数据兼容：遇到非 AST expr（无 type），会重置为空。
     """
 
     def __init__(
@@ -81,7 +98,7 @@ class ConditionEditorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("编辑条件")
-        self.resize(900, 560)
+        self.resize(920, 580)
 
         self._ctx = ctx
         self._preset = preset
@@ -95,7 +112,6 @@ class ConditionEditorDialog(QDialog):
         self._groups: List[Group] = []
         self._usage_by_id: Dict[str, int] = {}
 
-        # 当前表单校验结果
         self._has_errors: bool = False
         self._error_count: int = 0
 
@@ -116,7 +132,9 @@ class ConditionEditorDialog(QDialog):
             "每个组内可选 AND/OR。\n"
             "示例：(A AND B) OR C\n"
             "  - 组合1: AND [A, B]\n"
-            "  - 组合2: AND [C]\n",
+            "  - 组合2: AND [C]\n"
+            "\n"
+            "本对话框将保存为 AST JSON（不再使用旧 groups expr）。",
             self,
         )
         lbl_tip.setWordWrap(True)
@@ -274,46 +292,14 @@ class ConditionEditorDialog(QDialog):
         self._usage_by_id = usage
 
     def _condition_errors_count(self, c: Condition) -> int:
-        if (c.kind or "").strip().lower() != "groups":
+        expr = getattr(c, "expr", None)
+        if not isinstance(expr, dict) or not expr:
             return 1
-        expr = c.expr or {}
-        if not isinstance(expr, dict):
+        # 必须是 AST JSON（含 type）
+        if "type" not in expr:
             return 1
-        groups = expr.get("groups", [])
-        if not isinstance(groups, list):
-            return 1
-        # 只统计“明显错误”：引用缺失、字段非法、type 非法
-        skills_by_id = {s.id: s for s in getattr(self._ctx.skills, "skills", []) or [] if getattr(s, "id", "")}
-        points_by_id = {p.id: p for p in getattr(self._ctx.points, "points", []) or [] if getattr(p, "id", "")}
-        cnt = 0
-        for g in groups:
-            if not isinstance(g, dict):
-                cnt += 1
-                continue
-            op = (g.get("op") or "and").strip().lower()
-            if op not in ("and", "or"):
-                cnt += 1
-            atoms = g.get("atoms", [])
-            if not isinstance(atoms, list):
-                cnt += 1
-                continue
-            for a in atoms:
-                if not isinstance(a, dict):
-                    cnt += 1
-                    continue
-                t = (a.get("type") or "").strip().lower()
-                if t not in ("pixel_point", "pixel_skill", "skill_cast_ge"):
-                    cnt += 1
-                    continue
-                if t == "pixel_point":
-                    pid = (a.get("point_id") or "").strip()
-                    if not pid or pid not in points_by_id:
-                        cnt += 1
-                if t in ("pixel_skill", "skill_cast_ge"):
-                    sid = (a.get("skill_id") or "").strip()
-                    if not sid or sid not in skills_by_id:
-                        cnt += 1
-        return cnt
+        res = compile_expr_json(expr, ctx=self._ctx, path="$.conditions[].expr")
+        return sum(1 for d in (res.diagnostics or []) if d.level == "error")
 
     def _decorate_name(self, c: Condition) -> str:
         base = c.name or "(未命名)"
@@ -401,15 +387,17 @@ class ConditionEditorDialog(QDialog):
                 self._clear_form()
                 return
 
-            # 不做 AST 兼容：遇到非 groups，直接重置为 groups 空结构
-            if (c.kind or "").strip().lower() != "groups" or not isinstance(c.expr, dict):
-                c.kind = "groups"
-                c.expr = {"groups": []}
+            # 强制 AST 模式
+            c.kind = "ast"
+
+            expr = getattr(c, "expr", None)
+            if not isinstance(expr, dict) or not expr or "type" not in expr:
+                # 不兼容旧 groups：直接重置为空
+                c.expr = self._empty_expr()
                 self._mark_dirty()
 
             self._edit_name.setText(c.name or "")
-
-            self._groups = self._parse_groups(c.expr or {})
+            self._groups = self._parse_ast_to_groups(c.expr or {})
             self._rebuild_tabs(select_group_id=self._groups[0].id if self._groups else None)
         finally:
             self._building = False
@@ -434,11 +422,11 @@ class ConditionEditorDialog(QDialog):
             c.name = name
             changed = True
 
-        if (c.kind or "").strip().lower() != "groups":
-            c.kind = "groups"
+        if (c.kind or "").strip().lower() != "ast":
+            c.kind = "ast"
             changed = True
 
-        expr_new = self._build_expr(self._groups)
+        expr_new = self._build_ast_expr(self._groups)
         if expr_new != (c.expr or {}):
             c.expr = expr_new
             changed = True
@@ -446,7 +434,7 @@ class ConditionEditorDialog(QDialog):
         if changed:
             self._mark_dirty()
 
-        # 更新列表文字（包括无效计数）
+        # 更新列表文字
         self._recompute_usage()
         for i in range(self._list.count()):
             it = self._list.item(i)
@@ -508,8 +496,8 @@ class ConditionEditorDialog(QDialog):
                 tree.setSelectionBehavior(QTreeWidget.SelectRows)
                 tree.setHeaderLabels(["类型", "目标", "数值/容差", "取反"])
                 tree.setColumnWidth(0, 120)
-                tree.setColumnWidth(1, 340)
-                tree.setColumnWidth(2, 100)
+                tree.setColumnWidth(1, 360)
+                tree.setColumnWidth(2, 110)
                 tree.setColumnWidth(3, 60)
                 tree.setContextMenuPolicy(Qt.CustomContextMenu)
                 tree.customContextMenuRequested.connect(partial(self._on_atoms_context_menu, g.id, tree))
@@ -531,7 +519,7 @@ class ConditionEditorDialog(QDialog):
                         it.setText(2, str(int(a.value)))
                         it.setText(3, "是" if a.neg else "否")
                     elif k == "skill_cast_ge":
-                        it.setText(0, "技能施放次数≥")
+                        it.setText(0, "技能成功次数≥")
                         it.setText(1, self._describe_skill(a.ref_id))
                         it.setText(2, str(int(a.value)))
                         it.setText(3, "是" if a.neg else "否")
@@ -659,9 +647,13 @@ class ConditionEditorDialog(QDialog):
     # 新建/删除 条件（左侧）
     # -----------------------------
 
+    def _empty_expr(self) -> Dict[str, Any]:
+        # 至少一个空组合：结构存在，但因 children 为空会被 compiler 判为 error
+        return {"type": "or", "children": [{"type": "and", "children": []}]}
+
     def _on_new_condition(self) -> None:
         cid = uuid.uuid4().hex
-        cond = Condition(id=cid, name="新条件", kind="groups", expr={"groups": []})
+        cond = Condition(id=cid, name="新条件", kind="ast", expr=self._empty_expr())
         self._preset.conditions.append(cond)
         self._mark_dirty()
         self._reload_condition_list()
@@ -819,7 +811,7 @@ class ConditionEditorDialog(QDialog):
             return
 
         items = [f"{s.name or '(未命名)'} [{(s.id or '')[-6:]}]" for s in skills]
-        choice, ok = QInputDialog.getItem(self, "选择技能", "请选择要检查施放次数的技能：", items, 0, False)
+        choice, ok = QInputDialog.getItem(self, "选择技能", "请选择要检查成功次数的技能：", items, 0, False)
         if not ok:
             return
         try:
@@ -828,7 +820,7 @@ class ConditionEditorDialog(QDialog):
             idx = 0
         s = skills[idx]
 
-        cnt, ok_cnt = QInputDialog.getInt(self, "设置次数", "施放次数 (>=1)：", 1, 1, 10**6, 1)
+        cnt, ok_cnt = QInputDialog.getInt(self, "设置次数", "成功次数 (>=1)：", 1, 1, 10**6, 1)
         if not ok_cnt:
             return
 
@@ -836,8 +828,8 @@ class ConditionEditorDialog(QDialog):
             self,
             "是否取反",
             "是否对该条件取反？\n\n"
-            "否：表示“该技能施放次数 ≥ N”\n"
-            "是：表示“该技能施放次数 < N”",
+            "否：表示“成功次数 ≥ N”\n"
+            "是：表示“成功次数 < N”",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         ) == QMessageBox.Yes
@@ -960,85 +952,120 @@ class ConditionEditorDialog(QDialog):
         return f"(技能缺失: {(sid or '')[-6:]})"
 
     # -----------------------------
-    # expr <-> groups
+    # AST <-> groups
     # -----------------------------
 
-    def _parse_groups(self, expr: Dict[str, Any]) -> List[Group]:
-        groups: List[Group] = []
-        raw_groups = expr.get("groups", [])
-        if not isinstance(raw_groups, list):
+    def _parse_ast_to_groups(self, expr: Dict[str, Any]) -> List[Group]:
+        """
+        仅解析本对话框生成的规范形态：
+        - or(children=[group...])
+        - group = and/or(children=[atom...])
+        - atom 可被 not 包裹表示 neg
+        """
+        if not isinstance(expr, dict):
             return []
+        t = (expr.get("type") or "").strip().lower()
 
-        for rg in raw_groups:
-            if not isinstance(rg, dict):
-                continue
-            gid = str(rg.get("id") or "").strip() or uuid.uuid4().hex
-            op = str(rg.get("op") or "and").strip().lower()
-            if op not in ("and", "or"):
-                op = "and"
+        groups_nodes: List[Dict[str, Any]] = []
+        if t == "or":
+            children = expr.get("children", [])
+            if isinstance(children, list):
+                groups_nodes = [x for x in children if isinstance(x, dict)]
+        elif t in ("and", "or"):
+            groups_nodes = [expr]
+        else:
+            # atom/const/not -> 作为单组
+            groups_nodes = [{"type": "and", "children": [expr]}]
+
+        out: List[Group] = []
+        for gi, gnode in enumerate(groups_nodes):
+            gtype = (gnode.get("type") or "and").strip().lower()
+            if gtype not in ("and", "or"):
+                gtype = "and"
+            raw_children = gnode.get("children", [])
+            if not isinstance(raw_children, list):
+                raw_children = []
 
             atoms: List[Atom] = []
-            raw_atoms = rg.get("atoms", [])
-            if isinstance(raw_atoms, list):
-                for ra in raw_atoms:
-                    if not isinstance(ra, dict):
-                        continue
-                    aid = str(ra.get("id") or "").strip() or uuid.uuid4().hex
-                    t = str(ra.get("type") or "").strip().lower()
-                    neg = bool(ra.get("neg", False))
-
-                    if t == "pixel_point":
-                        pid = str(ra.get("point_id") or "").strip()
-                        tol = int(ra.get("tolerance", 0) or 0)
-                        tol = max(0, min(255, tol))
-                        if pid:
-                            atoms.append(Atom(id=aid, kind="pixel_point", ref_id=pid, value=tol, neg=neg))
-                    elif t == "pixel_skill":
-                        sid = str(ra.get("skill_id") or "").strip()
-                        tol = int(ra.get("tolerance", 0) or 0)
-                        tol = max(0, min(255, tol))
-                        if sid:
-                            atoms.append(Atom(id=aid, kind="pixel_skill", ref_id=sid, value=tol, neg=neg))
-                    elif t == "skill_cast_ge":
-                        sid = str(ra.get("skill_id") or "").strip()
-                        cnt = int(ra.get("count", 0) or 0)
-                        if sid and cnt > 0:
-                            atoms.append(Atom(id=aid, kind="skill_cast_ge", ref_id=sid, value=cnt, neg=neg))
-
-            groups.append(Group(id=gid, op=op, atoms=atoms))
-
-        return groups
-
-    def _build_expr(self, groups: List[Group]) -> Dict[str, Any]:
-        out_groups: List[Dict[str, Any]] = []
-        for g in groups or []:
-            atoms_out: List[Dict[str, Any]] = []
-            for a in g.atoms or []:
-                k = (a.kind or "").strip().lower()
-                base: Dict[str, Any] = {"id": a.id, "neg": bool(a.neg)}
-                if k == "pixel_point":
-                    base.update({"type": "pixel_point", "point_id": a.ref_id, "tolerance": int(max(0, min(255, a.value)))})
-                elif k == "pixel_skill":
-                    base.update({"type": "pixel_skill", "skill_id": a.ref_id, "tolerance": int(max(0, min(255, a.value)))})
-                elif k == "skill_cast_ge":
-                    cnt = int(a.value)
-                    if cnt <= 0:
-                        cnt = 1
-                    base.update({"type": "skill_cast_ge", "skill_id": a.ref_id, "count": cnt})
-                else:
+            for ci, child in enumerate(raw_children):
+                if not isinstance(child, dict):
                     continue
-                atoms_out.append(base)
 
+                neg = False
+                node = child
+                if (child.get("type") or "").strip().lower() == "not" and isinstance(child.get("child"), dict):
+                    neg = True
+                    node = child["child"]  # type: ignore[assignment]
+
+                atype = (node.get("type") or "").strip().lower()
+                aid = str(node.get("id") or "").strip() or uuid.uuid4().hex
+
+                if atype == "pixel_point":
+                    pid = str(node.get("point_id") or "").strip()
+                    tol = int(node.get("tolerance", 0) or 0)
+                    tol = max(0, min(255, tol))
+                    if pid:
+                        atoms.append(Atom(id=aid, kind="pixel_point", ref_id=pid, value=tol, neg=neg))
+
+                elif atype == "pixel_skill":
+                    sid = str(node.get("skill_id") or "").strip()
+                    tol = int(node.get("tolerance", 0) or 0)
+                    tol = max(0, min(255, tol))
+                    if sid:
+                        atoms.append(Atom(id=aid, kind="pixel_skill", ref_id=sid, value=tol, neg=neg))
+
+                elif atype == "skill_metric_ge":
+                    sid = str(node.get("skill_id") or "").strip()
+                    metric = str(node.get("metric") or "success").strip().lower()
+                    cnt = int(node.get("count", 0) or 0)
+                    if sid and cnt > 0 and metric == "success":
+                        atoms.append(Atom(id=aid, kind="skill_cast_ge", ref_id=sid, value=cnt, neg=neg))
+                    # metric != success 不在本 UI 表达范围内，忽略（会在校验里显示错误）
+
+            out.append(Group(id=str(gnode.get("id") or "").strip() or uuid.uuid4().hex, op=gtype, atoms=atoms))
+
+        return out
+
+    def _build_ast_expr(self, groups: List[Group]) -> Dict[str, Any]:
+        """
+        组->AST（规范化输出）：
+        {"type":"or","children":[ {"type":"and|or","children":[atom...]}, ... ]}
+        """
+        children: List[Dict[str, Any]] = []
+        for g in groups or []:
             op = (g.op or "and").strip().lower()
             if op not in ("and", "or"):
                 op = "and"
 
-            out_groups.append({"id": g.id, "op": op, "atoms": atoms_out})
+            atoms_out: List[Dict[str, Any]] = []
+            for a in g.atoms or []:
+                k = (a.kind or "").strip().lower()
+                base: Optional[Dict[str, Any]] = None
 
-        return {"groups": out_groups}
+                if k == "pixel_point":
+                    base = {"type": "pixel_point", "point_id": a.ref_id, "tolerance": int(max(0, min(255, a.value)))}
+                elif k == "pixel_skill":
+                    base = {"type": "pixel_skill", "skill_id": a.ref_id, "tolerance": int(max(0, min(255, a.value)))}
+                elif k == "skill_cast_ge":
+                    cnt = int(a.value)
+                    if cnt <= 0:
+                        cnt = 1
+                    base = {"type": "skill_metric_ge", "skill_id": a.ref_id, "metric": "success", "count": cnt}
+
+                if base is None:
+                    continue
+
+                if a.neg:
+                    atoms_out.append({"type": "not", "child": base})
+                else:
+                    atoms_out.append(base)
+
+            children.append({"type": op, "children": atoms_out})
+
+        return {"type": "or", "children": children}
 
     # -----------------------------
-    # 编辑期校验（核心）
+    # 校验
     # -----------------------------
 
     def _set_validate_status(self, error_count: int, has_errors: bool) -> None:
@@ -1056,16 +1083,17 @@ class ConditionEditorDialog(QDialog):
             self._btn_apply_gateway.setEnabled(not self._has_errors)
             self._btn_clear_gateway.setEnabled(True)
 
-    def _validate_atom(self, a: Atom) -> List[str]:
+    def _validate_atom_basic(self, a: Atom) -> List[str]:
+        """
+        轻量校验（用于定位到具体 atom 行）：
+        - 引用存在性 + 范围检查
+        更深层次的结构错误由 compile_expr_json 在整体校验里给出。
+        """
         errors: List[str] = []
         kind = (a.kind or "").strip().lower()
 
         skills_by_id = {s.id: s for s in getattr(self._ctx.skills, "skills", []) or [] if getattr(s, "id", "")}
         points_by_id = {p.id: p for p in getattr(self._ctx.points, "points", []) or [] if getattr(p, "id", "")}
-
-        if kind not in ("pixel_point", "pixel_skill", "skill_cast_ge"):
-            errors.append(f"未知 atom kind: {a.kind}")
-            return errors
 
         if kind == "pixel_point":
             if not (a.ref_id or "").strip():
@@ -1075,7 +1103,7 @@ class ConditionEditorDialog(QDialog):
             if not (0 <= int(a.value) <= 255):
                 errors.append("tolerance 应在 0..255")
 
-        if kind == "pixel_skill":
+        elif kind == "pixel_skill":
             if not (a.ref_id or "").strip():
                 errors.append("skill_id 为空")
             elif a.ref_id not in skills_by_id:
@@ -1083,7 +1111,7 @@ class ConditionEditorDialog(QDialog):
             if not (0 <= int(a.value) <= 255):
                 errors.append("tolerance 应在 0..255")
 
-        if kind == "skill_cast_ge":
+        elif kind == "skill_cast_ge":
             if not (a.ref_id or "").strip():
                 errors.append("skill_id 为空")
             elif a.ref_id not in skills_by_id:
@@ -1091,31 +1119,51 @@ class ConditionEditorDialog(QDialog):
             if int(a.value) <= 0:
                 errors.append("count 必须 >= 1")
 
+        else:
+            errors.append(f"未知 atom kind: {a.kind}")
+
         return errors
 
     def _refresh_validation(self) -> None:
         """
-        重新校验当前 groups，并把错误渲染到 UI（标红/tooltip）。
+        强化校验：
+        - 至少 1 个组合
+        - 每个组合至少 1 个原子
+        - 再叠加 compile_expr_json 的 AST 结构/引用错误
         """
-        # 统计错误 + 标红 tree items
         error_count = 0
 
-        # 建 atom_id -> errors
         atom_err: Dict[str, List[str]] = {}
-        group_op_err: Dict[str, str] = {}
+        group_err: Dict[str, str] = {}
+
+        # 结构性规则：至少 1 个组合
+        if not self._groups:
+            error_count += 1
 
         for g in self._groups:
             op = (g.op or "").strip().lower()
             if op not in ("and", "or"):
-                group_op_err[g.id] = "op 必须是 and/or"
+                group_err[g.id] = "op 必须是 and/or"
                 error_count += 1
-            for a in g.atoms:
-                errs = self._validate_atom(a)
+
+            # 结构性规则：组不能为空
+            if not (g.atoms or []):
+                group_err[g.id] = "组合不能为空（至少 1 个原子）"
+                error_count += 1
+
+            for a in g.atoms or []:
+                errs = self._validate_atom_basic(a)
                 if errs:
                     atom_err[a.id] = errs
                     error_count += len(errs)
 
-        # 应用到 UI：遍历 tabs -> tree items
+        # compiler 校验（结构/引用等）
+        expr = self._build_ast_expr(self._groups)
+        comp = compile_expr_json(expr, ctx=self._ctx, path="$.expr")
+        compile_errs = [d for d in (comp.diagnostics or []) if d.level == "error"]
+        error_count += len(compile_errs)
+
+        # UI 标红
         red = QBrush(QColor(255, 90, 90))
         normal = QBrush(QColor(220, 220, 220))
 
@@ -1130,17 +1178,18 @@ class ConditionEditorDialog(QDialog):
             if tree is None:
                 continue
 
-            # 更新 tab 标题（带叹号）
+            # tab title/tooltip
             base_title = self._tabs.tabText(ti)
             clean_title = base_title.replace(" !", "").replace("!", "").strip()
-            if gid_s and gid_s in group_op_err:
+            if gid_s and gid_s in group_err:
                 if "!" not in base_title:
                     self._tabs.setTabText(ti, f"{clean_title} !")
-                self._tabs.setTabToolTip(ti, group_op_err[gid_s])
+                self._tabs.setTabToolTip(ti, group_err[gid_s])
             else:
                 self._tabs.setTabText(ti, clean_title)
                 self._tabs.setTabToolTip(ti, "")
 
+            # atom rows
             for row in range(tree.topLevelItemCount()):
                 it = tree.topLevelItem(row)
                 if it is None:
@@ -1152,17 +1201,25 @@ class ConditionEditorDialog(QDialog):
                 if errs:
                     for col in range(0, 4):
                         it.setForeground(col, red)
-                    it.setToolTip(0, "\n".join(errs))
-                    it.setToolTip(1, "\n".join(errs))
-                    it.setToolTip(2, "\n".join(errs))
-                    it.setToolTip(3, "\n".join(errs))
+                    tip = "\n".join(errs)
+                    for col in range(0, 4):
+                        it.setToolTip(col, tip)
                 else:
                     for col in range(0, 4):
                         it.setForeground(col, normal)
-                    it.setToolTip(0, "")
-                    it.setToolTip(1, "")
-                    it.setToolTip(2, "")
-                    it.setToolTip(3, "")
+                    for col in range(0, 4):
+                        it.setToolTip(col, "")
+
+        # 状态栏文案更明确
+        if not self._groups:
+            self._lbl_validate.setText("未设置条件：至少需要 1 个组合和 1 个原子")
+            self._lbl_validate.setStyleSheet("color: #ff6b6b;")
+            self._has_errors = True
+            self._error_count = int(error_count)
+            if self._gateway is not None:
+                self._btn_apply_gateway.setEnabled(False)
+                self._btn_clear_gateway.setEnabled(True)
+            return
 
         self._set_validate_status(error_count, has_errors=(error_count > 0))
 

@@ -8,49 +8,22 @@ from core.models.common import as_dict, as_str, as_int
 
 @dataclass
 class Node:
-    """
-    轨道节点基类：
-
-    - kind: "skill" | "gateway" | ...
-    - id: 节点 ID（字符串）
-    - label: UI 上展示用的短标签（例如 "2" / "A→B" 等）
-
-    新增：
-    - step_index: 该节点所属的“步骤”（Step），用于步骤轴调度（>=0）
-    - order_in_step: 同一 Step 内的相对顺序（>=0）
-
-    实际使用时一般是 SkillNode 或 GatewayNode 子类。
-    """
-
     id: str = ""
     kind: str = "skill"
     label: str = ""
 
-    # 步骤轴相关字段（步骤号 + 步内顺序）
     step_index: int = 0
     order_in_step: int = 0
 
-    # ---------- 工厂方法 ----------
-
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Node":
-        """
-        工厂方法：根据 kind 字段分发到具体子类。
-        """
-
         d = as_dict(d)
         kind = as_str(d.get("kind", "skill"), "skill").strip().lower()
         if kind == "gateway":
             return GatewayNode.from_dict(d)
-        # 默认当作 skill 节点处理
         return SkillNode.from_dict(d)
 
-    # ---------- 序列化（基类兜底） ----------
-
     def to_dict(self) -> Dict[str, Any]:
-        """
-        子类应覆写本方法；这里只做兜底。
-        """
         return {
             "id": self.id,
             "kind": self.kind,
@@ -60,24 +33,15 @@ class Node:
         }
 
 
-# ---------- SkillNode ----------
-
 @dataclass
 class SkillNode(Node):
-    """
-    技能节点：
-    - skill_id: 引用 skills.json 中的 Skill.id
-    - override_cast_ms: 可选，覆盖 Skill.cast.readbar_ms
-    - comment: 备注（UI 展示用）
-
-    继承自 Node 的：
-    - step_index: 所属步骤
-    - order_in_step: 同一步骤内顺序
-    """
-
     skill_id: str = ""
     override_cast_ms: Optional[int] = None
     comment: str = ""
+
+    # 节点级 AST JSON（可选）
+    start_expr: Optional[Dict[str, Any]] = None
+    complete_expr: Optional[Dict[str, Any]] = None
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "SkillNode":
@@ -85,7 +49,6 @@ class SkillNode(Node):
         node_id = as_str(d.get("id", ""))
         label = as_str(d.get("label", ""))
 
-        # 步骤轴字段（兼容旧数据，缺省为 0）
         step_index = as_int(d.get("step_index", 0), 0)
         order_in_step = as_int(d.get("order_in_step", 0), 0)
 
@@ -99,6 +62,12 @@ class SkillNode(Node):
 
         comment = as_str(d.get("comment", ""))
 
+        se = d.get("start_expr", None)
+        start_expr = dict(se) if isinstance(se, dict) and se else None
+
+        ce = d.get("complete_expr", None)
+        complete_expr = dict(ce) if isinstance(ce, dict) and ce else None
+
         return SkillNode(
             id=node_id,
             kind="skill",
@@ -108,6 +77,8 @@ class SkillNode(Node):
             skill_id=skill_id,
             override_cast_ms=override_cast_ms,
             comment=comment,
+            start_expr=start_expr,
+            complete_expr=complete_expr,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -122,36 +93,32 @@ class SkillNode(Node):
         }
         if self.override_cast_ms is not None:
             out["override_cast_ms"] = int(self.override_cast_ms)
+
+        if isinstance(self.start_expr, dict) and self.start_expr:
+            out["start_expr"] = dict(self.start_expr)
+        if isinstance(self.complete_expr, dict) and self.complete_expr:
+            out["complete_expr"] = dict(self.complete_expr)
+
         return out
 
-
-# ---------- GatewayNode ----------
 
 @dataclass
 class GatewayNode(Node):
     """
-    网关节点（控制流节点，不直接放技能）：
+    网关节点（控制流节点）：
 
-    - condition_id: 条件 ID（可选），为空则无条件，执行到此节点即触发动作
-    - action: 动作类型，MVP 先支持：
-        - "switch_mode": 切换到另一个模式
-      预留:
-        - "jump_track": 跳转到当前/其他轨道
-        - "jump_node": 跳转到当前轨道某个节点索引
-        - "end": 结束当前模式/轨道
-    - target_mode_id / target_track_id / target_node_index:
-        动作需要的目标参数（视 action 而定）
-
-    继承自 Node 的：
-    - step_index: 所属步骤
-    - order_in_step: 同一步骤内顺序
+    - condition_id: 引用 Condition.id（可选）
+    - condition_expr: 内联 AST JSON（可选，优先于 condition_id）
+    - action: switch_mode / jump_track / jump_node / end
+    - target_*：跳转目标（稳定使用 node_id，不再支持 index）
     """
-
     condition_id: Optional[str] = None
+    condition_expr: Optional[Dict[str, Any]] = None
+
     action: str = "switch_mode"
     target_mode_id: Optional[str] = None
     target_track_id: Optional[str] = None
-    target_node_index: Optional[int] = None
+    target_node_id: Optional[str] = None
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "GatewayNode":
@@ -159,13 +126,15 @@ class GatewayNode(Node):
         node_id = as_str(d.get("id", ""))
         label = as_str(d.get("label", ""))
 
-        # 步骤轴字段（兼容旧数据，缺省为 0）
         step_index = as_int(d.get("step_index", 0), 0)
         order_in_step = as_int(d.get("order_in_step", 0), 0)
 
         cond_id = d.get("condition_id", None)
         if cond_id is not None:
             cond_id = as_str(cond_id, "")
+
+        cond_expr_raw = d.get("condition_expr", None)
+        condition_expr = dict(cond_expr_raw) if isinstance(cond_expr_raw, dict) and cond_expr_raw else None
 
         action = as_str(d.get("action", "switch_mode"), "switch_mode").strip() or "switch_mode"
 
@@ -177,12 +146,12 @@ class GatewayNode(Node):
         if t_track is not None:
             t_track = as_str(t_track, "")
 
-        idx_raw = d.get("target_node_index", None)
-        if idx_raw is None:
-            t_index: Optional[int] = None
-        else:
-            v = as_int(idx_raw, -1)
-            t_index = v if v >= 0 else None
+        t_node_id = d.get("target_node_id", None)
+        if t_node_id is not None:
+            t_node_id = as_str(t_node_id, "")
+
+        # 旧字段 target_node_index：彻底忽略（不兼容，不再使用）
+        # d.get("target_node_index", None)
 
         return GatewayNode(
             id=node_id,
@@ -191,10 +160,11 @@ class GatewayNode(Node):
             step_index=step_index,
             order_in_step=order_in_step,
             condition_id=cond_id or None,
+            condition_expr=condition_expr,
             action=action,
             target_mode_id=t_mode or None,
             target_track_id=t_track or None,
-            target_node_index=t_index,
+            target_node_id=(t_node_id or None),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -208,10 +178,14 @@ class GatewayNode(Node):
         }
         if self.condition_id:
             out["condition_id"] = self.condition_id
+        if isinstance(self.condition_expr, dict) and self.condition_expr:
+            out["condition_expr"] = dict(self.condition_expr)
+
         if self.target_mode_id:
             out["target_mode_id"] = self.target_mode_id
         if self.target_track_id:
             out["target_track_id"] = self.target_track_id
-        if self.target_node_index is not None:
-            out["target_node_index"] = int(self.target_node_index)
+        if self.target_node_id:
+            out["target_node_id"] = self.target_node_id
+
         return out

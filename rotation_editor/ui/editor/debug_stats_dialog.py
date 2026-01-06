@@ -18,8 +18,11 @@ from PySide6.QtWidgets import (
 _STATE_CN = {
     "IDLE": "空闲",
     "READY_CHECK": "可释放检查",
+    "LOCK_WAIT": "等待施法锁",
     "PREPARING": "准备施法",
+    "START_WAIT": "等待开始信号",
     "CASTING": "施法中",
+    "COMPLETE_WAIT": "等待完成信号",
     "SUCCESS": "成功",
     "FAILED": "失败",
     "STOPPED": "已停止",
@@ -37,6 +40,7 @@ _REASON_CN = {
     "send_key_error": "发键失败",
     "no_key": "未配置按键",
     "cast_bar_unavailable": "施法条信号不可用",
+    "complete_signal_missing": "缺少完成信号",
     "stopped": "已停止",
     "unknown": "未知",
 }
@@ -68,7 +72,7 @@ def _fmt_reason(v: object) -> str:
 
 class DebugStatsDialog(QDialog):
     """
-    调试面板（中英双语版）：
+    调试面板（适配 StateStore 快照）：
     - 上表：技能统计 + 当前状态
     - 下表：选中技能的最近 attempt 明细
     """
@@ -82,7 +86,7 @@ class DebugStatsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("执行调试面板(Debug Panel)")
-        self.resize(980, 560)
+        self.resize(1080, 600)
 
         self._get_snapshot = get_snapshot
         self._get_lock_state = get_lock_state
@@ -111,9 +115,9 @@ class DebugStatsDialog(QDialog):
         splitter = QSplitter(Qt.Vertical, self)
         root.addWidget(splitter, 1)
 
-        # 上表：技能统计
+        # 上表：技能统计（适配新字段）
         self._table = QTableWidget(self)
-        self._table.setColumnCount(12)
+        self._table.setColumnCount(14)
         self._table.setHorizontalHeaderLabels([
             _bi("技能", "Skill"),
             _bi("状态", "State"),
@@ -121,11 +125,13 @@ class DebugStatsDialog(QDialog):
             _bi("轮询次数", "Node Exec"),
             _bi("不可用次数", "Ready False"),
             _bi("锁忙跳过", "Skipped Lock"),
-            _bi("尝试次数", "Attempt"),
-            _bi("重试次数", "Retry"),
-            _bi("进入施法中", "Cast Start"),
+            _bi("禁用跳过", "Skipped Disabled"),
+            _bi("Attempt(开始)", "Attempt Started"),
+            _bi("发键成功", "Key Sent OK"),
+            _bi("进入施法中", "Cast Started"),
             _bi("成功次数", "Success"),
             _bi("失败次数", "Fail"),
+            _bi("重试(当前)", "Retry Index"),
             _bi("技能ID后6", "Skill ID (last6)"),
         ])
         self._table.verticalHeader().setVisible(False)
@@ -213,18 +219,28 @@ class DebugStatsDialog(QDialog):
             state_disp = _fmt_state(d.get("state", "IDLE"))
             age = d.get("state_age_ms", 0)
 
+            retry_index = d.get("retry_index", 0)
+            fail_reason = d.get("fail_reason", "")
+
+            # 失败原因可做 tooltip
+            state_item = QTableWidgetItem(state_disp)
+            if fail_reason:
+                state_item.setToolTip(_bi("失败原因", "Fail Reason") + f": {fail_reason}")
+
             self._table.setItem(i, 0, QTableWidgetItem(str(name)))
-            self._table.setItem(i, 1, QTableWidgetItem(state_disp))
+            self._table.setItem(i, 1, state_item)
             self._table.setItem(i, 2, self._cell(age))
             self._table.setItem(i, 3, self._cell(d.get("node_exec", 0)))
             self._table.setItem(i, 4, self._cell(d.get("ready_false", 0)))
             self._table.setItem(i, 5, self._cell(d.get("skipped_lock", 0)))
-            self._table.setItem(i, 6, self._cell(d.get("attempt", 0)))
-            self._table.setItem(i, 7, self._cell(d.get("retry", 0)))
-            self._table.setItem(i, 8, self._cell(d.get("cast_start", 0)))
-            self._table.setItem(i, 9, self._cell(d.get("success", 0)))
-            self._table.setItem(i, 10, self._cell(d.get("fail", 0)))
-            self._table.setItem(i, 11, self._cell(sid6))
+            self._table.setItem(i, 6, self._cell(d.get("skipped_disabled", 0)))
+            self._table.setItem(i, 7, self._cell(d.get("attempt_started", 0)))
+            self._table.setItem(i, 8, self._cell(d.get("key_sent_ok", 0)))
+            self._table.setItem(i, 9, self._cell(d.get("cast_started", 0)))
+            self._table.setItem(i, 10, self._cell(d.get("success", 0)))
+            self._table.setItem(i, 11, self._cell(d.get("fail", 0)))
+            self._table.setItem(i, 12, self._cell(retry_index))
+            self._table.setItem(i, 13, self._cell(sid6))
 
         self._table.resizeColumnsToContents()
 
