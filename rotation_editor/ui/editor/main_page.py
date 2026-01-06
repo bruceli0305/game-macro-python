@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Protocol, Callable
 
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import (
@@ -31,7 +31,7 @@ from rotation_editor.ui.editor.timeline_canvas import TimelineCanvas
 from rotation_editor.ui.editor.mode_bar import ModeTabBar
 
 from rotation_editor.core.runtime.engine import (
-    MacroEngineNew,
+    MacroEngine,
     EngineConfig,
     ExecutionCursor,
 )
@@ -45,6 +45,14 @@ from rotation_editor.core.runtime.executor.lock_policy import LockPolicyConfig
 import logging  # 新增
 
 log = logging.getLogger(__name__)  # 新增
+
+class SchedulerLike(Protocol):
+    """
+    简单的调度器协议：
+    - MacroEngine 只依赖一个 call_soon(fn) 方法
+    - QtDispatcher / 其他实现只要提供同名方法即可作为 dispatcher 使用
+    """
+    def call_soon(self, fn: Callable[[], None]) -> None: ...
 
 class RotationEditorPage(QWidget):
     """
@@ -62,7 +70,7 @@ class RotationEditorPage(QWidget):
         ctx: ProfileContext,
         session: ProfileSession,
         notify: UiNotify,
-        dispatcher: Scheduler,
+        dispatcher: SchedulerLike,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -89,7 +97,7 @@ class RotationEditorPage(QWidget):
         self._dirty_ui = False
 
         # 执行引擎
-        self._engine: Optional[MacroEngineNew] = None   # <<< 这里改成 MacroEngineNew
+        self._engine: Optional[MacroEngine] = None   # <<< 这里改成 MacroEngineNew
         self._engine_running: bool = False
         self._engine_paused: bool = False
 
@@ -856,9 +864,9 @@ class RotationEditorPage(QWidget):
         pass
 
     # ---------- 引擎控制 ----------
-    def _ensure_engine(self) -> MacroEngineNew:
+    def _ensure_engine(self) -> MacroEngine:
         """
-        新引擎（MacroEngineNew）：
+        新引擎（MacroEngine）：
         - 启动前会做 ValidationService 校验（入口 node_id 必须设置）
         - 参数从 ctx.base.exec 与 ctx.base.cast_bar 读取
         - 若旧引擎不在运行，则丢弃并重建，确保参数立即生效
@@ -960,7 +968,7 @@ class RotationEditorPage(QWidget):
             sample_log_throttle_ms=80,
         )
 
-        self._engine = MacroEngineNew(
+        self._engine = MacroEngine(
             ctx=self._ctx,
             scheduler=self._dispatcher,
             callbacks=self,

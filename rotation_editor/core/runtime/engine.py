@@ -678,3 +678,5 @@ class MacroEngineNew:
             self._capman.invalidate_plan()
         except Exception:
             logging.getLogger(__name__).exception("invalidate_capture_plan failed")
+
+MacroEngine = MacroEngineNew
