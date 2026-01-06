@@ -241,7 +241,7 @@ class NodeListPanel(QWidget):
             self._tree.addTopLevelItem(item)
 
         self._btn_cond.setEnabled(False)
-        
+
     def _current_node_index(self) -> int:
         t = self._current_track()
         if t is None:
@@ -414,3 +414,19 @@ class NodeListPanel(QWidget):
             self._edit_svc.mark_dirty()
         except Exception:
             log.exception("NodeListPanel._mark_dirty failed")
+
+    def add_skill_node(self) -> None:
+        """
+        对外公开的“新增技能节点”接口：
+        - 供 TimelineCanvas 右键菜单调用
+        - 内部复用 _on_add_skill_node 的逻辑
+        """
+        self._on_add_skill_node()
+
+    def add_gateway_node(self) -> None:
+        """
+        对外公开的“新增网关节点”接口：
+        - 供 TimelineCanvas 右键菜单调用
+        - 内部复用 _on_add_gateway_node 的逻辑
+        """
+        self._on_add_gateway_node()
