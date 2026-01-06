@@ -15,7 +15,7 @@ from rotation_editor.ast import (
     MetricProvider,
     BaselineProvider,
 )
-from rotation_editor.runtime.capture.manager import (
+from rotation_editor.core.runtime.capture.manager import (
     CaptureManager,
     SnapshotOk,
     CaptureUnavailable,

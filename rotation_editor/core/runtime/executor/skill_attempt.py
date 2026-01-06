@@ -22,10 +22,10 @@ from rotation_editor.ast import (
 )
 from rotation_editor.ast.codec import decode_expr
 
-from rotation_editor.runtime.capture import CaptureManager
-from rotation_editor.runtime.eval_bridge import eval_expr_with_capture, ensure_plan_for_probes
-from rotation_editor.runtime.state import StateStore
-from rotation_editor.runtime.state.store import mono_ms
+from rotation_editor.core.runtime.capture import CaptureManager
+from rotation_editor.core.runtime.capture.eval_bridge import eval_expr_with_capture, ensure_plan_for_probes
+from rotation_editor.core.runtime.state import StateStore
+from rotation_editor.core.runtime.state.store import mono_ms
 
 from .types import ExecutionResult
 from .lock_policy import LockPolicyConfig, decide_on_lock_busy
@@ -352,7 +352,7 @@ class SkillAttemptExecutor:
             return None
 
         snap_res = self._capman.get_snapshot()
-        from rotation_editor.runtime.capture.manager import SnapshotOk
+        from rotation_editor.core.runtime.capture.manager import SnapshotOk
         if not isinstance(snap_res, SnapshotOk) or snap_res.snapshot is None:
             return None
 
