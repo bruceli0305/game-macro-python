@@ -42,6 +42,9 @@ from rotation_editor.core.runtime.executor.skill_attempt import (
 )
 from rotation_editor.core.runtime.executor.lock_policy import LockPolicyConfig
 
+import logging  # 新增
+
+log = logging.getLogger(__name__)  # 新增
 
 class RotationEditorPage(QWidget):
     """
@@ -238,9 +241,16 @@ class RotationEditorPage(QWidget):
             pass
 
     def _on_store_dirty(self, parts) -> None:
+        """
+        监听 ProfileSession.dirty 变化：
+        - 更新“未保存*”指示
+        - 若引擎正在运行，points/skills/rotations 变更时刷新 capture plan
+        """
         try:
             parts_set = set(parts or [])
         except Exception:
+            # 不应该发生，但如果 parts 不是可迭代，记录日志并降级为空集合
+            log.exception("_on_store_dirty: unexpected parts value, treat as empty")
             parts_set = set()
 
         self._dirty_ui = "rotations" in parts_set
@@ -252,7 +262,8 @@ class RotationEditorPage(QWidget):
                 try:
                     self._engine.invalidate_capture_plan()
                 except Exception:
-                    pass
+                    # 记录异常，但不影响后续 UI 操作
+                    log.exception("invalidate_capture_plan failed in _on_store_dirty")
 
     def _on_service_dirty(self) -> None:
         pass

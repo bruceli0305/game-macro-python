@@ -30,6 +30,9 @@ from qtui.theme import DARK_THEMES, LIGHT_THEMES
 from qtui.widgets.hotkey_edit import HotkeyEdit
 from qtui.icons import load_icon
 
+import logging
+
+log = logging.getLogger(__name__)
 
 _MONITOR_DISP_TO_VAL = {
     "主屏": "primary",
@@ -508,7 +511,12 @@ class BaseSettingsPage(QWidget):
         try:
             self._services.base.apply_patch(patch)
         except Exception:
-            pass
+            # 防抖自动应用失败（例如校验错误）在显式保存时会提示用户；
+            # 这里仅记录 debug 日志，避免静默吞掉调试信息。
+            log.debug(
+                "BaseSettingsPage._apply_now: apply_patch failed (ignored in debounced apply)",
+                exc_info=True,
+            )
 
     # ---------- 施法条点位选择 ----------
     def _on_select_cast_point(self) -> None:
@@ -553,4 +561,4 @@ class BaseSettingsPage(QWidget):
         try:
             self._apply_now()
         except Exception:
-            pass
+            log.exception("BaseSettingsPage.flush_to_model: _apply_now failed")

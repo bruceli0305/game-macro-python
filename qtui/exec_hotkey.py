@@ -8,7 +8,9 @@ from pynput import keyboard
 from core.profiles import ProfileContext
 from core.input.hotkey import normalize, parse, key_to_name  # 复用已有工具
 from qtui.dispatcher import QtDispatcher
+import logging  # 新增
 
+log = logging.getLogger(__name__)  # 新增
 
 class ExecHotkeyController:
     """
@@ -115,8 +117,7 @@ class ExecHotkeyController:
             try:
                 lst.stop()
             except Exception:
-                pass
-
+                log.exception("ExecHotkeyController.close: failed to stop keyboard.Listener")
     # ---------- 内部：pynput 监听 ----------
 
     def _start_listener(self) -> None:

@@ -8,6 +8,8 @@ from PySide6.QtCore import QObject, QPoint
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMainWindow, QApplication
 
+import logging
+
 from core.pick.engine import PickEngine, PickCallbacks
 from core.pick.models import PickSessionConfig, PickPreview, PickConfirmed
 
@@ -15,6 +17,7 @@ from qtui.dispatcher import QtDispatcher
 from qtui.status_bar import StatusController
 from qtui.pick.preview_window import PickPreviewWindow
 
+log = logging.getLogger(__name__)  # 新增
 
 @dataclass(frozen=True)
 class UiPickPolicySnapshot:
@@ -60,16 +63,29 @@ class QtPickCoordinator(QObject):
     # ---------- 外部 API ----------
 
     def close(self) -> None:
+        """
+        停止当前会话并关闭截图资源。
+        任何异常都会记录日志，但不会让 UI 崩溃。
+        """
         try:
             self.cancel()
         except Exception:
-            pass
+            log.exception("QtPickCoordinator.cancel() failed during close")
+
         try:
             self._engine.close()
         except Exception:
-            pass
-        self._destroy_preview()
-        self._restore_after_exit()
+            log.exception("PickEngine.close() failed during QtPickCoordinator.close")
+
+        try:
+            self._destroy_preview()
+        except Exception:
+            log.exception("destroy_preview failed during QtPickCoordinator.close")
+
+        try:
+            self._restore_after_exit()
+        except Exception:
+            log.exception("restore_after_exit failed during QtPickCoordinator.close")
 
     def cancel(self) -> None:
         self._engine.cancel()
@@ -108,7 +124,7 @@ class QtPickCoordinator(QObject):
             try:
                 self._preview.close()
             except Exception:
-                pass
+                log.exception("PickPreviewWindow.close failed in QtPickCoordinator._destroy_preview")
             self._preview = None
 
     # ---------- 内部：主窗口避让/恢复 ----------
@@ -160,28 +176,28 @@ class QtPickCoordinator(QObject):
             if mode in ("hide_main", "minimize"):
                 self._root.showNormal()
         except Exception:
-            pass
+            log.exception("restore_after_exit: showNormal failed")
 
         # 恢复位置
         if self._prev_geo is not None:
             try:
                 self._root.setGeometry(self._prev_geo)
             except Exception:
-                pass
+                log.exception("restore_after_exit: setGeometry failed")
 
         # 恢复最大化状态
         if self._prev_state is not None:
             try:
                 self._root.setWindowState(self._prev_state)
             except Exception:
-                pass
+                log.exception("restore_after_exit: setWindowState failed")
 
         # 前置
         try:
             self._root.raise_()
             self._root.activateWindow()
         except Exception:
-            pass
+            log.exception("restore_after_exit: raise_/activateWindow failed")
 
     def _virtual_bounds(self) -> Tuple[int, int, int, int]:
         """

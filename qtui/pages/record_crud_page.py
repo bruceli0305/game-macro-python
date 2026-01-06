@@ -24,6 +24,9 @@ from core.app.session import ProfileSession
 from qtui.notify import UiNotify
 from qtui.icons import load_icon
 
+import logging
+
+log = logging.getLogger(__name__)
 
 @dataclass
 class ColumnDef:
@@ -444,7 +447,8 @@ class RecordCrudPage(QWidget):
         try:
             self._apply_form_to_current(auto_save=False)
         except Exception:
-            pass
+            # flush 表单失败通常是编程错误，记录日志便于排查
+            log.exception("RecordCrudPage._on_reload_clicked: apply_form_to_current failed before reload")
 
         try:
             self._reload_from_disk()

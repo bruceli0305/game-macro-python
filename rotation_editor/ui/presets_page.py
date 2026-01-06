@@ -31,6 +31,9 @@ from rotation_editor.core.services.rotation_service import RotationService
 from rotation_editor.core.models import RotationPreset
 from rotation_editor.core.services.validation_service import ValidationService
 
+import logging
+
+log = logging.getLogger(__name__)
 
 class RotationPresetsPage(QWidget):
     """
@@ -522,7 +525,7 @@ class RotationPresetsPage(QWidget):
             try:
                 self._apply_form_to_current()
             except Exception:
-                pass
+                log.exception("RotationPresetsPage._on_select: _apply_form_to_current failed")
 
         if curr is None:
             self._current_id = None
@@ -744,7 +747,7 @@ class RotationPresetsPage(QWidget):
         try:
             self._apply_form_to_current()
         except Exception:
-            pass
+            log.exception("RotationPresetsPage._on_reload: _apply_form_to_current failed (ignored)")
 
         try:
             self._svc.reload_cmd()
@@ -774,7 +777,7 @@ class RotationPresetsPage(QWidget):
         try:
             self._apply_form_to_current()
         except Exception:
-            pass
+            log.exception("RotationPresetsPage.flush_to_model: _apply_form_to_current failed")
 
     def _on_entry_track_changed(self) -> None:
         if self._building_form:

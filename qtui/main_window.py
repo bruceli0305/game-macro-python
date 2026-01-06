@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QCloseEvent
 
+import logging  # 新增
+
 from core.app.services.app_services import AppServices
 from core.app.services.profile_service import ProfileService
 from core.pick.capture import SampleSpec
@@ -35,6 +37,8 @@ from rotation_editor.ui.presets_page import RotationPresetsPage
 from rotation_editor.ui.editor.main_page import RotationEditorPage
 
 from qtui.exec_hotkey import ExecHotkeyController
+
+log = logging.getLogger(__name__)  # 新增
 
 class MainWindow(QMainWindow):
     """
@@ -483,23 +487,27 @@ class MainWindow(QMainWindow):
         try:
             self._page_base.flush_to_model()
         except Exception:
-            pass
+            log.exception("MainWindow._flush_all_pages: base page flush_to_model failed")
+
         try:
             self._page_skills.flush_to_model()
         except Exception:
-            pass
+            log.exception("MainWindow._flush_all_pages: skills page flush_to_model failed")
+
         try:
             self._page_points.flush_to_model()
         except Exception:
-            pass
+            log.exception("MainWindow._flush_all_pages: points page flush_to_model failed")
+
         try:
             self._page_rotation.flush_to_model()
         except Exception:
-            pass
+            log.exception("MainWindow._flush_all_pages: rotation presets page flush_to_model failed")
+
         try:
             self._page_rotation_editor.flush_to_model()
         except Exception:
-            pass
+            log.exception("MainWindow._flush_all_pages: rotation editor page flush_to_model failed")
 
     def _set_pages_context(self, ctx: ProfileContext) -> None:
         """
@@ -508,23 +516,27 @@ class MainWindow(QMainWindow):
         try:
             self._page_base.set_context(ctx)
         except Exception:
-            pass
+            log.exception("MainWindow._set_pages_context: set_context failed for base page")
+
         try:
             self._page_skills.set_context(ctx)
         except Exception:
-            pass
+            log.exception("MainWindow._set_pages_context: set_context failed for skills page")
+
         try:
             self._page_points.set_context(ctx)
         except Exception:
-            pass
+            log.exception("MainWindow._set_pages_context: set_context failed for points page")
+
         try:
             self._page_rotation.set_context(ctx)
         except Exception:
-            pass
+            log.exception("MainWindow._set_pages_context: set_context failed for rotation presets page")
+
         try:
             self._page_rotation_editor.set_context(ctx)
         except Exception:
-            pass
+            log.exception("MainWindow._set_pages_context: set_context failed for rotation editor page")
 
     # ---------- 从方案页打开循环编辑器 ----------
 
@@ -558,10 +570,23 @@ class MainWindow(QMainWindow):
     # ---------- 关闭事件：先守卫未保存变更，再停止取色并保存几何 ----------
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        """
+        关闭事件：
+        1) 先通过 UnsavedChangesGuard 检查未保存更改；
+        2) 再关闭取色协调器和执行热键监听器；
+        3) 最后持久化窗口几何到 app_state.json。
+
+        任何步骤出错都会记录日志，但不会让 UI 崩溃。
+        """
         # 先检查未保存更改
         g = getattr(self, "_guard", None)
         if g is not None:
-            if not g.confirm("退出程序", self._ctx):
+            try:
+                ok = g.confirm("退出程序", self._ctx)
+            except Exception:
+                log.exception("UnsavedChangesGuard.confirm failed in MainWindow.closeEvent")
+                ok = True  # 守卫报错时，默认允许关闭，避免卡死
+            if not ok:
                 event.ignore()
                 return
 
@@ -569,20 +594,23 @@ class MainWindow(QMainWindow):
         try:
             self._pick_coord.close()
         except Exception:
-            pass
+            log.exception("failed to close QtPickCoordinator in MainWindow.closeEvent")
+
         # 停止执行热键监听器
         try:
             if self._exec_hotkey is not None:
                 self._exec_hotkey.close()
         except Exception:
-            pass
+            log.exception("failed to close ExecHotkeyController in MainWindow.closeEvent")
+
         # 保存当前窗口几何到 app_state.json
         try:
             self._win_state.persist_current_geometry()
         except Exception:
-            pass
+            log.exception("persist_current_geometry failed in MainWindow.closeEvent")
 
         event.accept()
+
     def _toggle_exec_by_hotkey(self) -> None:
         """
         由 ExecHotkeyController 触发：

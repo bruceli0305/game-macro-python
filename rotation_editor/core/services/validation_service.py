@@ -8,7 +8,6 @@ from core.profiles import ProfileContext
 from rotation_editor.ast import ProbeRequirements, compile_expr_json
 from rotation_editor.ast.diagnostics import Diagnostic, err, warn
 from rotation_editor.core.models import RotationPreset, Track, SkillNode, GatewayNode, Condition
-from rotation_editor.core.runtime.runtime_state import find_track_in_preset, track_has_node
 
 @dataclass(frozen=True)
 class ValidationReport:
@@ -135,6 +134,11 @@ class ValidationService:
         - track_id / node_id 不能为空
         - track_id 必须指向存在的轨道
         - node_id 必须属于该轨道
+
+        为避免导入时循环依赖，这里在函数内部延迟导入 runtime_state：
+        - rotation_editor.core.runtime.__init__ 会导入 engine
+        - engine 会导入 ValidationService
+        - 若在模块顶层导入 runtime_state 会导致 ValidationService 尚未初始化完毕就被引用
         """
         entry = getattr(preset, "entry", None)
         if entry is None:
@@ -162,25 +166,43 @@ class ValidationService:
         if any(d.code.startswith("entry.") and d.level == "error" for d in diags):
             return
 
+        # 延迟导入，避免 import 阶段循环依赖
+        try:
+            from rotation_editor.core.runtime.runtime_state import find_track_in_preset, track_has_node
+        except Exception as e:
+            diags.append(
+                err(
+                    "entry.runtime_state.import_failed",
+                    "$.entry",
+                    "内部错误：无法导入 runtime_state 以校验入口轨道/节点",
+                    detail=str(e),
+                )
+            )
+            return
+
         # 轨道存在性检查
         tr = find_track_in_preset(preset, scope=scope, mode_id=mode_id, track_id=track_id)
         if tr is None:
-            diags.append(err(
-                "entry.track.missing",
-                "$.entry.track_id",
-                "entry.track_id 指向的轨道不存在",
-                detail=track_id,
-            ))
+            diags.append(
+                err(
+                    "entry.track.missing",
+                    "$.entry.track_id",
+                    "entry.track_id 指向的轨道不存在",
+                    detail=track_id,
+                )
+            )
             return
 
         # 节点属于该轨道
         if not track_has_node(tr, node_id):
-            diags.append(err(
-                "entry.node.missing",
-                "$.entry.node_id",
-                "entry.node_id 不属于指定轨道",
-                detail=node_id,
-            ))
+            diags.append(
+                err(
+                    "entry.node.missing",
+                    "$.entry.node_id",
+                    "entry.node_id 不属于指定轨道",
+                    detail=node_id,
+                )
+            )
 
     def _validate_condition_ast(self, c: Condition, *, path: str, ctx: Optional[ProfileContext], diags: List[Diagnostic], probes: ProbeRequirements) -> None:
         expr = getattr(c, "expr", None)

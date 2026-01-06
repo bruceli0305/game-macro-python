@@ -30,6 +30,9 @@ from qtui.notify import UiNotify
 from qtui.pages.record_crud_page import RecordCrudPage, ColumnDef
 from qtui.widgets.color_swatch import ColorSwatch
 
+import logging
+
+log = logging.getLogger(__name__)
 
 SAMPLE_DISPLAY_TO_VALUE = {"单像素": "single", "方形均值": "mean_square"}
 SAMPLE_VALUE_TO_DISPLAY = {v: k for k, v in SAMPLE_DISPLAY_TO_VALUE.items()}
@@ -124,7 +127,7 @@ class PointsPage(RecordCrudPage):
         try:
             self._apply_timer.stop()
         except Exception:
-            pass
+            log.exception("PointsPage.set_context: failed to stop apply_timer")
         self._current_id = None
         self.refresh_tree()
 
@@ -386,7 +389,7 @@ class PointsPage(RecordCrudPage):
             try:
                 self._swatch.set_rgb(self.spin_r.value(), self.spin_g.value(), self.spin_b.value())
             except Exception:
-                pass
+                log.debug("PointsPage._install_dirty_watchers: failed to update swatch", exc_info=True)
             self._apply_timer.start(200)
 
         # basic
@@ -424,7 +427,7 @@ class PointsPage(RecordCrudPage):
         try:
             self._apply_form_to_current(auto_save=False)
         except Exception:
-            pass
+            log.exception("PointsPage.flush_to_model: _apply_form_to_current failed")
 
     def request_pick_current(self) -> None:
         """
@@ -466,12 +469,13 @@ class PointsPage(RecordCrudPage):
             try:
                 self.update_tree_row(pid)
             except Exception:
-                pass
+                log.exception("PointsPage.request_pick_current: update_tree_row failed")
+
             if self.current_id == pid:
                 try:
                     self._load_into_form(pid)
                 except Exception:
-                    pass
+                    log.exception("PointsPage.request_pick_current: _load_into_form failed")
 
             if getattr(c, "hex", ""):
                 if saved:
