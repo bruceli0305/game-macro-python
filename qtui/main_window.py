@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
         self._app_state = app_state
 
         # 标题
-        self._base_title = "Game Macro - Qt"
+        self._base_title = "激战2_协同学院_自动化克鲁"
         self.setWindowTitle(self._base_title)
 
         # 基础设施
@@ -162,23 +162,19 @@ class MainWindow(QMainWindow):
     # ---------- UI 基本结构 ----------
 
     def _setup_icon(self) -> None:
-        """
-        设置主窗口图标：
-        - 优先使用 assets/icons/profile.svg
-        - 若不存在则尝试 assets/icons/profile.png
-        - 都没有则保持默认
-        使用 qtui.icons.resource_path 以兼容 PyInstaller 打包路径。
-        """
         from pathlib import Path
+        from qtui.icons import resource_path
 
         candidates = [
+            resource_path("assets/icons/app.ico"),        # 新增
             resource_path("assets/icons/profile.svg"),
             resource_path("assets/icons/profile.png"),
         ]
         for p in candidates:
             try:
-                if Path(p).is_file():
-                    self.setWindowIcon(QIcon(str(p)))
+                path_obj = Path(p)
+                if path_obj.is_file():
+                    self.setWindowIcon(QIcon(str(path_obj)))
                     break
             except Exception:
                 continue
