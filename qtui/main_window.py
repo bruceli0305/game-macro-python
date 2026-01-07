@@ -242,10 +242,13 @@ class MainWindow(QMainWindow):
         self._nav.set_active_page("base")
         # 快捷执行面板：初始创建并隐藏
         try:
+            # 不再把 MainWindow 作为 parent，让它成为独立顶层窗口，
+            # 这样主窗口最小化时，它不会跟着一起最小化。
             self._quick_panel = QuickExecPanel(
                 ctx=self._ctx,
                 engine_host=self._page_rotation_editor,
-                parent=self,
+                open_editor_cb=self._open_rotation_editor,
+                parent=None,  # 关键改动
             )
             self._quick_panel.hide()
         except Exception:
@@ -602,10 +605,8 @@ class MainWindow(QMainWindow):
         """
         关闭事件：
         1) 先通过 UnsavedChangesGuard 检查未保存更改；
-        2) 再关闭取色协调器和执行热键监听器；
+        2) 再关闭取色协调器、快捷执行面板和执行热键监听器；
         3) 最后持久化窗口几何到 app_state.json。
-
-        任何步骤出错都会记录日志，但不会让 UI 崩溃。
         """
         # 先检查未保存更改
         g = getattr(self, "_guard", None)
@@ -624,6 +625,13 @@ class MainWindow(QMainWindow):
             self._pick_coord.close()
         except Exception:
             log.exception("failed to close QtPickCoordinator in MainWindow.closeEvent")
+
+        # 关闭快捷执行面板（如果存在）
+        try:
+            if hasattr(self, "_quick_panel") and self._quick_panel is not None:
+                self._quick_panel.close()
+        except Exception:
+            log.exception("failed to close QuickExecPanel in MainWindow.closeEvent")
 
         # 停止执行热键监听器
         try:
@@ -666,10 +674,12 @@ class MainWindow(QMainWindow):
         """
         if self._quick_panel is None:
             try:
+                # 同样使用 parent=None，保持独立顶层窗口特性
                 self._quick_panel = QuickExecPanel(
                     ctx=self._ctx,
                     engine_host=self._page_rotation_editor,
-                    parent=self,
+                    open_editor_cb=self._open_rotation_editor,
+                    parent=None,  # 关键改动
                 )
             except Exception:
                 self.notify.error("无法创建快捷执行面板")

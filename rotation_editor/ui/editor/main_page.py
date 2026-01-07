@@ -100,6 +100,7 @@ class RotationEditorPage(QWidget):
         self._engine: Optional[MacroEngine] = None   # <<< 这里改成 MacroEngineNew
         self._engine_running: bool = False
         self._engine_paused: bool = False
+        self._last_executed_node_label: str = ""  # 新增：最近执行的节点标签
 
         self._build_ui()
         self._subscribe_store_dirty()
@@ -1132,6 +1133,7 @@ class RotationEditorPage(QWidget):
 
     def on_node_executed(self, cursor: ExecutionCursor, node) -> None:
         label = getattr(node, "label", "") or "(节点)"
+        self._last_executed_node_label = label  # 记录最近执行的节点
         self._notify.status_msg(f"执行节点: {label}", ttl_ms=800)
 
         mode_id = cursor.mode_id or ""
@@ -1275,3 +1277,8 @@ class RotationEditorPage(QWidget):
                 "last_error": "state_snapshot_failed",
                 "last_error_detail": "",
             }
+    def get_last_executed_node_label(self) -> str:
+        """
+        返回最近一次执行的节点标签（供快捷执行面板显示）。
+        """
+        return getattr(self, "_last_executed_node_label", "") or ""

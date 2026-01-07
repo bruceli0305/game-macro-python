@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Callable
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -22,8 +22,8 @@ class QuickExecPanel(QWidget):
 
     - 显示当前 Profile 名称
     - Preset 下拉选择（使用 preset.entry 作为入口）
-    - 开始 / 暂停 / 停止 按钮
-    - 简短状态显示（运行中 / 暂停 / 已停止 + 原因）
+    - 开始 / 暂停 / 停止 / 打开编辑器 按钮
+    - 显示引擎状态 + 最近执行的节点
 
     依赖：
     - ctx: ProfileContext（读取 rotations.presets）
@@ -32,6 +32,8 @@ class QuickExecPanel(QWidget):
         * stop_engine()
         * toggle_pause_engine()
         * get_engine_state_snapshot() -> Dict[str, Any]
+        * get_last_executed_node_label() -> str
+    - open_editor_cb: Callable[[str], None]，打开编辑器到指定 preset 的回调
     """
 
     def __init__(
@@ -39,12 +41,14 @@ class QuickExecPanel(QWidget):
         *,
         ctx: ProfileContext,
         engine_host: Any,
+        open_editor_cb: Optional[Callable[[str], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
 
         self._ctx = ctx
         self._engine_host = engine_host
+        self._open_editor_cb = open_editor_cb
 
         # 窗口标志：工具窗 + 置顶 + 有标题和关闭按钮
         flags = Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
@@ -102,6 +106,11 @@ class QuickExecPanel(QWidget):
         self._btn_stop.clicked.connect(self._on_stop_clicked)
         row_ctrl.addWidget(self._btn_stop)
 
+        # 打开编辑器按钮
+        self._btn_open_editor = QPushButton("打开编辑器", self)
+        self._btn_open_editor.clicked.connect(self._on_open_editor_clicked)
+        row_ctrl.addWidget(self._btn_open_editor)
+
         row_ctrl.addStretch(1)
         root.addLayout(row_ctrl)
 
@@ -109,10 +118,19 @@ class QuickExecPanel(QWidget):
         row_state = QHBoxLayout()
         row_state.addWidget(QLabel("状态:", self))
         self._lbl_state = QLabel("未运行", self)
+        self._lbl_state.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         row_state.addWidget(self._lbl_state, 1)
         root.addLayout(row_state)
 
-        self.setFixedWidth(320)
+        # 最近节点行
+        row_node = QHBoxLayout()
+        row_node.addWidget(QLabel("最近节点:", self))
+        self._lbl_last_node = QLabel("-", self)
+        self._lbl_last_node.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        row_node.addWidget(self._lbl_last_node, 1)
+        root.addLayout(row_node)
+
+        self.setFixedWidth(360)
 
     # ---------- 上下文 & Preset 列表 ----------
 
@@ -150,19 +168,35 @@ class QuickExecPanel(QWidget):
         data = self._cmb_preset.currentData()
         return data if isinstance(data, str) else ""
 
+    def _select_preset_in_combo(self, preset_id: str) -> None:
+        """
+        在 combo 中选中指定 preset_id（若存在），不触发额外逻辑。
+        仅用于“引擎正在运行某个 preset”时的 UI 同步。
+        """
+        pid = (preset_id or "").strip()
+        if not pid:
+            return
+        self._building = True
+        try:
+            for i in range(self._cmb_preset.count()):
+                data = self._cmb_preset.itemData(i)
+                if isinstance(data, str) and data == pid:
+                    if self._cmb_preset.currentIndex() != i:
+                        self._cmb_preset.setCurrentIndex(i)
+                    break
+        finally:
+            self._building = False
+
     # ---------- 按钮行为 ----------
 
     def _on_start_clicked(self) -> None:
         pid = (self._current_preset_id() or "").strip()
         if not pid:
-            # 不做复杂提示，避免打扰；可以后续接入 notify
             return
         try:
-            # 让编辑器页选中该 preset 并启动引擎
             if hasattr(self._engine_host, "start_engine_for_preset"):
                 self._engine_host.start_engine_for_preset(pid)
         except Exception:
-            # 外层 MainWindow 有 notify；这里保持静默
             pass
 
     def _on_pause_clicked(self) -> None:
@@ -179,11 +213,27 @@ class QuickExecPanel(QWidget):
         except Exception:
             pass
 
+    def _on_open_editor_clicked(self) -> None:
+        """
+        打开编辑器并选中当前 preset（如果回调可用）。
+        """
+        pid = (self._current_preset_id() or "").strip()
+        if not pid:
+            return
+        cb = self._open_editor_cb
+        if cb is None:
+            return
+        try:
+            cb(pid)
+        except Exception:
+            pass
+
     # ---------- 状态刷新 ----------
 
     def _refresh_state(self) -> None:
         """
         定时从 engine_host 获取状态快照，更新按钮可用性和状态文本。
+        并同步最近执行节点与实际运行的 preset。
         """
         snap: Dict[str, Any]
         try:
@@ -199,11 +249,12 @@ class QuickExecPanel(QWidget):
         reason = str(snap.get("stop_reason", "") or "").strip()
         last_err = str(snap.get("last_error", "") or "").strip()
         last_err_detail = str(snap.get("last_error_detail", "") or "").strip()
+        preset_running = str(snap.get("preset_id", "") or "").strip()
 
         # 文本
         if running:
             if paused:
-                txt = "暂停中 (running=paused)"
+                txt = "暂停中"
             else:
                 txt = "运行中"
         else:
@@ -220,18 +271,27 @@ class QuickExecPanel(QWidget):
 
         self._lbl_state.setText(txt)
 
+        # 最近执行节点
+        last_node = ""
+        try:
+            if hasattr(self._engine_host, "get_last_executed_node_label"):
+                last_node = self._engine_host.get_last_executed_node_label()
+        except Exception:
+            last_node = ""
+        self._lbl_last_node.setText(last_node or "-")
+
+        # 如果引擎正在运行某个 preset，则尝试在 combo 中高亮它
+        if running and preset_running:
+            self._select_preset_in_combo(preset_running)
+
         # 按钮状态：
-        # - 未运行：只允许“开始”，禁用暂停/停止
-        # - 运行中：允许暂停/停止，禁用“开始”
-        # - 暂停中：允许“继续”(按钮文案切换)、停止
+        has_presets = self._cmb_preset.count() > 0
         if running:
             self._btn_start.setEnabled(False)
             self._btn_stop.setEnabled(True)
             self._btn_pause.setEnabled(True)
             self._btn_pause.setText("继续" if paused else "暂停")
         else:
-            # 未运行或已停止
-            has_presets = self._cmb_preset.count() > 0
             self._btn_start.setEnabled(has_presets)
             self._btn_stop.setEnabled(False)
             self._btn_pause.setEnabled(False)
