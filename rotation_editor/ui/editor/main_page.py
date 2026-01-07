@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Protocol, Callable
+from typing import Optional, Protocol, Callable, Dict, Any
 
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import (
@@ -1213,3 +1213,65 @@ class RotationEditorPage(QWidget):
         idx = self._cmb_preset.currentIndex()
         if idx >= 0:
             self._on_preset_changed(idx)
+    # ---------- 公共接口：供快捷执行面板 / 热键调用 ----------
+
+    def start_engine_for_preset(self, preset_id: Optional[str] = None) -> None:
+        """
+        供外部调用：
+        - 若提供 preset_id，则先在本页选中该 preset；
+        - 然后执行与“开始”按钮相同的逻辑（校验 + 启动引擎）。
+        """
+        pid = (preset_id or "").strip()
+        if pid:
+            try:
+                self.open_preset(pid)
+            except Exception:
+                pass
+        # 复用内部按钮逻辑
+        self._on_start_clicked()
+
+    def stop_engine(self) -> None:
+        """
+        供外部调用：等价于点击“停止”按钮。
+        """
+        self._on_stop_clicked()
+
+    def toggle_pause_engine(self) -> None:
+        """
+        供外部调用：等价于点击“暂停/继续”按钮。
+        """
+        self._on_pause_clicked()
+
+    def is_engine_running(self) -> bool:
+        return bool(self._engine is not None and self._engine_running)
+
+    def is_engine_paused(self) -> bool:
+        return bool(self._engine_running and self._engine_paused)
+
+    def get_engine_state_snapshot(self) -> Dict[str, Any]:
+        """
+        返回引擎当前状态快照（供快捷执行面板使用）。
+        """
+        if self._engine is None:
+            # 简单兜底
+            return {
+                "running": False,
+                "paused": False,
+                "preset_id": "",
+                "started_ms": 0,
+                "stop_reason": "",
+                "last_error": "",
+                "last_error_detail": "",
+            }
+        try:
+            return self._engine.get_engine_state_snapshot()
+        except Exception:
+            return {
+                "running": False,
+                "paused": False,
+                "preset_id": "",
+                "started_ms": 0,
+                "stop_reason": "error",
+                "last_error": "state_snapshot_failed",
+                "last_error_detail": "",
+            }

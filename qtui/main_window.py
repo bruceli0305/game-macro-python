@@ -37,6 +37,7 @@ from rotation_editor.ui.presets_page import RotationPresetsPage
 from rotation_editor.ui.editor.main_page import RotationEditorPage
 
 from qtui.exec_hotkey import ExecHotkeyController
+from qtui.quick_exec_panel import QuickExecPanel
 
 log = logging.getLogger(__name__)  # 新增
 
@@ -117,7 +118,7 @@ class MainWindow(QMainWindow):
 
         # 执行启停热键控制器（初始化为 None，稍后在 _setup_central_widget 后创建）
         self._exec_hotkey: Optional[ExecHotkeyController] = None
-
+        self._quick_panel: Optional[QuickExecPanel] = None
         # 脏状态标题“*”
         try:
             self.services.session.subscribe_dirty(self._on_store_dirty)
@@ -239,11 +240,22 @@ class MainWindow(QMainWindow):
         # 默认显示基础配置
         self._stack.setCurrentIndex(self._page_indices["base"])
         self._nav.set_active_page("base")
-
+        # 快捷执行面板：初始创建并隐藏
+        try:
+            self._quick_panel = QuickExecPanel(
+                ctx=self._ctx,
+                engine_host=self._page_rotation_editor,
+                parent=self,
+            )
+            self._quick_panel.hide()
+        except Exception:
+            self._quick_panel = None
+        
         # 信号连接
         self._nav.page_selected.connect(self._on_page_selected)
         self._nav.profile_selected.connect(self._on_profile_selected)
         self._nav.profile_action.connect(self._on_profile_action)
+        self._nav.quick_exec_requested.connect(self._on_quick_exec_requested)
 
         self.setCentralWidget(central)
 
@@ -345,6 +357,13 @@ class MainWindow(QMainWindow):
 
         # 页面上下文同步
         self._set_pages_context(ctx)
+
+        # 快捷执行面板同步 ProfileContext
+        if hasattr(self, "_quick_panel") and self._quick_panel is not None:
+            try:
+                self._quick_panel.set_context(ctx)
+            except Exception:
+                pass
 
         # 执行启停热键同步
         if self._exec_hotkey is not None:
@@ -640,3 +659,30 @@ class MainWindow(QMainWindow):
         except Exception as e:
             # 这里捕获所有异常，避免热键回调把 UI 弄崩；具体错误交给 UiNotify
             self.notify.error("执行启停热键失败", detail=str(e))
+
+    def _on_quick_exec_requested(self) -> None:
+        """
+        打开/关闭快捷执行面板。
+        """
+        if self._quick_panel is None:
+            try:
+                self._quick_panel = QuickExecPanel(
+                    ctx=self._ctx,
+                    engine_host=self._page_rotation_editor,
+                    parent=self,
+                )
+            except Exception:
+                self.notify.error("无法创建快捷执行面板")
+                return
+
+        try:
+            self._quick_panel.set_context(self._ctx)
+        except Exception:
+            pass
+
+        if self._quick_panel.isVisible():
+            self._quick_panel.hide()
+        else:
+            self._quick_panel.show()
+            self._quick_panel.raise_()
+            self._quick_panel.activateWindow()

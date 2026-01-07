@@ -1,4 +1,3 @@
-# qtui/nav_panel.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -33,14 +32,16 @@ class NavPanel(QWidget):
         - 循环/轨道方案（Rotation presets）
 
     信号：
-    - profile_selected(str)  : 用户从下拉框选择了某个 profile
-    - profile_action(str)    : "new" | "copy" | "rename" | "delete"
-    - page_selected(str)     : "base" | "skills" | "points" | "rotation"
+    - profile_selected(str)      : 用户从下拉框选择了某个 profile
+    - profile_action(str)        : "new" | "copy" | "rename" | "delete"
+    - page_selected(str)         : "base" | "skills" | "points" | "rotation"
+    - quick_exec_requested()     : 用户点击“快捷执行面板”按钮
     """
 
     profile_selected = Signal(str)
     profile_action = Signal(str)
     page_selected = Signal(str)
+    quick_exec_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -144,6 +145,16 @@ class NavPanel(QWidget):
         self._btn_rotation.setCheckable(True)
         self._btn_rotation.clicked.connect(lambda: self.page_selected.emit("rotation"))
         layout.addWidget(self._btn_rotation)
+
+        # -------- 工具组：快捷执行 --------
+        add_group_header("执行")
+
+        self._btn_quick_exec = QPushButton("快捷执行面板", self)
+        # 复用 rotation 图标，后续可替换为专门的“play”图标
+        self._btn_quick_exec.setIcon(icon_rotation)
+        self._btn_quick_exec.setCheckable(False)
+        self._btn_quick_exec.clicked.connect(self.quick_exec_requested.emit)
+        layout.addWidget(self._btn_quick_exec)
 
         layout.addStretch(1)
 
