@@ -101,6 +101,7 @@ class PickConfig:
             "mouse_avoid_settle_ms": int(self.mouse_avoid_settle_ms),
         }
 
+
 @dataclass
 class IOConfig:
     auto_save: bool = True
@@ -183,6 +184,10 @@ class ExecConfig:
     - start_signal_mode: "pixel" | "cast_bar" | "none"
     - start_timeout_ms / start_poll_ms: PREPARING -> CASTING 的判定窗口与轮询间隔
     - max_retries / retry_gap_ms: 进入 CASTING 失败时的重试参数
+
+    新增（发键模式）：
+    - key_sender_mode: "pynput" | "hid"
+    - hid_dll_path: HID DLL 路径（相对或绝对）
     """
     enabled: bool = False
     toggle_hotkey: str = ""
@@ -195,6 +200,9 @@ class ExecConfig:
     max_retries: int = 3
     retry_gap_ms: int = 30
 
+    key_sender_mode: str = "pynput"
+    hid_dll_path: str = "assets/lib/KeyDispenserDLL.dll"
+
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "ExecConfig":
         d = as_dict(d)
@@ -202,6 +210,12 @@ class ExecConfig:
         mode = as_str(d.get("start_signal_mode", "pixel"), "pixel").strip().lower()
         if mode not in ("pixel", "cast_bar", "none"):
             mode = "pixel"
+
+        sender_mode = as_str(d.get("key_sender_mode", "pynput"), "pynput").strip().lower()
+        if sender_mode not in ("pynput", "hid"):
+            sender_mode = "pynput"
+
+        hid_path = as_str(d.get("hid_dll_path", "assets/lib/KeyDispenserDLL.dll"), "assets/lib/KeyDispenserDLL.dll")
 
         return ExecConfig(
             enabled=as_bool(d.get("enabled", False), False),
@@ -214,6 +228,9 @@ class ExecConfig:
             start_poll_ms=clamp_int(as_int(d.get("start_poll_ms", 10), 10), 5, 10**6),
             max_retries=clamp_int(as_int(d.get("max_retries", 3), 3), 0, 1000),
             retry_gap_ms=clamp_int(as_int(d.get("retry_gap_ms", 30), 30), 0, 10**6),
+
+            key_sender_mode=sender_mode,
+            hid_dll_path=hid_path,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -228,6 +245,9 @@ class ExecConfig:
             "start_poll_ms": int(self.start_poll_ms),
             "max_retries": int(self.max_retries),
             "retry_gap_ms": int(self.retry_gap_ms),
+
+            "key_sender_mode": self.key_sender_mode,
+            "hid_dll_path": self.hid_dll_path,
         }
 
 

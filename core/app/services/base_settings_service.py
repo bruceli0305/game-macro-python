@@ -50,6 +50,10 @@ class BaseSettingsPatch:
     exec_max_retries: int
     exec_retry_gap_ms: int
 
+    # 执行策略：发键模式（pynput / hid）+ HID DLL 路径
+    exec_key_sender_mode: str       # "pynput" | "hid"
+    exec_hid_dll_path: str
+
 
 class BaseSettingsService:
     """
@@ -127,7 +131,34 @@ class BaseSettingsService:
             if not (patch.cast_bar_point_id or "").strip():
                 raise ValueError("开始施法信号=施法条变化(cast_bar) 时，必须设置“施法条点位 ID”")
 
+        # 发键模式校验
+        ksm = (patch.exec_key_sender_mode or "pynput").strip().lower()
+        if ksm not in ("pynput", "hid"):
+            raise ValueError("发键模式只能是 'pynput' 或 'hid'")
+
+        hid_path = (patch.exec_hid_dll_path or "").strip()
+        if ksm == "hid":
+            if not hid_path:
+                raise ValueError("发键模式为 HID 时，必须设置 HID DLL 路径")
+
+            # 运行期检测：尝试加载 DLL 并 InitDevice，一切错误只记日志，不阻止保存
+            try:
+                from rotation_editor.core.runtime.keyboard import HidDllKeySender
+                try:
+                    sender = HidDllKeySender(dll_path=hid_path)
+                except Exception as e:
+                    log = logging.getLogger(__name__)
+                    log.warning("保存基础配置时，HID DLL 初始化失败：%s (%s)", hid_path, e)
+                else:
+                    # 立即释放，避免占用设备
+                    del sender
+            except Exception:
+                # 导入失败等，最多记个 debug，不影响保存
+                log = logging.getLogger(__name__)
+                log.debug("validate_patch: 无法导入 HidDllKeySender 进行 HID 检测", exc_info=True)
+
     def _apply_to_basefile(self, b: BaseFile, patch: BaseSettingsPatch) -> None:
+        # UI & capture
         theme = (patch.theme or "").strip()
         if theme == "---" or not theme:
             theme = "darkly"
@@ -182,7 +213,7 @@ class BaseSettingsService:
         # 执行策略：技能间隔
         b.exec.default_skill_gap_ms = clamp_int(int(patch.exec_skill_gap_ms), 0, 10**6)
 
-        # 新增：轮询/开始信号/重试
+        # 轮询/开始信号/重试
         b.exec.poll_not_ready_ms = clamp_int(int(patch.exec_poll_not_ready_ms), 10, 10**6)
         smode = (patch.exec_start_signal_mode or "pixel").strip().lower()
         if smode not in ("pixel", "cast_bar", "none"):
@@ -192,6 +223,17 @@ class BaseSettingsService:
         b.exec.start_poll_ms = clamp_int(int(patch.exec_start_poll_ms), 5, 10**6)
         b.exec.max_retries = clamp_int(int(patch.exec_max_retries), 0, 1000)
         b.exec.retry_gap_ms = clamp_int(int(patch.exec_retry_gap_ms), 0, 10**6)
+
+        # 发键模式
+        ksm = (patch.exec_key_sender_mode or "pynput").strip().lower()
+        if ksm not in ("pynput", "hid"):
+            ksm = "pynput"
+        b.exec.key_sender_mode = ksm
+
+        path = (patch.exec_hid_dll_path or "").strip()
+        if not path:
+            path = "assets/lib/KeyDispenserDLL.dll"
+        b.exec.hid_dll_path = path
 
     def apply_patch(self, patch: BaseSettingsPatch) -> bool:
         self.validate_patch(patch)

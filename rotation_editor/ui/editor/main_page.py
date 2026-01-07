@@ -100,6 +100,9 @@ class RotationEditorPage(QWidget):
         self._engine: Optional[MacroEngine] = None   # <<< 这里改成 MacroEngineNew
         self._engine_running: bool = False
         self._engine_paused: bool = False
+        # 新增：记录当前使用的发键模式 & 诊断信息
+        self._key_sender_mode_used: str = "pynput"
+        self._key_sender_detail: str = ""
         self._last_executed_node_label: str = ""  # 新增：最近执行的节点标签
 
         self._build_ui()
@@ -927,12 +930,7 @@ class RotationEditorPage(QWidget):
 
         - 若已有引擎实例（无论是否在运行），则直接返回该实例；
         - 若尚未创建过，则按当前 ctx.base.exec / ctx.base.cast_bar 配置构造一个新的引擎。
-
-        注意：
-        - 为避免 UI（调试面板等）持有旧实例导致状态不同步，这里不再在“未运行时”自动重建引擎。
-          若需要让新配置生效，可在未来显式实现“重建引擎”按钮。
         """
-        # 修复点：只要已有 _engine，就一律复用，不再在 is_running()==False 时重建
         if self._engine is not None:
             return self._engine
 
@@ -1030,10 +1028,36 @@ class RotationEditorPage(QWidget):
             sample_log_throttle_ms=80,
         )
 
+        # 选择 KeySender：pynput / hid
+        from rotation_editor.core.runtime.keyboard import PynputKeySender, HidDllKeySender
+
+        sender_mode_cfg = _get_str("key_sender_mode", "pynput").lower()
+        dll_path_cfg = _get_str("hid_dll_path", "assets/lib/KeyDispenserDLL.dll")
+
+        key_sender = None
+        # 默认记录
+        self._key_sender_mode_used = "pynput"
+        self._key_sender_detail = ""
+
+        if sender_mode_cfg == "hid":
+            try:
+                key_sender = HidDllKeySender(dll_path=dll_path_cfg)
+                self._key_sender_mode_used = "hid"
+                self._key_sender_detail = f"DLL OK: {dll_path_cfg}"
+            except Exception as e:
+                # HID 初始化失败：退回 pynput，但记录诊断信息
+                key_sender = None
+                self._key_sender_mode_used = "pynput(fallback_from_hid)"
+                self._key_sender_detail = f"HID 初始化失败: {e}"
+        else:
+            self._key_sender_mode_used = "pynput"
+            self._key_sender_detail = ""
+
         self._engine = MacroEngine(
             ctx=self._ctx,
             scheduler=self._dispatcher,
             callbacks=self,
+            key_sender=key_sender,  # None 时引擎内部会用 PynputKeySender
             config=EngineConfig(
                 poll_interval_ms=20,
                 stop_on_error=True,
@@ -1282,3 +1306,11 @@ class RotationEditorPage(QWidget):
         返回最近一次执行的节点标签（供快捷执行面板显示）。
         """
         return getattr(self, "_last_executed_node_label", "") or ""
+
+    def get_key_sender_info(self) -> Dict[str, str]:
+        """
+        返回当前使用的发键模式与诊断信息（供快捷执行面板显示）。
+        """
+        mode = getattr(self, "_key_sender_mode_used", "pynput")
+        detail = getattr(self, "_key_sender_detail", "")
+        return {"mode": mode, "detail": detail}

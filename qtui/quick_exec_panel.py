@@ -23,7 +23,7 @@ class QuickExecPanel(QWidget):
     - 显示当前 Profile 名称
     - Preset 下拉选择（使用 preset.entry 作为入口）
     - 开始 / 暂停 / 停止 / 打开编辑器 按钮
-    - 显示引擎状态 + 最近执行的节点
+    - 显示引擎状态 + 最近执行的节点 + 发键模式/诊断
 
     依赖：
     - ctx: ProfileContext（读取 rotations.presets）
@@ -33,6 +33,7 @@ class QuickExecPanel(QWidget):
         * toggle_pause_engine()
         * get_engine_state_snapshot() -> Dict[str, Any]
         * get_last_executed_node_label() -> str
+        * get_key_sender_info() -> Dict[str,str]  (mode/detail)
     - open_editor_cb: Callable[[str], None]，打开编辑器到指定 preset 的回调
     """
 
@@ -130,7 +131,15 @@ class QuickExecPanel(QWidget):
         row_node.addWidget(self._lbl_last_node, 1)
         root.addLayout(row_node)
 
-        self.setFixedWidth(360)
+        # 发键模式行
+        row_sender = QHBoxLayout()
+        row_sender.addWidget(QLabel("发键:", self))
+        self._lbl_sender = QLabel("-", self)
+        self._lbl_sender.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        row_sender.addWidget(self._lbl_sender, 1)
+        root.addLayout(row_sender)
+
+        self.setFixedWidth(380)
 
     # ---------- 上下文 & Preset 列表 ----------
 
@@ -233,7 +242,7 @@ class QuickExecPanel(QWidget):
     def _refresh_state(self) -> None:
         """
         定时从 engine_host 获取状态快照，更新按钮可用性和状态文本。
-        并同步最近执行节点与实际运行的 preset。
+        并同步最近执行节点、实际运行的 preset 和发键模式信息。
         """
         snap: Dict[str, Any]
         try:
@@ -279,6 +288,27 @@ class QuickExecPanel(QWidget):
         except Exception:
             last_node = ""
         self._lbl_last_node.setText(last_node or "-")
+
+        # 发键模式 & 诊断
+        sender_mode = ""
+        sender_detail = ""
+        try:
+            if hasattr(self._engine_host, "get_key_sender_info"):
+                info = self._engine_host.get_key_sender_info() or {}
+                sender_mode = str(info.get("mode", "") or "")
+                sender_detail = str(info.get("detail", "") or "")
+        except Exception:
+            sender_mode = ""
+            sender_detail = ""
+
+        if sender_mode:
+            txt_sender = sender_mode
+            if sender_detail:
+                txt_sender = f"{sender_mode} | {sender_detail}"
+        else:
+            txt_sender = "-"
+
+        self._lbl_sender.setText(txt_sender)
 
         # 如果引擎正在运行某个 preset，则尝试在 combo 中高亮它
         if running and preset_running:

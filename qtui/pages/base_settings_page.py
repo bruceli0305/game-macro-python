@@ -65,6 +65,13 @@ _START_SIGNAL_DISP_TO_VAL = {
 }
 _START_SIGNAL_VAL_TO_DISP = {v: k for k, v in _START_SIGNAL_DISP_TO_VAL.items()}
 
+# 发键模式显示/值映射
+_KEYSENDER_DISP_TO_VAL = {
+    "PC 键盘 (pynput)": "pynput",
+    "外置键盘 (HID Raw HID)": "hid",
+}
+_KEYSENDER_VAL_TO_DISP = {v: k for k, v in _KEYSENDER_DISP_TO_VAL.items()}
+
 
 class BaseSettingsPage(QWidget):
     """
@@ -273,6 +280,20 @@ class BaseSettingsPage(QWidget):
         self.spin_retry_gap.setSingleStep(10)
         form_cast.addRow("重试间隔(ms)", self.spin_retry_gap)
 
+        # -------- 新增：发键模式 / HID DLL 路径 --------
+        self.cmb_key_sender_mode = QComboBox(g_cast)
+        self.cmb_key_sender_mode.addItems(list(_KEYSENDER_DISP_TO_VAL.keys()))
+        form_cast.addRow("发键模式", self.cmb_key_sender_mode)
+
+        row_hid = QHBoxLayout()
+        self.txt_hid_dll_path = QLineEdit(g_cast)
+        self.txt_hid_dll_path.setPlaceholderText("例如：assets/lib/KeyDispenserDLL.dll")
+        btn_hid_browse = QPushButton("浏览...", g_cast)
+        btn_hid_browse.clicked.connect(self._on_browse_hid_dll)
+        row_hid.addWidget(self.txt_hid_dll_path, 1)
+        row_hid.addWidget(btn_hid_browse)
+        form_cast.addRow("HID DLL 路径", row_hid)
+
         right_col.addWidget(g_cast)
 
         g_io = QGroupBox("保存策略", self)
@@ -400,6 +421,31 @@ class BaseSettingsPage(QWidget):
             self.spin_max_retries.setValue(int(max(0, max_retries)))
             self.spin_retry_gap.setValue(int(max(0, retry_gap)))
 
+            # 发键模式 / HID DLL
+            key_sender_mode = (getattr(ex, "key_sender_mode", "pynput") or "pynput").strip().lower() if ex is not None else "pynput"
+            disp_ks = _KEYSENDER_VAL_TO_DISP.get(key_sender_mode, "PC 键盘 (pynput)")
+            idx = self.cmb_key_sender_mode.findText(disp_ks)
+            if idx >= 0:
+                self.cmb_key_sender_mode.setCurrentIndex(idx)
+
+            hid_path = getattr(ex, "hid_dll_path", "") or "assets/lib/KeyDispenserDLL.dll"
+            self.txt_hid_dll_path.setText(hid_path)
+
+            # ---------- 打开项目 / 切换 Profile 时的 HID 检测 ----------
+            try:
+                if key_sender_mode == "hid":
+                    from rotation_editor.core.runtime.keyboard import HidDllKeySender
+                    try:
+                        sender = HidDllKeySender(dll_path=hid_path)
+                    except Exception as e:
+                        log.warning("加载 Profile 时 HID 初始化失败：%s (%s)", hid_path, e)
+                    else:
+                        # 立即释放，避免占用设备
+                        del sender
+            except Exception:
+                # 导入/检测异常不影响 UI 显示，仅记录 debug
+                log.debug("BaseSettingsPage.set_context: HID 检测出现异常", exc_info=True)
+
         finally:
             self._building = False
 
@@ -422,6 +468,10 @@ class BaseSettingsPage(QWidget):
 
         start_sig_disp = self.cmb_start_signal.currentText()
         start_sig_val = _START_SIGNAL_DISP_TO_VAL.get(start_sig_disp, "pixel")
+
+        key_sender_disp = self.cmb_key_sender_mode.currentText()
+        key_sender_mode = _KEYSENDER_DISP_TO_VAL.get(key_sender_disp, "pynput")
+        hid_path = (self.txt_hid_dll_path.text() or "").strip()
 
         return BaseSettingsPatch(
             theme=theme or "darkly",
@@ -459,6 +509,9 @@ class BaseSettingsPage(QWidget):
             exec_start_poll_ms=int(self.spin_start_poll.value()),
             exec_max_retries=int(self.spin_max_retries.value()),
             exec_retry_gap_ms=int(self.spin_retry_gap.value()),
+
+            exec_key_sender_mode=key_sender_mode,
+            exec_hid_dll_path=hid_path,
         )
 
     # ---------- 防抖应用 ----------
@@ -504,6 +557,9 @@ class BaseSettingsPage(QWidget):
         self.spin_max_retries.valueChanged.connect(on_any_changed)
         self.spin_retry_gap.valueChanged.connect(on_any_changed)
 
+        self.cmb_key_sender_mode.currentTextChanged.connect(on_any_changed)
+        self.txt_hid_dll_path.textChanged.connect(on_any_changed)
+
     def _apply_now(self) -> None:
         if self._building:
             return
@@ -511,8 +567,6 @@ class BaseSettingsPage(QWidget):
         try:
             self._services.base.apply_patch(patch)
         except Exception:
-            # 防抖自动应用失败（例如校验错误）在显式保存时会提示用户；
-            # 这里仅记录 debug 日志，避免静默吞掉调试信息。
             log.debug(
                 "BaseSettingsPage._apply_now: apply_patch failed (ignored in debounced apply)",
                 exc_info=True,
@@ -536,6 +590,16 @@ class BaseSettingsPage(QWidget):
             idx = 0
         p = pts[idx]
         self.txt_cast_point_id.setText(p.id or "")
+
+    def _on_browse_hid_dll(self) -> None:
+        """
+        简单的文本选择：用户自己输入 DLL 路径（避免引入文件对话框依赖）。
+        """
+        cur = self.txt_hid_dll_path.text() or "assets/lib/KeyDispenserDLL.dll"
+        text, ok = QInputDialog.getText(self, "HID DLL 路径", "请输入 HID DLL 路径：", text=cur)
+        if not ok:
+            return
+        self.txt_hid_dll_path.setText((text or "").strip())
 
     # ---------- 按钮动作 ----------
     def _on_save(self) -> None:
