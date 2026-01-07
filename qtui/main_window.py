@@ -32,7 +32,7 @@ from qtui.status_bar import StatusController
 from qtui.theme import apply_theme
 from qtui.window_state import WindowStateController
 from qtui.unsaved_guard import UnsavedChangesGuard
-
+from qtui.icons import load_icon, resource_path
 from rotation_editor.ui.presets_page import RotationPresetsPage
 from rotation_editor.ui.editor.main_page import RotationEditorPage
 
@@ -162,14 +162,26 @@ class MainWindow(QMainWindow):
     # ---------- UI 基本结构 ----------
 
     def _setup_icon(self) -> None:
-        icon_candidates = [
-            Path("assets/icons/profile.svg"),
-            Path("assets/icons/profile.png"),
+        """
+        设置主窗口图标：
+        - 优先使用 assets/icons/profile.svg
+        - 若不存在则尝试 assets/icons/profile.png
+        - 都没有则保持默认
+        使用 qtui.icons.resource_path 以兼容 PyInstaller 打包路径。
+        """
+        from pathlib import Path
+
+        candidates = [
+            resource_path("assets/icons/profile.svg"),
+            resource_path("assets/icons/profile.png"),
         ]
-        for p in icon_candidates:
-            if p.exists():
-                self.setWindowIcon(QIcon(str(p)))
-                break
+        for p in candidates:
+            try:
+                if Path(p).is_file():
+                    self.setWindowIcon(QIcon(str(p)))
+                    break
+            except Exception:
+                continue
 
     def _setup_central_widget(self) -> None:
         central = QWidget(self)
