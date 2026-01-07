@@ -22,9 +22,13 @@ class NodeVisualSpec:
     - node_id: 节点 ID
     - label: 显示文字
     - kind: "skill" / "gateway" / 其它
-    - duration_ms: 真实持续时间（仅用于 tooltip/信息展示；不再决定宽度）
+    - duration_ms: 真实持续时间（仅用于 tooltip/信息展示）
     - start_ms/end_ms: 显示用时间轴位置（以 STEP_MS 为粒度）
-    - width: 绘制宽度（固定为一个 STEP 的宽度）
+    - width: 绘制宽度（通常为一个 step 宽度）
+    - lane: 垂直层级：
+        * -1: 单节点居中
+        *  0: 上层
+        *  1: 下层
     - has_condition/condition_name: 网关条件信息
     """
     node_id: str
@@ -34,6 +38,7 @@ class NodeVisualSpec:
     start_ms: int
     end_ms: int
     width: float
+    lane: int = -1
     has_condition: bool = False
     condition_name: str = ""
 
@@ -85,19 +90,22 @@ def build_timeline_layout(
     max_node_px: float = 800.0,
 ) -> List[TrackVisualSpec]:
     """
-    构建时间轴布局数据（技能/网关宽度均基于“Step 网格”，但同一 Step 内节点不会互相完全重叠）。
+    构建时间轴布局数据（基于 Step 网格）：
 
-    规则概要：
+    规则：
     - 使用固定步长 STEP_MS（必须与 TimelineCanvas._step_ms 一致）作为时间网格。
     - 若该轨道存在任一节点 step_index > 0：启用 step 轴布局：
         * 所有节点按 step_index 分组；
-        * 每个 step 的显示跨度为 STEP_MS；
-        * 若同一 step 内有 N 个节点，则在该步内平均分配：
-              start_ms = step * STEP_MS + i * (STEP_MS / N)
-              end_ms   = step * STEP_MS + (i+1) * (STEP_MS / N)
+        * 每个 step 的显示跨度固定为 STEP_MS；
+        * 同一 step 内最多 2 个节点：
+              * 1 个：lane = -1（居中）
+              * 2 个：lane = 0（上）/ 1（下），时间跨度相同
+        * >2 个理论上不应出现（ValidationService + RotationEditService 有约束），
+          若出现则仅前 2 个分配 lane，其余都放在下层 lane=1（尽量不炸）。
     - 若所有节点 step_index <= 0：按顺序均匀排布：
         * 第 i 个节点：start_ms = i * STEP_MS, end_ms = (i+1) * STEP_MS
-    - 宽度 width 使用 (end_ms - start_ms) * time_scale_px_per_ms，并按 min_node_px / max_node_px clamp。
+        * lane 均为 -1（居中）。
+    - width 使用 (end_ms - start_ms) * time_scale_px_per_ms，并按 min_node_px / max_node_px clamp。
     - duration_ms 字段保留真实读条时间，仅用于 tooltip，不参与宽度计算。
     """
     if ctx is None or preset is None:
@@ -139,12 +147,13 @@ def build_timeline_layout(
                 max_step = s
         use_step_axis = max_step > 0
 
-        # 预计算每个节点的显示用 start_ms / end_ms（UI 轴）
+        # 预计算每个节点的显示用 start_ms / end_ms / lane
         start_ms_list = [0] * n_count
         end_ms_list = [0] * n_count
+        lane_list = [-1] * n_count  # -1 表示单节点居中
 
         if use_step_axis:
-            # 按 step_index 分组，同一 step 内平均分配该步的时间跨度
+            # 按 step_index 分组
             step_to_indices: Dict[int, List[int]] = {}
             for idx, n in enumerate(track.nodes):
                 try:
@@ -155,24 +164,37 @@ def build_timeline_layout(
                     s = 0
                 step_to_indices.setdefault(s, []).append(idx)
 
+            # 统一将每个节点的时间跨度设置为该 step 的完整跨度
+            for idx, n in enumerate(track.nodes):
+                try:
+                    s = int(getattr(n, "step_index", 0) or 0)
+                except Exception:
+                    s = 0
+                if s < 0:
+                    s = 0
+                start_ms_list[idx] = s * STEP_MS
+                end_ms_list[idx] = (s + 1) * STEP_MS
+
+            # 为每个 step 分配 lane：<=2 节点时分别居中/上下
             for s, idxs in step_to_indices.items():
                 if not idxs:
                     continue
-                span = float(STEP_MS)
-                count = len(idxs)
-                width_ms = span / max(count, 1)
-                for pos, idx in enumerate(idxs):
-                    start = int(s * STEP_MS + pos * width_ms)
-                    end = int(s * STEP_MS + (pos + 1) * width_ms)
-                    start_ms_list[idx] = start
-                    end_ms_list[idx] = end
+                if len(idxs) == 1:
+                    lane_list[idxs[0]] = -1  # 单节点居中
+                else:
+                    # 前两个分配上下层，其余（异常情况）全部压在下层
+                    lane_list[idxs[0]] = 0
+                    lane_list[idxs[1]] = 1
+                    for extra in idxs[2:]:
+                        lane_list[extra] = 1
         else:
-            # 简单顺序布局：每个节点占用一个完整 STEP
+            # 简单顺序布局：每个节点占用一个完整 STEP，均居中
             for idx in range(n_count):
                 start = idx * STEP_MS
                 end = start + STEP_MS
                 start_ms_list[idx] = start
                 end_ms_list[idx] = end
+                lane_list[idx] = -1
 
         max_end = max(end_ms_list) if end_ms_list else 0
 
@@ -215,6 +237,8 @@ def build_timeline_layout(
             if width_px > float(max_node_px):
                 width_px = float(max_node_px)
 
+            lane = int(lane_list[idx])
+
             nodes_vs.append(
                 NodeVisualSpec(
                     node_id=getattr(n, "id", ""),
@@ -224,6 +248,7 @@ def build_timeline_layout(
                     start_ms=start,
                     end_ms=end,
                     width=float(width_px),
+                    lane=lane,
                     has_condition=bool(cond_name),
                     condition_name=cond_name or "",
                 )

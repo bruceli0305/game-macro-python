@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Dict as TypingDict
 
 from core.profiles import ProfileContext
 
 from rotation_editor.ast import ProbeRequirements, compile_expr_json
 from rotation_editor.ast.diagnostics import Diagnostic, err, warn
 from rotation_editor.core.models import RotationPreset, Track, SkillNode, GatewayNode, Condition
+
 
 @dataclass(frozen=True)
 class ValidationReport:
@@ -44,6 +45,16 @@ class ValidationReport:
 
 
 class ValidationService:
+    """
+    循环方案（RotationPreset）静态校验服务：
+
+    - 基本字段合法性（id/entry）
+    - 条件 AST 编译与 probes 收集
+    - 节点引用合法性（skill/condition）
+    - Gateway 动作参数合法性（目标模式/轨道/节点）
+    - Track 步骤容量约束：同一轨道同一 step_index 上节点数不超过 2
+    """
+
     ALLOWED_GW_ACTIONS: Set[str] = {"switch_mode", "jump_track", "jump_node", "exec_skill", "end"}
 
     def validate_preset(self, preset: RotationPreset, *, ctx: Optional[ProfileContext] = None) -> ValidationReport:
@@ -54,6 +65,7 @@ class ValidationService:
         if not pid:
             diags.append(err("preset.id.empty", "$.id", "Preset.id 不能为空"))
 
+        # 收集所有可用 skill_id（用于引用校验）
         skill_ids: Set[str] = set()
         if ctx is not None:
             try:
@@ -61,9 +73,10 @@ class ValidationService:
             except Exception:
                 skill_ids = set()
 
+        # 入口校验
         self._validate_entry(preset, diags)
 
-        # Conditions compile
+        # Conditions 编译与 probes 收集
         cond_ids: Set[str] = set()
         for ci, c in enumerate(preset.conditions or []):
             cid = (c.id or "").strip()
@@ -77,7 +90,7 @@ class ValidationService:
 
             self._validate_condition_ast(c, path=f"$.conditions[{ci}]", ctx=ctx, diags=diags, probes=probes)
 
-        # Track/node validation
+        # Track/node 校验
         node_ids: Set[str] = set()
         mode_ids: Set[str] = set((m.id or "").strip() for m in (preset.modes or []) if (m.id or "").strip())
 
@@ -85,6 +98,9 @@ class ValidationService:
             tid = (track.id or "").strip()
             if not tid:
                 diags.append(err("track.id.empty", f"{path}.id", "Track.id 不能为空"))
+
+            # 统计该轨道各 step_index 上的节点数（用于容量约束）
+            step_counts: TypingDict[int, int] = {}
 
             for ni, n in enumerate(track.nodes or []):
                 npath = f"{path}.nodes[{ni}]"
@@ -95,6 +111,15 @@ class ValidationService:
                     diags.append(err("node.id.dup", f"{npath}.id", "Node.id 重复", detail=nid))
                 else:
                     node_ids.add(nid)
+
+                # 统计 step_index
+                try:
+                    s = int(getattr(n, "step_index", 0) or 0)
+                except Exception:
+                    s = 0
+                if s < 0:
+                    s = 0
+                step_counts[s] = step_counts.get(s, 0) + 1
 
                 kind = (getattr(n, "kind", "") or "").strip().lower()
                 if kind == "skill" and isinstance(n, SkillNode):
@@ -116,9 +141,23 @@ class ValidationService:
                 else:
                     diags.append(warn("node.kind.unknown", f"{npath}.kind", "未知节点 kind", detail=kind))
 
+            # 轨道 step 容量约束：同一轨道同一 step_index 上节点数不超过 2
+            for step_val, cnt in step_counts.items():
+                if cnt > 2:
+                    diags.append(
+                        err(
+                            "track.step.too_many_nodes",
+                            path,
+                            f"同一轨道的 step_index={step_val} 上节点数超过 2 个",
+                            detail=f"step={step_val}, count={cnt}",
+                        )
+                    )
+
+        # 全局轨道
         for ti, t in enumerate(preset.global_tracks or []):
             validate_track_nodes(t, path=f"$.global_tracks[{ti}]", scope="global", mode_id="")
 
+        # 各模式轨道
         for mi, m in enumerate(preset.modes or []):
             mid = (m.id or "").strip()
             for ti, t in enumerate(m.tracks or []):
@@ -135,10 +174,7 @@ class ValidationService:
         - track_id 必须指向存在的轨道
         - node_id 必须属于该轨道
 
-        为避免导入时循环依赖，这里在函数内部延迟导入 runtime_state：
-        - rotation_editor.core.runtime.__init__ 会导入 engine
-        - engine 会导入 ValidationService
-        - 若在模块顶层导入 runtime_state 会导致 ValidationService 尚未初始化完毕就被引用
+        为避免导入时循环依赖，这里在函数内部延迟导入 runtime_state。
         """
         entry = getattr(preset, "entry", None)
         if entry is None:
@@ -298,21 +334,70 @@ class ValidationService:
                 return
             ok = any((getattr(n, "id", "") or "").strip() == tn for n in (current_track.nodes or []))
             if not ok:
-                diags.append(err(
-                    "gw.jump_node.target_not_in_current_track",
-                    f"{path}.target_node_id",
-                    "jump_node 的 target_node_id 不属于当前轨道",
-                    detail=f"track_id={current_track_id}, node_id={tn}",
-                ))
+                diags.append(
+                    err(
+                        "gw.jump_node.target_not_in_current_track",
+                        f"{path}.target_node_id",
+                        "jump_node 的 target_node_id 不属于当前轨道",
+                        detail=f"track_id={current_track_id}, node_id={tn}",
+                    )
+                )
             return
 
         if action == "jump_track":
             tt = (getattr(gw, "target_track_id", "") or "").strip()
             tn = (getattr(gw, "target_node_id", "") or "").strip()
+            tm = (getattr(gw, "target_mode_id", "") or "").strip()
             if not tt:
                 diags.append(err("gw.jump_track.no_track", f"{path}.target_track_id", "jump_track 必须设置 target_track_id"))
             if not tn:
                 diags.append(err("gw.jump_track.no_node", f"{path}.target_node_id", "jump_track 必须设置 target_node_id"))
+
+            # 若缺 track/node，则后续引用检查没有意义
+            if not tt or not tn:
+                return
+
+            # 延迟导入，避免循环依赖
+            try:
+                from rotation_editor.core.runtime.runtime_state import find_track_in_preset, track_has_node
+            except Exception as e:
+                diags.append(
+                    err(
+                        "gw.jump_track.runtime_state.import_failed",
+                        path,
+                        "内部错误：无法导入 runtime_state 以校验 jump_track 目标",
+                        detail=str(e),
+                    )
+                )
+                return
+
+            # 目标作用域：
+            # - 若设置了 target_mode_id，则视为 mode 范围；
+            # - 否则沿用当前 scope（global/mode）
+            target_scope = "mode" if tm else (scope or "global").strip().lower()
+            target_mode_id = tm if tm else (current_mode_id or "")
+
+            tr = find_track_in_preset(preset, scope=target_scope, mode_id=target_mode_id, track_id=tt)
+            if tr is None:
+                diags.append(
+                    err(
+                        "gw.jump_track.target_track_not_found",
+                        f"{path}.target_track_id",
+                        "jump_track 的 target_track_id 不存在于指定作用域",
+                        detail=f"scope={target_scope}, mode_id={target_mode_id}, track_id={tt}",
+                    )
+                )
+                return
+
+            if not track_has_node(tr, tn):
+                diags.append(
+                    err(
+                        "gw.jump_track.target_node_not_in_track",
+                        f"{path}.target_node_id",
+                        "jump_track 的 target_node_id 不属于目标轨道",
+                        detail=f"track_id={tt}, node_id={tn}",
+                    )
+                )
             return
 
         if action == "exec_skill":
@@ -330,12 +415,12 @@ class ValidationService:
             # ctx 若提供，则检查该技能是否存在
             if ctx is not None:
                 try:
-                    skill_ids = set(
+                    skill_ids_ctx = set(
                         (s.id or "") for s in (ctx.skills.skills or []) if getattr(s, "id", "")
                     )
                 except Exception:
-                    skill_ids = set()
-                if exec_sid not in skill_ids:
+                    skill_ids_ctx = set()
+                if exec_sid not in skill_ids_ctx:
                     diags.append(
                         err(
                             "gw.exec_skill.bad_skill",

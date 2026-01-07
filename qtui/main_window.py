@@ -540,6 +540,8 @@ class MainWindow(QMainWindow):
 
     # ---------- 从方案页打开循环编辑器 ----------
 
+    # ---------- 从方案页打开循环编辑器 ----------
+
     def _open_rotation_editor(self, preset_id: str) -> None:
         """
         由 RotationPresetsPage 调用：
@@ -551,15 +553,23 @@ class MainWindow(QMainWindow):
         if not pid:
             return
 
+        # 确保循环编辑器使用最新的 ProfileContext
         try:
-            self._page_rotation_editor.set_context(self._ctx)  # 确保上下文同步
+            self._page_rotation_editor.set_context(self._ctx)
         except Exception:
-            pass
+            log.exception("set_context failed for RotationEditorPage in _open_rotation_editor")
+
+        # 让编辑器选中并打开指定的 preset
+        try:
+            self._page_rotation_editor.open_preset(pid)
+        except Exception:
+            log.exception("open_preset failed in _open_rotation_editor")
 
         idx = self._page_indices.get("rotation_editor")
         if idx is not None:
             self._stack.setCurrentIndex(idx)
             try:
+                # 左侧导航仍高亮“循环/轨道方案”这一项
                 self._nav.set_active_page("rotation")
             except Exception:
                 pass

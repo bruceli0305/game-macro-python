@@ -140,7 +140,7 @@ class NodeListPanel(QWidget):
             if res.ok():
                 return "内联条件", True, "内联条件（优先）"
             return "内联条件 [无效]", False, "内联条件编译失败"
-        cid = (getattr(gw, "condition_id", None) or "").strip()
+        cid = (getattr(gw, "condition_id", "") or "").strip()
         if not cid:
             return "", True, ""
         cobj = next((c for c in (p.conditions or []) if (c.id or "").strip() == cid), None)
@@ -165,7 +165,7 @@ class NodeListPanel(QWidget):
         red = QBrush(QColor(255, 90, 90))
 
         for n in (t.nodes or []):
-            warn = False
+            warn_flag = False
             msgs: List[str] = []
 
             step_txt = "0"
@@ -186,10 +186,10 @@ class NodeListPanel(QWidget):
                 label = n.label or "Skill"
                 sid = (n.skill_id or "").strip()
                 if not sid:
-                    warn = True
+                    warn_flag = True
                     msgs.append("skill_id 为空")
                 elif sid not in skills_by_id:
-                    warn = True
+                    warn_flag = True
                     msgs.append("skill_id 不存在")
                     skill_id = f"(技能缺失:{sid[-6:]})"
                 else:
@@ -216,22 +216,22 @@ class NodeListPanel(QWidget):
                 ctext, okc, ctip = self._gateway_condition_text(n)
                 cond_text = ctext
                 if not okc:
-                    warn = True
+                    warn_flag = True
                     msgs.append(f"条件无效：{ctip}")
 
                 act = (n.action or "").strip().lower()
                 if act in ("jump_node", "jump_track") and not (getattr(n, "target_node_id", "") or "").strip():
-                    warn = True
+                    warn_flag = True
                     msgs.append("缺少 target_node_id")
 
             else:
-                warn = True
+                warn_flag = True
                 msgs.append("未知节点类型")
 
             item = QTreeWidgetItem([typ, step_txt, label, skill_id, action, target_text, cond_text])
             item.setData(0, Qt.UserRole, getattr(n, "id", ""))
 
-            if warn:
+            if warn_flag:
                 for col in range(0, 7):
                     item.setForeground(col, red)
                 tip = "\n".join(msgs)
@@ -288,12 +288,17 @@ class NodeListPanel(QWidget):
         idx = items.index(choice) if choice in items else 0
         s = skills[idx]
 
+        # 安全获取 trigger.key，避免 trigger 为空或缺失导致崩溃
+        trigger = getattr(s, "trigger", None)
+        key = getattr(trigger, "key", "") if trigger is not None else ""
+        label = s.name or key or "Skill"
+
         node = self._edit_svc.add_skill_node(
             preset=self._preset,
             mode_id=self._mode_id,
             track_id=self._track_id,
             skill_id=s.id or "",
-            label=s.name or s.trigger.key or "Skill",
+            label=label,
         )
         if node is None:
             self._notify.error("新增技能节点失败")
@@ -415,21 +420,7 @@ class NodeListPanel(QWidget):
         except Exception:
             log.exception("NodeListPanel._mark_dirty failed")
 
-    def add_skill_node(self) -> None:
-        """
-        对外公开的“新增技能节点”接口：
-        - 供 TimelineCanvas 右键菜单调用
-        - 内部复用 _on_add_skill_node 的逻辑
-        """
-        self._on_add_skill_node()
-
-    def add_gateway_node(self) -> None:
-        """
-        对外公开的“新增网关节点”接口：
-        - 供 TimelineCanvas 右键菜单调用
-        - 内部复用 _on_add_gateway_node 的逻辑
-        """
-        self._on_add_gateway_node()
+    # ---------- 对外公开接口 ----------
 
     def add_skill_node(self) -> None:
         """

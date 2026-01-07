@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, List, Dict, Tuple
 
-from PySide6.QtCore import Qt, QRectF, Signal, QPointF
+from PySide6.QtCore import Qt, QRectF, Signal, QPointF, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import (
     QColor,
     QBrush,
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.profiles import ProfileContext
-from rotation_editor.core.models import RotationPreset, Node, SkillNode, GatewayNode
+from rotation_editor.core.models import RotationPreset
 from rotation_editor.ui.editor.timeline_layout import (
     NodeVisualSpec,
     TrackVisualSpec,
@@ -37,29 +37,12 @@ class TimelineCanvas(QGraphicsView):
     """
     多轨时间轴总览（QGraphicsView）：
 
-    set_data(ctx, preset, current_mode_id):
-        - ctx: 用于查技能读条时间
-        - preset: 当前 RotationPreset
-        - current_mode_id:
-            * None/"" => 仅显示全局轨道
-            * 非空 => 显示全局轨道 + 对应模式下所有轨道
-
-    功能：
-    - 顶部时间刻度线 + 垂直网格（依据 time_scale_px_per_ms）
-    - 左键点击节点块 -> nodeClicked(mode_id, track_id, node_index)
-    - 左键拖拽节点块：
-        * 同一轨道内：拖拽过程中只有该节点移动，松开后发 nodesReordered(mode_id, track_id, node_ids)
-        * 跨轨道：拖拽节点在视觉上跟随鼠标移动，松开后发 nodeCrossMoved(...)
-    - 右键节点 -> nodeContextMenuRequested(mode_id, track_id, node_index, global_x, global_y)
-    - 右键轨道空白 -> trackContextMenuRequested(mode_id, track_id, global_x, global_y)
-    - 在最后一条轨道之后（或无轨道时）画一个“新增轨道”按钮，下方 -> trackAddRequested(mode_id)
-      * mode_id == "" 表示新增全局轨道
-    - Ctrl+滚轮缩放时间轴（仅改变时间→像素映射，不改变业务数据），缩放变化时发 zoomChanged()
-
-    新增：
-    - set_current_node(mode_id, track_id, node_index) 高亮当前执行节点：
-        * 使用黄色粗描边 + 提升 Z 值
-        * 自动滚动到节点位置附近
+    - Step 网格：竖向虚线表示 step 边界（0,1,2,...），数字标在区间中点（1 表示 0~1）。
+    - 节点绘制在“区间中心”，即永远在两条线中间，而不是在线上。
+    - 当前约束：同一轨道的同一 step 只能有 1 个节点。
+      * 同轨拖拽：若目标 step 已被占用，释放后弹回原 step。
+      * 跨轨拖拽：若目标轨道同 step 已被占用，释放后不跨轨，弹回原轨道原 step。
+      * 跨轨成功时，会有一个平滑的“飞过去”动画（OutCubic 缓出），增加阻尼感。
     """
 
     nodeClicked = Signal(str, str, int)
@@ -88,6 +71,9 @@ class TimelineCanvas(QGraphicsView):
         self._node_height = 30
         self._x_gap = 8
 
+        # 垂直上下 lane 偏移量（目前容量为 1，但保留参数）
+        self._lane_offset = 10.0
+
         # 时间缩放（像素 / 毫秒）
         self._time_scale_default = 0.06  # 1s ≈ 60px
         self._time_scale_px_per_ms = self._time_scale_default
@@ -108,7 +94,8 @@ class TimelineCanvas(QGraphicsView):
         self._drag_start_pos: QPointF = QPointF()
         self._drag_start_scene_pos: QPointF = QPointF()
         self._drag_row_y: float = 0.0
-
+        # 新增：拖拽过程中的平滑位置（阻尼用）
+        self._drag_smoothed_pos: Optional[QPointF] = None
         # 当前高亮节点
         self._current_item: Optional[QGraphicsRectItem] = None
         self._current_key: Optional[Tuple[str, str]] = None
@@ -184,9 +171,8 @@ class TimelineCanvas(QGraphicsView):
 
         - ctx / preset 为 None 时清空。
         - rows 由 build_timeline_layout 构建：
-            * 每个 TrackVisualSpec 包含 nodes 的 start_ms / width。
-        - 本方法根据 NodeVisualSpec.start_ms * time_scale_px_per_ms
-          计算节点的 X 位置，而不再简单按顺序平铺。
+            * 每个 TrackVisualSpec 包含 nodes 的 start_ms / width / lane。
+        - 本方法将节点绘制在每个 step 区间的中点，而不是 step 边界线上。
         """
         self._scene.clear()
         self._track_items.clear()
@@ -307,12 +293,24 @@ class TimelineCanvas(QGraphicsView):
             for idx, nvs in enumerate(row.nodes):
                 w = nvs.width
 
-                # 根据 start_ms 映射到像素坐标
-                x = float(self._label_width) + float(nvs.start_ms) * float(self._time_scale_px_per_ms)
+                # 将节点绘制在 step 区间中点：
+                center_ms = float(nvs.start_ms) + float(self._step_ms) / 2.0
+                x_center = float(self._label_width) + center_ms * float(self._time_scale_px_per_ms)
+                x = x_center - w / 2.0
 
                 rect = QRectF(0, -self._node_height / 2.0, w, self._node_height)
                 item = QGraphicsRectItem(rect)
-                item.setPos(x, y_center)
+
+                # 垂直 lane 布局：-1=居中，0=上，1=下
+                lane = getattr(nvs, "lane", -1)
+                if lane < 0:
+                    y_item = y_center
+                elif lane == 0:
+                    y_item = y_center - self._lane_offset
+                else:
+                    y_item = y_center + self._lane_offset
+
+                item.setPos(x, y_item)
 
                 kind = (nvs.kind or "").lower()
 
@@ -320,7 +318,6 @@ class TimelineCanvas(QGraphicsView):
                 if kind == "skill":
                     fill = QColor(80, 160, 230)        # 蓝色
                 elif kind == "gateway":
-                    # 网关节点：若有条件则高亮为紫色，否则橙色
                     if getattr(nvs, "has_condition", False):
                         fill = QColor(180, 100, 220)   # 紫色，高亮
                     else:
@@ -334,7 +331,7 @@ class TimelineCanvas(QGraphicsView):
 
                 item.setData(0, row.mode_id or "")   # mode_id
                 item.setData(1, row.track_id or "")  # track_id
-                item.setData(2, idx)                 # node_index（行内索引，用于点击）
+                item.setData(2, idx)                 # node_index（行内索引）
                 item.setData(3, nvs.node_id)         # node_id
 
                 self._scene.addItem(item)
@@ -433,28 +430,18 @@ class TimelineCanvas(QGraphicsView):
         self._apply_highlight(items[idx])
 
     def _apply_highlight(self, item: QGraphicsRectItem) -> None:
-        # 清除旧的
         self._clear_highlight()
-        # 应用于新的
         self._current_item = item
         try:
             item.setPen(self._highlight_pen)
             item.setZValue(10)
-            # 自动滚动到节点附近
             rect = item.sceneBoundingRect().adjusted(-20, -20, 20, 20)
             self.ensureVisible(rect, xMargin=10, yMargin=10)
         except Exception:
             pass
 
     def set_current_node(self, mode_id: Optional[str], track_id: str, node_index: int) -> None:
-        """
-        高亮当前执行节点（由引擎回调驱动）：
-        - mode_id: None/"" 表示全局轨道
-        - track_id: 轨道 ID
-        - node_index: 节点在轨道中的索引；若 <0 则清除高亮
-        """
         if node_index < 0:
-            # 清除高亮
             self._current_key = None
             self._current_index = None
             self._clear_highlight()
@@ -466,7 +453,6 @@ class TimelineCanvas(QGraphicsView):
 
         items = self._track_items.get(key)
         if not items:
-            # 当前视图中不含该轨道（可能在其他模式），不做处理
             return
         idx = int(node_index)
         if idx < 0 or idx >= len(items):
@@ -482,20 +468,10 @@ class TimelineCanvas(QGraphicsView):
         x_extent: float,
         grid_bottom: float,
     ) -> None:
-        """
-        绘制顶部标尺 + 垂直网格（步骤版本）：
-
-        - 不再按“秒”刻度（0s / 5s / 10s），改为按 Step 刻度：
-            * Step0, Step1, Step2, ... （整数步骤）
-        - 每个 Step 的显示宽度由 _step_ms * _time_scale_px_per_ms 决定，
-          必须与 build_timeline_layout 里使用的 STEP_MS 一致。
-        - 轨道标题和步骤数字都是“纯装饰”，不参与交互，不可选中。
-        """
         scale = float(self._time_scale_px_per_ms)
         if scale <= 0:
             return
 
-        # 步骤对应的“显示毫秒”（与 build_timeline_layout 中 STEP_MS 保持一致）
         try:
             step_ms = int(getattr(self, "_step_ms", 1000) or 1000)
         except Exception:
@@ -509,7 +485,6 @@ class TimelineCanvas(QGraphicsView):
         if max_time_ms <= 0:
             max_time_ms = step_ms
 
-        # 覆盖“场景中真实需要的时间范围”和“当前视口宽度反推的可见范围”
         visible_ms = int(max(0.0, (x_extent - start_x) / scale))
         max_ms = max(max_time_ms, visible_ms)
 
@@ -531,13 +506,18 @@ class TimelineCanvas(QGraphicsView):
             pen_ruler,
         )
 
+        # 1) 画所有竖线（step 边界）+ 小刻度
+        tick_len = 6.0
+        step_x_positions: List[float] = []
+
         for step in range(0, max_step + 1):
             t = step * step_ms
             x = start_x + t * scale
             if x > x_extent:
                 break
 
-            # 垂直网格线
+            step_x_positions.append(x)
+
             self._scene.addLine(
                 x,
                 ruler_bottom,
@@ -546,8 +526,6 @@ class TimelineCanvas(QGraphicsView):
                 pen_grid,
             )
 
-            # 刻度小线
-            tick_len = 6.0
             self._scene.addLine(
                 x,
                 ruler_bottom,
@@ -556,24 +534,28 @@ class TimelineCanvas(QGraphicsView):
                 pen_ruler,
             )
 
-            # 步骤号文字：0, 1, 2, ...
+        # 2) 区间数字：1..N，画在两个 step_x_positions 之间的中点
+        for step in range(1, len(step_x_positions)):
+            x_left = step_x_positions[step - 1]
+            x_right = step_x_positions[step]
+            x_mid = (x_left + x_right) / 2.0
+
             label = f"{step}"
             text_item = QGraphicsSimpleTextItem(label)
             text_item.setFont(font_small)
             text_item.setBrush(QColor(200, 200, 200))
             tb = text_item.boundingRect()
-            tx = x - tb.width() / 2.0
+            tx = x_mid - tb.width() / 2.0
             ty = ruler_bottom - tick_len - tb.height()
             text_item.setPos(tx, ty)
 
-            # 关键：不接受鼠标，不可选中，不可获得焦点
             text_item.setAcceptedMouseButtons(Qt.NoButton)
             text_item.setFlag(QGraphicsItem.ItemIsSelectable, False)
             text_item.setFlag(QGraphicsItem.ItemIsFocusable, False)
 
             self._scene.addItem(text_item)
 
-    # ---------- 鼠标事件：点击 & 拖拽 & 缩放 ----------
+    # ---------- 拖拽 & 缩放 ----------
 
     def mousePressEvent(self, event) -> None:
         scene_pos = self.mapToScene(event.pos())
@@ -583,16 +565,8 @@ class TimelineCanvas(QGraphicsView):
         if isinstance(item, QGraphicsSimpleTextItem) and isinstance(item.parentItem(), QGraphicsRectItem):
             item = item.parentItem()
 
-        # 特殊处理：点击“裸的”文字（轨道名 / 步骤数字）时，什么也不做，直接刷新一遍
-        #
-        # 这些文字是我们自己加的 QGraphicsSimpleTextItem，parentItem() 为 None：
-        # - 轨道标题：[模式:XXX] 轨道名
-        # - 顶部步骤数字：0 / 1 / 2 / ...
-        #
-        # Qt 在点击它们时可能会应用选中/高亮效果，导致看起来“消失”；
-        # 这里直接拦截点击并重建场景，保证它们按我们自己的颜色重新画出来。
+        # 点击“裸的”文字（轨道名 / 步骤数字）时，仅刷新，不参与拖拽
         if isinstance(item, QGraphicsSimpleTextItem) and item.parentItem() is None:
-            # 强制重建当前视图
             try:
                 self.set_data(self._ctx, self._preset, self._current_mode_id)
             except Exception:
@@ -605,7 +579,7 @@ class TimelineCanvas(QGraphicsView):
             if tag == "add_track_button":
                 mid = item.data(1)
                 if isinstance(mid, str):
-                    self.trackAddRequested.emit(mid)  # mid 为空串 => 全局轨道
+                    self.trackAddRequested.emit(mid)
                 return
 
         if event.button() == Qt.LeftButton:
@@ -614,6 +588,7 @@ class TimelineCanvas(QGraphicsView):
                 self._drag_start_pos = item.pos()
                 self._drag_start_scene_pos = scene_pos
                 self._drag_row_y = item.pos().y()
+                self._drag_smoothed_pos = QPointF(item.pos())  # 新增：初始平滑位置
                 mid = item.data(0)
                 tid = item.data(1)
                 idx = item.data(2)
@@ -663,28 +638,64 @@ class TimelineCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        """
+        拖拽过程：
+        - 节点实时跟随鼠标移动；
+        - 垂直方向吸附到最近轨道行中心；
+        - 水平方向靠近某个 step 区间中心时，会“磁吸”到该中心；
+        - 位置更新采用阻尼平滑（当前值向目标值缓动），避免生硬和抖动。
+        """
         if self._drag_item is not None and self._drag_row_key is not None:
             scene_pos = self.mapToScene(event.pos())
             dx = scene_pos.x() - self._drag_start_scene_pos.x()
 
-            new_x = self._drag_start_pos.x() + dx
-            if new_x < self._label_width:
-                new_x = self._label_width
+            # 1) 计算理想目标位置（未加阻尼）
+            # 基础水平移动
+            target_x = self._drag_start_pos.x() + dx
+            if target_x < self._label_width:
+                target_x = self._label_width
 
-            # 纵向吸附到最近的行中心
-            new_y = float(self._drag_row_y)
+            # 垂直吸附到最近轨道行中心
+            target_y = float(self._drag_row_y)
             row_height_total = self._row_height + self._row_gap
             if self._row_keys and row_height_total > 0:
-                y = scene_pos.y() - self._ruler_height
+                y_mouse = scene_pos.y() - self._ruler_height
                 max_row_index = max(self._row_keys.keys())
-                row_index = int(y // row_height_total)
+                row_index = int(y_mouse // row_height_total)
                 if row_index < 0:
                     row_index = 0
                 if row_index > max_row_index:
                     row_index = max_row_index
-                new_y = self._ruler_height + row_index * row_height_total + self._row_height / 2.0
+                target_y = self._ruler_height + row_index * row_height_total + self._row_height / 2.0
 
-            self._drag_item.setPos(new_x, new_y)
+            # 水平 Step “磁吸”：基于区间中心 (step + 0.5)
+            rect = self._drag_item.rect()
+            step_w = max(float(self._time_scale_px_per_ms) * float(self._step_ms), 1.0)
+            if step_w > 0:
+                center_x = target_x + rect.width() / 2.0
+                rel = center_x - float(self._label_width)
+                # cell index: 0 => 第一个区间 [0,1) 的中心
+                raw_cell = rel / step_w - 0.5
+                nearest = round(raw_cell)
+                diff_px = abs(raw_cell - nearest) * step_w
+                snap_threshold = step_w * 0.25  # 可调：越小越“难”吸附
+
+                if diff_px <= snap_threshold:
+                    snapped_center_x = float(self._label_width) + (nearest + 0.5) * step_w
+                    target_x = snapped_center_x - rect.width() / 2.0
+
+            # 2) 阻尼平滑：当前平滑位置向 target 缓动
+            if self._drag_smoothed_pos is None:
+                self._drag_smoothed_pos = QPointF(target_x, target_y)
+            else:
+                # 阻尼系数：0.3~0.5 之间，越大越“跟手”，越小越“慵懒”
+                alpha = 0.35
+                cur = self._drag_smoothed_pos
+                new_x = float(cur.x()) + (target_x - float(cur.x())) * alpha
+                new_y = float(cur.y()) + (target_y - float(cur.y())) * alpha
+                self._drag_smoothed_pos = QPointF(new_x, new_y)
+
+            self._drag_item.setPos(self._drag_smoothed_pos)
             return
 
         super().mouseMoveEvent(event)
@@ -692,80 +703,117 @@ class TimelineCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self._drag_item is not None and self._drag_row_key is not None:
             src_key = self._drag_row_key
-            src_items = self._track_items.get(src_key, [])
+            rect = self._drag_item.rect()
+            item_pos = self._drag_item.pos()
 
-            scene_pos = self.mapToScene(event.pos())
-            dest_key: Optional[Tuple[str, str]] = None
+            # 使用节点中心 Y 判定落入哪条轨道
+            center_y = float(item_pos.y())
             row_height_total = self._row_height + self._row_gap
+            dest_key: Optional[Tuple[str, str]] = None
+            dest_row_index: Optional[int] = None
             if row_height_total > 0:
-                y = scene_pos.y() - self._ruler_height
-                row_index = int(y // row_height_total)
+                y_rel = center_y - self._ruler_height
+                row_index = int(y_rel // row_height_total)
                 row_top = row_index * row_height_total
-                if row_top <= y <= row_top + self._row_height:
+                if row_top <= y_rel <= row_top + self._row_height:
                     dest_key = self._row_keys.get(row_index)
+                    dest_row_index = row_index
 
-            # ---------- 同一轨道内拖拽：解释为“修改 step_index” ----------
+            # ---------- 同一轨道内拖拽：修改 step_index（若目标空闲） ----------
             if dest_key is None or dest_key == src_key:
-                # 计算新的 step_index（按拖拽后位置四舍五入到最近的 Step 列）
-                rect = self._drag_item.rect()
-                x_item = float(self._drag_item.pos().x())
-                center_x = x_item + rect.width() / 2.0
-
                 step_w = max(float(self._time_scale_px_per_ms) * float(self._step_ms), 1.0)
+                center_x = float(item_pos.x()) + rect.width() / 2.0
                 rel = center_x - float(self._label_width)
                 if rel < 0.0:
                     rel = 0.0
-                new_step = int(round(rel / step_w))
+                # 按“区间中心”计算 cell index：0 => 第一个区间 [0,1)
+                raw_cell = rel / step_w - 0.5
+                new_step = int(round(raw_cell))
                 if new_step < 0:
                     new_step = 0
 
-                # 将拖拽的 item 临时吸附到新的 Step 列（视觉上不留在“中间”）
-                new_x = float(self._label_width) + new_step * step_w
-                self._drag_item.setPos(new_x, self._drag_item.pos().y())
-
-                # 发出步骤变化信号：由外层编辑器负责写回模型并刷新画布
                 src_mid, src_tid = src_key
                 nid = self._drag_item.data(3)
                 if isinstance(nid, str):
+                    orig_step = self._get_node_step_from_model(src_mid or "", src_tid or "", nid or "")
+                    if new_step != orig_step and self._is_step_occupied_in_model(src_mid or "", src_tid or "", new_step, nid or ""):
+                        target_step = orig_step
+                    else:
+                        target_step = new_step
+
                     self.stepChanged.emit(
                         src_mid or "",
                         src_tid or "",
                         nid,
-                        int(new_step),
+                        int(target_step),
                     )
 
-            # ---------- 跨轨道拖拽：仍然走“节点跨轨道移动”逻辑 ----------
+            # ---------- 跨轨道拖拽：节点跨轨道移动（若目标轨道该 step 空闲） ----------
             else:
-                dst_items = self._track_items.get(dest_key, [])
-                if dst_items:
-                    drag_w = float(self._drag_item.rect().width())
-                    drag_center_x = float(self._drag_item.pos().x()) + drag_w / 2.0
-                    dst_index = compute_insert_index_for_cross_track(
-                        dst_items,
-                        drag_w,
-                        drag_center_x,
-                        float(self._label_width),
-                        float(self._x_gap),
-                    )
-                else:
-                    dst_index = 0
-
                 src_mid, src_tid = src_key
                 dst_mid, dst_tid = dest_key
                 nid = self._drag_item.data(3)
+
                 if isinstance(nid, str):
-                    self.nodeCrossMoved.emit(
-                        src_mid or "",
-                        src_tid or "",
-                        dst_mid or "",
-                        dst_tid or "",
-                        int(dst_index),
-                        nid,
-                    )
+                    orig_step = self._get_node_step_from_model(src_mid or "", src_tid or "", nid or "")
+
+                    # 若目标轨道该 step 已被其它节点占用，则不跨轨，弹回原轨原 step
+                    if self._is_step_occupied_in_model(dst_mid or "", dst_tid or "", orig_step, nid or ""):
+                        self.stepChanged.emit(
+                            src_mid or "",
+                            src_tid or "",
+                            nid,
+                            int(orig_step),
+                        )
+                    else:
+                        # 目标轨道该 step 空闲：允许跨轨，并做一次“飞过去”的动画
+                        dst_items = self._track_items.get(dest_key, [])
+                        if dst_items:
+                            drag_w = float(self._drag_item.rect().width())
+                            drag_center_x = float(self._drag_item.pos().x()) + drag_w / 2.0
+                            dst_index = compute_insert_index_for_cross_track(
+                                dst_items,
+                                drag_w,
+                                drag_center_x,
+                                float(self._label_width),
+                                float(self._x_gap),
+                            )
+                        else:
+                            dst_index = 0
+
+                        # 计算目标轨道该 step 的视觉位置（用于动画终点）
+                        if dest_row_index is None:
+                            # 兜底：再根据 dest_key 查一次行号
+                            for i, k in self._row_keys.items():
+                                if k == dest_key:
+                                    dest_row_index = i
+                                    break
+
+                        if dest_row_index is not None:
+                            dest_y = self._ruler_height + dest_row_index * row_height_total + self._row_height / 2.0
+                        else:
+                            dest_y = item_pos.y()
+
+                        step_w = max(float(self._time_scale_px_per_ms) * float(self._step_ms), 1.0)
+                        target_center_x = float(self._label_width) + (orig_step + 0.5) * step_w
+                        target_x = target_center_x - rect.width() / 2.0
+
+                        # 做一次 OutCubic 的动画，然后再真正发 nodeCrossMoved
+                        def _on_finished():
+                            self.nodeCrossMoved.emit(
+                                src_mid or "",
+                                src_tid or "",
+                                dst_mid or "",
+                                dst_tid or "",
+                                int(dst_index),
+                                nid,
+                            )
+
+                        self._animate_item_to(self._drag_item, QPointF(target_x, dest_y), 160, _on_finished)
 
             self._drag_item = None
             self._drag_row_key = None
-
+            self._drag_smoothed_pos = None  # 新增
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -799,6 +847,103 @@ class TimelineCanvas(QGraphicsView):
             self.verticalScrollBar().setValue(v)
         except Exception:
             pass
+
+    # ---------- 模型辅助：查询 Track / 节点 Step / Step 是否占用 ----------
+
+    def _find_track_for_key(self, mode_id: str, track_id: str):
+        if self._preset is None:
+            return None
+        tid = (track_id or "").strip()
+        if not tid:
+            return None
+        mid = (mode_id or "").strip()
+        if not mid:
+            # global
+            for t in (self._preset.global_tracks or []):
+                if (t.id or "").strip() == tid:
+                    return t
+            return None
+        # mode
+        for m in (self._preset.modes or []):
+            if (m.id or "").strip() == mid:
+                for t in (m.tracks or []):
+                    if (t.id or "").strip() == tid:
+                        return t
+                break
+        return None
+
+    def _get_node_step_from_model(self, mode_id: str, track_id: str, node_id: str) -> int:
+        tr = self._find_track_for_key(mode_id, track_id)
+        if tr is None:
+            return 0
+        nid = (node_id or "").strip()
+        if not nid:
+            return 0
+        for n in (tr.nodes or []):
+            if (getattr(n, "id", "") or "").strip() == nid:
+                try:
+                    s = int(getattr(n, "step_index", 0) or 0)
+                except Exception:
+                    s = 0
+                if s < 0:
+                    s = 0
+                return s
+        return 0
+
+    def _is_step_occupied_in_model(self, mode_id: str, track_id: str, step_index: int, exclude_node_id: str) -> bool:
+        tr = self._find_track_for_key(mode_id, track_id)
+        if tr is None:
+            return False
+        nid_ex = (exclude_node_id or "").strip()
+        for n in (tr.nodes or []):
+            nid = (getattr(n, "id", "") or "").strip()
+            if not nid or nid == nid_ex:
+                continue
+            try:
+                s = int(getattr(n, "step_index", 0) or 0)
+            except Exception:
+                s = 0
+            if s < 0:
+                s = 0
+            if s == int(step_index):
+                return True
+        return False
+
+    # ---------- 动画辅助 ----------
+
+    def _animate_item_to(self, item: QGraphicsRectItem, target_pos: QPointF, duration_ms: int, on_finished) -> None:
+        """
+        用 QVariantAnimation 平滑移动一个节点到指定位置，然后调用 on_finished。
+        仅用于跨轨成功时的“飞过去”动画。
+        """
+        try:
+            start_pos = item.pos()
+        except Exception:
+            # 如果 item 已经无效，就直接回调
+            on_finished()
+            return
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(max(30, int(duration_ms)))
+        anim.setStartValue(start_pos)
+        anim.setEndValue(target_pos)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _on_value(v):
+            try:
+                item.setPos(v)
+            except Exception:
+                pass
+
+        def _on_finished_internal():
+            try:
+                on_finished()
+            except Exception:
+                pass
+
+        anim.valueChanged.connect(_on_value)
+        anim.finished.connect(_on_finished_internal)
+        anim.start(QVariantAnimation.DeleteWhenStopped)
 
     # ---------- 工具 ----------
 

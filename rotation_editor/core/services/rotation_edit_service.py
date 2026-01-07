@@ -500,12 +500,9 @@ class RotationEditService:
         """
         设置指定节点的 step_index（以及可选的 order_in_step）：
 
-        - preset: 所属 RotationPreset
-        - mode_id: 所属模式 ID（None 表示全局轨道）
-        - track_id: 轨道 ID
-        - node_id: 节点 ID
-        - step_index: 新的步骤索引（<0 会被归零）
-        - order_in_step: 可选，同一 Step 内的相对顺序（暂时用不到可以不传）
+        约束（新版）：
+        - 同一轨道的同一个 step_index 上，最多只允许 1 个节点。
+          若尝试将某节点移动到一个已有节点的 step_index，则本次操作被拒绝。
 
         返回：
         - 若找到节点且值有变化，则返回 True 并标记 rotations 脏；
@@ -519,6 +516,7 @@ class RotationEditService:
         if not nid:
             return False
 
+        # 归一化 step_index
         try:
             s_new = int(step_index)
         except Exception:
@@ -526,9 +524,9 @@ class RotationEditService:
         if s_new < 0:
             s_new = 0
 
-        o_new: Optional[int]
+        # 可选：order_in_step
         if order_in_step is None:
-            o_new = None
+            o_new: Optional[int] = None
         else:
             try:
                 o_new = int(order_in_step)
@@ -537,25 +535,60 @@ class RotationEditService:
             if o_new < 0:
                 o_new = 0
 
+        target_node = None
         for n in t.nodes:
             if getattr(n, "id", "") == nid:
-                # 读取当前值
-                s_old = int(getattr(n, "step_index", 0) or 0)
-                o_old = int(getattr(n, "order_in_step", 0) or 0)
+                target_node = n
+                break
 
-                if s_old == s_new and (o_new is None or o_old == o_new):
-                    # 没有实际变化
-                    return False
+        if target_node is None:
+            return False
 
-                if hasattr(n, "step_index"):
-                    setattr(n, "step_index", s_new)
-                if o_new is not None and hasattr(n, "order_in_step"):
-                    setattr(n, "order_in_step", o_new)
+        # 同一轨道同一 step 上是否已存在其他节点（不包括自己）
+        count_in_step = 0
+        for n in t.nodes:
+            if getattr(n, "id", "") == nid:
+                continue
+            try:
+                s_val = int(getattr(n, "step_index", 0) or 0)
+            except Exception:
+                s_val = 0
+            if s_val < 0:
+                s_val = 0
+            if s_val == s_new:
+                count_in_step += 1
 
-                self._mark_dirty()
-                return True
+        # 若目标 step 上已经有 1 个节点，则拒绝本次移动（不改变任何东西）
+        current_s = int(getattr(target_node, "step_index", 0) or 0)
+        if current_s != s_new and count_in_step >= 1:
+            return False
 
-        return False
+        changed = False
+
+        # 写入 step_index
+        if current_s != s_new:
+            try:
+                setattr(target_node, "step_index", s_new)
+                changed = True
+            except Exception:
+                pass
+
+        # 写入 order_in_step
+        if o_new is not None:
+            try:
+                o_old = int(getattr(target_node, "order_in_step", 0) or 0)
+            except Exception:
+                o_old = 0
+            if o_old != o_new:
+                try:
+                    setattr(target_node, "order_in_step", o_new)
+                    changed = True
+                except Exception:
+                    pass
+
+        if changed:
+            self._mark_dirty()
+        return changed
 
     def delete_track(
         self,

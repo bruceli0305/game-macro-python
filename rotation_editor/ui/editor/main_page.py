@@ -307,20 +307,41 @@ class RotationEditorPage(QWidget):
     # ---------- 上下文切换 ----------
 
     def set_context(self, ctx: ProfileContext) -> None:
+        """
+        更新编辑器使用的 ProfileContext：
+
+        - 停止并丢弃旧引擎实例（避免继续引用旧 ctx / 旧 capture plan）
+        - 重置当前选中的 preset/mode
+        - 刷新 NodeListPanel 与 TimelineCanvas 数据源
+        """
         self._ctx = ctx
+
+        # 若引擎还在运行，先停止
+        if self._engine is not None and self._engine.is_running():
+            try:
+                self._engine.stop("context_changed")
+            except Exception:
+                pass
+
+        # 丢弃旧引擎实例，保证下一次 _ensure_engine 会用新的 ctx 重建
+        self._engine = None
+        self._engine_running = False
+        self._engine_paused = False
+
+        # 重置当前选中 preset/mode
         self._current_preset_id = None
         self._current_mode_id = None
 
-        self._panel_nodes.set_context(self._ctx, preset=None)
+        # 清空节点面板与时间轴
+        # 注意：这里改为位置参数调用，避免依赖形参名
+        self._panel_nodes.set_context(self._ctx, None)
         self._panel_nodes.set_target(None, None)
         self._timeline_canvas.set_data(self._ctx, None, None)
 
+        # 重新构建 preset 下拉与模式 tabs
         self._rebuild_preset_combo()
         self._select_first_preset_if_any()
         self._update_zoom_label()
-
-        if self._engine is not None and self._engine.is_running():
-            self._engine.stop("context_changed")
 
     # ---------- preset 相关 ----------
 
@@ -339,12 +360,14 @@ class RotationEditorPage(QWidget):
             self._current_preset_id = None
             self._current_mode_id = None
             self._rebuild_mode_tabs()
-            self._panel_nodes.set_context(self._ctx, preset=None)
+            # 这里也改为位置参数
+            self._panel_nodes.set_context(self._ctx, None)
             self._panel_nodes.set_target(None, None)
             self._timeline_canvas.set_data(self._ctx, None, None)
             return
-        self._cmb_preset.setCurrentIndex(0)
-        self._on_preset_changed(0)
+        item_index = 0
+        self._cmb_preset.setCurrentIndex(item_index)
+        self._on_preset_changed(item_index)
 
     def _current_preset(self) -> Optional[RotationPreset]:
         pid = self._current_preset_id
@@ -361,7 +384,8 @@ class RotationEditorPage(QWidget):
             self._current_preset_id = None
             self._current_mode_id = None
             self._rebuild_mode_tabs()
-            self._panel_nodes.set_context(self._ctx, preset=None)
+            # 位置参数
+            self._panel_nodes.set_context(self._ctx, None)
             self._panel_nodes.set_target(None, None)
             self._timeline_canvas.set_data(self._ctx, None, None)
             return
@@ -375,7 +399,8 @@ class RotationEditorPage(QWidget):
         mode_id = self._tab_modes.current_mode_id()
         self._current_mode_id = mode_id or None
 
-        self._panel_nodes.set_context(self._ctx, preset=preset)
+        # 关键改动：用位置参数，不再用关键字 preset=
+        self._panel_nodes.set_context(self._ctx, preset)
         self._panel_nodes.set_target(self._current_mode_id, None)
         self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
         self._update_zoom_label()
@@ -818,6 +843,14 @@ class RotationEditorPage(QWidget):
             return
 
     def _on_timeline_step_changed(self, mode_id: str, track_id: str, node_id: str, step_index: int) -> None:
+        """
+        TimelineCanvas 通知：某个节点被拖拽到了新的 step_index。
+
+        规则：
+        - 同一轨道同一 step 只能有 1 个节点；
+        - 若 set_node_step 返回 False，说明该 step 已被占用或没有变化，
+          此时应让时间轴“弹回”到模型中的位置（通过重绘实现）。
+        """
         preset = self._current_preset()
         if preset is None:
             return
@@ -832,13 +865,24 @@ class RotationEditorPage(QWidget):
             node_id=node_id or "",
             step_index=int(step_index),
         )
-        if not changed:
-            return
 
-        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
-        self._panel_nodes.set_context(self._ctx, preset=preset)
-        self._panel_nodes.set_target(mid, tid)
+        # 无论成功与否，都使用模型状态重绘一次时间轴和节点列表：
+        # - 若成功：展示新的 step 布局；
+        # - 若失败：展示原有布局，相当于把拖拽的节点弹回原位。
+        try:
+            self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+        except Exception:
+            pass
 
+        try:
+            self._panel_nodes.set_context(self._ctx, preset)
+            self._panel_nodes.set_target(mid, tid)
+        except Exception:
+            pass
+
+        # 如有需要，这里可以根据 changed 再做一些提示：
+        # if not changed:
+        #     self._notify.status_msg("该 Step 已有节点，无法放置多个节点", ttl_ms=1500)
     # ---------- 保存 / 重载 ----------
 
     def _on_reload(self) -> None:
@@ -1130,3 +1174,42 @@ class RotationEditorPage(QWidget):
             self._on_start_clicked()
         else:
             self._on_stop_clicked()
+
+    def open_preset(self, preset_id: str) -> None:
+        """
+        在当前 ctx 下，选中指定的 RotationPreset 并刷新 UI。
+
+        - preset_id 找不到时，会退回到第一个 preset（若存在）。
+        - 仅改变编辑器内部选中 preset，不影响 ProfileContext。
+        """
+        pid = (preset_id or "").strip()
+        if not pid:
+            # 若传入空 id，则按当前逻辑选第一个
+            self._select_first_preset_if_any()
+            return
+
+        # 确保 preset 下拉已构建
+        self._rebuild_preset_combo()
+
+        self._building = True
+        try:
+            target_index = -1
+            for i in range(self._cmb_preset.count()):
+                data = self._cmb_preset.itemData(i)
+                if isinstance(data, str) and data == pid:
+                    target_index = i
+                    break
+
+            if target_index >= 0:
+                self._cmb_preset.setCurrentIndex(target_index)
+            else:
+                # 找不到目标 preset，则退回第一个
+                if self._cmb_preset.count() > 0:
+                    self._cmb_preset.setCurrentIndex(0)
+        finally:
+            self._building = False
+
+        # 手动触发一次 _on_preset_changed 以刷新内部状态与时间轴
+        idx = self._cmb_preset.currentIndex()
+        if idx >= 0:
+            self._on_preset_changed(idx)

@@ -108,6 +108,10 @@ class CaptureManager:
     def update_plan(self, probes: ProbeRequirements) -> None:
         """
         若 probes 与上次相同则不重建。
+
+        修正点：
+        - 当 CapturePlanBuilder.build 抛异常时，不再更新 _last_probes_sig，
+          这样同一组 probes 后续仍会尝试重新构建 plan，而不是“永远停留在失败状态”。
         """
         p_points = frozenset((probes.point_ids or set()))
         p_skillpix = frozenset((probes.skill_pixel_ids or set()))
@@ -122,12 +126,12 @@ class CaptureManager:
         try:
             res = self._builder.build(ctx=self._ctx, probes=probes, capture=self._cap)
         except Exception as e:
-            # plan 构建失败也不抛
+            # plan 构建失败也不抛；不更新 _last_probes_sig，这样后续仍会尝试重建
             with self._lock:
                 self._plan = CapturePlan(plans={})
-                self._last_probes_sig = sig
                 self._last_error = "plan_build_failed"
                 self._last_detail = str(e)
+
             if self._sink is not None:
                 try:
                     self._sink.on_capture_error("plan_build_failed", str(e))
