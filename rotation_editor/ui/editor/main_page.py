@@ -1191,15 +1191,24 @@ class RotationEditorPage(QWidget):
     # ---------- 热键接口 ----------
 
     def toggle_engine_via_hotkey(self) -> None:
-        preset = self._current_preset()
-        if preset is None:
-            self._notify.error("请先在“循环编辑器”中选择一个方案")
-            return
+        """
+        供 ExecHotkeyController 使用的启停接口：
 
+        语义：
+        - 若引擎未运行：等价于点击“开始”，启动当前选中方案；
+        - 若引擎正在运行但未暂停：等价于点击“暂停”按钮；
+        - 若引擎正在运行且已暂停：等价于点击“继续”（再点一次暂停按钮）。
+
+        注意：
+        - “停止(Stop)” 仍只通过 UI 上的“停止”按钮触发，不再由热键触发。
+        """
+        # 未运行 -> 启动当前方案
         if not self._engine_running:
             self._on_start_clicked()
-        else:
-            self._on_stop_clicked()
+            return
+
+        # 已运行 -> 切换暂停/继续
+        self._on_pause_clicked()
 
     def open_preset(self, preset_id: str) -> None:
         """

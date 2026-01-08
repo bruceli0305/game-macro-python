@@ -719,10 +719,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_exec_by_hotkey(self) -> None:
         """
-        由 ExecHotkeyController 触发：
+        由 ExecHotkeyController 触发的全局执行热键回调：
+
         - 若循环引擎未运行，则启动当前 RotationEditorPage 选中的方案；
-        - 若正在运行，则停止。
-        在 Qt 主线程中执行（由 QtDispatcher 保证）。
+        - 若引擎正在运行，则在“暂停”和“继续”之间切换。
+
+        停止(Stop) 仍需用户在循环编辑器中手动点击“停止”按钮。
         """
         try:
             page = self._page_rotation_editor
