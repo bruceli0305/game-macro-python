@@ -14,29 +14,34 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QMessageBox,
+    QSplitter,
 )
 
 from core.profiles import ProfileContext
-from rotation_editor.sim import RotationSimulator, SimConfig
+from rotation_editor.sim import RotationSimulator, SimConfig, SimEvent
 from rotation_editor.core.models import RotationPreset
 from rotation_editor.core.services.rotation_service import RotationService
+
+from qtui.extensions.sim_timeline_view import SimulationTimelineView
 
 
 class RotationSimulationDialog(QDialog):
     """
-    循环推演结果查看器（最小版）：
+    循环推演结果查看器：
 
     功能：
     - 选择一个 RotationPreset；
     - 设置最大模拟时长(秒) / 最大节点数；
     - 调用 RotationSimulator.run() 获得 SimResult；
-    - 用表格展示每个 SimEvent：
-        * 序号 / 时间(ms/s) / scope / mode_id / track_id / 节点标签 / 类型 / 结果 / 原因
-    - 双击某行弹出详细信息弹窗。
+    - 上半部分：SimulationTimelineView 时间轴视图（矩形块，可缩放）；
+    - 下半部分：QTableWidget 事件列表；
+    - 双击表格行或点击时间轴块弹出事件详情。
 
-    依赖：
-    - ctx: 当前 ProfileContext（提供技能配置等）
-    - rotation_service: RotationService（用于列出/查找 preset）
+    展示策略：
+    - 只展示“真正生效”的事件：
+        * SkillNode: 只看 outcome="SUCCESS"
+        * GatewayNode: 只看 GW_END / GW_EXEC_* / GW_JUMP_* / GW_TAKEN 等
+        * 过滤掉：SKIPPED_CD / SKIPPED_NOT_READY / GW_COND_FALSE 等“未触发/未释放”的事件
     """
 
     def __init__(
@@ -52,7 +57,12 @@ class RotationSimulationDialog(QDialog):
         self._svc = rotation_service
 
         self.setWindowTitle("循环推演结果查看器")
-        self.resize(1000, 600)
+        self.resize(1100, 640)
+
+        # 原始 events（未经过滤的完整推演事件）
+        self._events_all: List[SimEvent] = []
+        # 当前展示用（已过滤）的事件
+        self._events_visible: List[SimEvent] = []
 
         self._build_ui()
         self._reload_presets()
@@ -117,6 +127,42 @@ class RotationSimulationDialog(QDialog):
         self._lbl_summary = QLabel("尚未推演。", self)
         layout.addWidget(self._lbl_summary)
 
+        # 时间轴缩放控件
+        row_zoom = QHBoxLayout()
+        row_zoom.addWidget(QLabel("时间轴缩放:", self))
+
+        self._btn_zoom_out = QPushButton("-", self)
+        self._btn_zoom_out.setFixedWidth(26)
+        self._btn_zoom_out.clicked.connect(self._on_zoom_out_clicked)
+        row_zoom.addWidget(self._btn_zoom_out)
+
+        self._lbl_zoom = QLabel("100%", self)
+        self._lbl_zoom.setFixedWidth(48)
+        self._lbl_zoom.setAlignment(Qt.AlignCenter)
+        row_zoom.addWidget(self._lbl_zoom)
+
+        self._btn_zoom_in = QPushButton("+", self)
+        self._btn_zoom_in.setFixedWidth(26)
+        self._btn_zoom_in.clicked.connect(self._on_zoom_in_clicked)
+        row_zoom.addWidget(self._btn_zoom_in)
+
+        self._btn_zoom_reset = QPushButton("1x", self)
+        self._btn_zoom_reset.setFixedWidth(32)
+        self._btn_zoom_reset.clicked.connect(self._on_zoom_reset_clicked)
+        row_zoom.addWidget(self._btn_zoom_reset)
+
+        row_zoom.addStretch(1)
+        layout.addLayout(row_zoom)
+
+        # 中部：Splitter，顶部时间轴，底部表格
+        splitter = QSplitter(Qt.Vertical, self)
+        splitter.setChildrenCollapsible(False)
+
+        # 时间轴视图
+        self._timeline = SimulationTimelineView(self)
+        self._timeline.eventClicked.connect(self._on_timeline_event_clicked)
+        splitter.addWidget(self._timeline)
+
         # 事件表格
         self._table = QTableWidget(self)
         self._table.setColumnCount(10)
@@ -137,8 +183,12 @@ class RotationSimulationDialog(QDialog):
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setSelectionMode(QTableWidget.SingleSelection)
         self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        splitter.addWidget(self._table)
 
-        layout.addWidget(self._table, 1)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(splitter, 1)
 
     # ---------- preset 列表 ----------
 
@@ -195,10 +245,32 @@ class RotationSimulationDialog(QDialog):
             QMessageBox.critical(self, "推演失败", f"推演过程中发生异常：\n{e}", QMessageBox.Ok)
             return
 
-        self._populate_table(result)
+        # 存完整 events
+        self._events_all = list(result.events or [])
 
-    def _populate_table(self, result) -> None:
-        events = list(result.events or [])
+        # 过滤出“可释放 / 真正生效”的事件
+        visible = [e for e in self._events_all if not self._is_ignored_for_view(e)]
+        self._events_visible = visible
+
+        self._populate_table(self._events_visible, result)
+
+    # ---------- 过滤规则 ----------
+
+    def _is_ignored_for_view(self, ev: SimEvent) -> bool:
+        """
+        判断某个事���是否在视图中隐藏：
+        - 冷却中/未就绪的跳过：SKIPPED_CD / SKIPPED_NOT_READY
+        - 条件不满足的网关：GW_COND_FALSE
+        其它（SUCCESS / GW_END / GW_EXEC_* / GW_JUMP_* / GW_TAKEN / ...）都展示。
+        """
+        o = (ev.outcome or "").strip().upper()
+        if o in ("SKIPPED_CD", "SKIPPED_NOT_READY", "GW_COND_FALSE"):
+            return True
+        return False
+
+    # ---------- 填充表格 + 时间轴 ----------
+
+    def _populate_table(self, events: List[SimEvent], result) -> None:
         self._table.setRowCount(len(events))
 
         for i, ev in enumerate(events):
@@ -230,19 +302,45 @@ class RotationSimulationDialog(QDialog):
 
         self._table.resizeColumnsToContents()
 
-        # 汇总信息
-        total = len(events)
+        # 时间轴视图
+        self._timeline.set_events(events)
+        self._update_zoom_label()
+
+        # 汇总信息：
+        # - 展示的事件数 = len(events)
+        # - 总模拟时长 = result.final_time_ms
+        total_visible = len(events)
         final_ms = int(result.final_time_ms or 0)
         final_s = final_ms / 1000.0
 
         self._lbl_summary.setText(
-            f"推演完成：事件数={total}，模拟时长={final_ms} ms (~{final_s:.3f} s)，"
+            f"推演完成：展示事件数={total_visible}（已过滤跳过/CD/条件不满足），"
+            f"模拟总时长={final_ms} ms (~{final_s:.3f} s)，"
             f"Preset ID={result.preset_id or ''!r}"
         )
 
+    # ---------- 时间轴缩放 ----------
+
+    def _update_zoom_label(self) -> None:
+        ratio = self._timeline.zoom_ratio()
+        pct = int(ratio * 100 + 0.5)
+        self._lbl_zoom.setText(f"{pct:d}%")
+
+    def _on_zoom_in_clicked(self) -> None:
+        self._timeline.zoom_in()
+        self._update_zoom_label()
+
+    def _on_zoom_out_clicked(self) -> None:
+        self._timeline.zoom_out()
+        self._update_zoom_label()
+
+    def _on_zoom_reset_clicked(self) -> None:
+        self._timeline.reset_zoom()
+        self._update_zoom_label()
+
     # ---------- 事件详情 ----------
 
-    def _on_cell_double_clicked(self, row: int, col: int) -> None:  # noqa: ARG002
+    def _show_event_detail(self, row: int) -> None:
         if row < 0 or row >= self._table.rowCount():
             return
 
@@ -262,7 +360,7 @@ class RotationSimulationDialog(QDialog):
         reason = txt(row, 9)
 
         lines = [
-            f"事件序号: {idx}",
+            f"事件序号(原 index): {idx}",
             f"时间: {t_ms} ms (~{t_s} s)",
             f"作用域(scope): {scope}",
             f"模式ID后6: {mode6}",
@@ -280,3 +378,21 @@ class RotationSimulationDialog(QDialog):
             "\n".join(lines),
             QMessageBox.Ok,
         )
+
+    def _on_cell_double_clicked(self, row: int, col: int) -> None:  # noqa: ARG002
+        if row < 0:
+            return
+        # row 是“可见列表”中的索引，直接高亮这行
+        self._timeline.highlight_index(row)
+        self._show_event_detail(row)
+
+    def _on_timeline_event_clicked(self, index: int) -> None:
+        """
+        时间轴点击事件：联动表格选中 & 弹出详情。
+        index 是“可见列表”中的索引。
+        """
+        row = int(index)
+        if row < 0 or row >= self._table.rowCount():
+            return
+        self._table.selectRow(row)
+        self._show_event_detail(row)
