@@ -16,12 +16,12 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QPushButton,
 )
-
 from PySide6.QtCore import QTimer
 
 from core.profiles import ProfileContext
 from core.models.common import clamp_int
 from core.models.point import Point
+
 from core.pick.capture import ScreenCapture
 from core.app.services.app_services import AppServices
 from core.io.json_store import now_iso_utc
@@ -89,7 +89,7 @@ class PointsPage(RecordCrudPage):
             parent=parent,
         )
 
-        # 脏状态订阅（points 部分）——改为传 session
+        # 脏状态订阅（points 部分）
         self.enable_uow_dirty_indicator(part_key="points", session=services.session)
 
         # 右侧表单：Notebook
@@ -222,7 +222,7 @@ class PointsPage(RecordCrudPage):
         vbox.addWidget(self._swatch)
 
         # RGB
-        form_rgb = QFormLayout()           # 无 parent
+        form_rgb = QFormLayout()
         vbox.addLayout(form_rgb)
 
         self.spin_r = QSpinBox(parent)
@@ -238,7 +238,7 @@ class PointsPage(RecordCrudPage):
         form_rgb.addRow("B", self.spin_b)
 
         # 容差 + 采样
-        form_more = QFormLayout()          # 无 parent
+        form_more = QFormLayout()
         vbox.addLayout(form_more)
 
         self.spin_tol = QSpinBox(parent)
@@ -246,6 +246,7 @@ class PointsPage(RecordCrudPage):
         form_more.addRow("容差", self.spin_tol)
 
         self.cmb_sample_mode = QComboBox(parent)
+        self.cmb_sample_mode.setEditable(False)
         self.cmb_sample_mode.addItems(list(SAMPLE_DISPLAY_TO_VALUE.keys()))
         form_more.addRow("采样模式", self.cmb_sample_mode)
 
@@ -257,6 +258,11 @@ class PointsPage(RecordCrudPage):
         btn_pick = QPushButton("从屏幕取色（按确认热键确认）", parent)
         btn_pick.clicked.connect(self.request_pick_current)
         vbox.addWidget(btn_pick)
+
+        # 新增：测试按钮
+        btn_test = QPushButton("测试当前点位是否匹配", parent)
+        btn_test.clicked.connect(self.test_current_point)
+        vbox.addWidget(btn_test)
 
         vbox.addStretch(1)
 
@@ -397,7 +403,6 @@ class PointsPage(RecordCrudPage):
         self.cmb_monitor.currentTextChanged.connect(on_any_changed)
         self.spin_x.valueChanged.connect(on_any_changed)
         self.spin_y.valueChanged.connect(on_any_changed)
-        # captured_at 改变通常由按钮触发，也算一次变更
         self.txt_captured_at.textChanged.connect(on_any_changed)
 
         # color & sample
@@ -428,6 +433,8 @@ class PointsPage(RecordCrudPage):
             self._apply_form_to_current(auto_save=False)
         except Exception:
             log.exception("PointsPage.flush_to_model: _apply_form_to_current failed")
+
+    # ---------- 取色 / 测试 ----------
 
     def request_pick_current(self) -> None:
         """
@@ -491,3 +498,69 @@ class PointsPage(RecordCrudPage):
             monitor=monitor,
             on_confirm=_on_confirm,
         )
+
+    def test_current_point(self) -> None:
+        """
+        基于当前点位配置，从屏幕采样一次颜色，并与配置的颜色+容差比较。
+        """
+        if not self.current_id:
+            self._notify.error("请先选择一个点位")
+            return
+
+        if not self._apply_form_to_current(auto_save=False):
+            return
+
+        pid = self.current_id
+        p = self._find_point(pid)
+        if p is None:
+            self._notify.error("当前点位不存在")
+            return
+
+        from core.pick.capture import SampleSpec
+
+        sample = SampleSpec(
+            mode=p.sample.mode or "single",
+            radius=int(getattr(p.sample, "radius", 0) or 0),
+        )
+        mon = p.monitor or "primary"
+
+        try:
+            r, g, b = self._cap.get_rgb_scoped_abs(
+                x_abs=int(p.vx),
+                y_abs=int(p.vy),
+                sample=sample,
+                monitor_key=mon,
+                require_inside=False,
+            )
+        except Exception as e:
+            self._notify.error("测试取色失败", detail=str(e))
+            return
+
+        exp_r, exp_g, exp_b = int(p.color.r), int(p.color.g), int(p.color.b)
+        tol = int(getattr(p, "tolerance", 0) or 0)
+
+        diff_r = abs(r - exp_r)
+        diff_g = abs(g - exp_g)
+        diff_b = abs(b - exp_b)
+        max_diff = max(diff_r, diff_g, diff_b)
+
+        measured_hex = rgb_to_hex(r, g, b)
+        expected_hex = rgb_to_hex(exp_r, exp_g, exp_b)
+
+        try:
+            self._swatch.set_rgb(r, g, b)
+        except Exception:
+            pass
+
+        if max_diff <= tol:
+            self._notify.info(
+                f"取色测试通过：当前 {measured_hex}，期望 {expected_hex}，最大通道差 {max_diff} ≤ 容差 {tol}"
+            )
+        else:
+            self._notify.error(
+                "取色测试未通过",
+                detail=(
+                    f"当前 {measured_hex}，期望 {expected_hex}，"
+                    f"最大通道差 {max_diff} > 容差 {tol}"
+                ),
+            )

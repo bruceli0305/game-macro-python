@@ -1,7 +1,7 @@
 # qtui/pages/skills_page.py
 from __future__ import annotations
 
-from typing import Optional, List
+from typing import Optional
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QTabWidget,
     QPushButton,
+    QDoubleSpinBox,
 )
 from PySide6.QtCore import QTimer
 
@@ -86,11 +87,12 @@ class SkillsPage(RecordCrudPage):
                 ColumnDef("hex", "颜色", 80, "center"),
                 ColumnDef("tol", "容差", 60, "center"),
                 ColumnDef("readbar", "读条(ms)", 80, "center"),
+                ColumnDef("cd", "冷却(s)", 80, "center"),  # 新增：冷却时间
             ],
             parent=parent,
         )
 
-        # 脏状态订阅（skills 部分）——改为传 session
+        # 脏状态订阅（skills 部分）
         self.enable_uow_dirty_indicator(part_key="skills", session=services.session)
 
         # 右侧表单：Notebook（TabWidget）
@@ -129,7 +131,6 @@ class SkillsPage(RecordCrudPage):
         Profile 切换时调用，刷新内部 ctx 和列表。
         """
         self._ctx = ctx
-        # 取消防抖定时
         try:
             self._apply_timer.stop()
         except Exception:
@@ -183,6 +184,9 @@ class SkillsPage(RecordCrudPage):
 
         pos = f"({rx},{ry})"
         hx = rgb_to_hex(s.pixel.color.r, s.pixel.color.g, s.pixel.color.b)
+
+        cooldown_s = f"{s.cooldown_ms / 1000.0:.2f}" if s.cooldown_ms else ""
+
         return (
             "是" if s.enabled else "否",
             s.name,
@@ -192,6 +196,7 @@ class SkillsPage(RecordCrudPage):
             hx,
             str(s.pixel.tolerance),
             str(s.cast.readbar_ms),
+            cooldown_s,
         )
 
     # ---------- 表单 UI ----------
@@ -217,11 +222,39 @@ class SkillsPage(RecordCrudPage):
         self.spin_readbar.setSingleStep(10)
         layout.addRow("读条时间(ms)", self.spin_readbar)
 
+        # -------- 通用游戏元信息 --------
+        layout.addRow(QLabel("--- 游戏元数据 (可选) ---", parent), QLabel("", parent))
+
+        self.spin_game_id = QSpinBox(parent)
+        self.spin_game_id.setRange(0, 2**31 - 1)
+        self.spin_game_id.setSingleStep(1)
+        layout.addRow("游戏技能ID(game_id)", self.spin_game_id)
+
+        self.spin_cooldown_s = QDoubleSpinBox(parent)
+        self.spin_cooldown_s.setRange(0.0, 600.0)
+        self.spin_cooldown_s.setSingleStep(0.25)
+        self.spin_cooldown_s.setDecimals(2)
+        layout.addRow("冷却时间(s)", self.spin_cooldown_s)
+
+        self.spin_radius = QSpinBox(parent)
+        self.spin_radius.setRange(0, 100000)
+        self.spin_radius.setSingleStep(10)
+        layout.addRow("技能半径", self.spin_radius)
+
+        self.txt_icon_url = QLineEdit(parent)
+        self.txt_icon_url.setPlaceholderText("技能图标 URL，可选")
+        layout.addRow("图标 URL", self.txt_icon_url)
+
+        self.txt_game_desc = QTextEdit(parent)
+        self.txt_game_desc.setPlaceholderText("官方技能描述（可选，仅用于展示）")
+        self.txt_game_desc.setFixedHeight(60)
+        layout.addRow("游戏描述", self.txt_game_desc)
+
     def _build_tab_pixel(self, parent: QWidget) -> None:
         vbox = QVBoxLayout(parent)
 
         # 第一组：屏幕 + 坐标
-        form_head = QFormLayout()          # 不要传 parent
+        form_head = QFormLayout()
         vbox.addLayout(form_head)
 
         self.cmb_monitor = QComboBox(parent)
@@ -243,7 +276,7 @@ class SkillsPage(RecordCrudPage):
         vbox.addWidget(self._swatch)
 
         # 第二组：RGB
-        form_rgb = QFormLayout()           # 无 parent，再 addLayout
+        form_rgb = QFormLayout()
         vbox.addLayout(form_rgb)
 
         self.spin_r = QSpinBox(parent)
@@ -259,7 +292,7 @@ class SkillsPage(RecordCrudPage):
         form_rgb.addRow("B", self.spin_b)
 
         # 第三组：容差 + 采样模式/半径
-        form_more = QFormLayout()          # 无 parent，再 addLayout
+        form_more = QFormLayout()
         vbox.addLayout(form_more)
 
         self.spin_tol = QSpinBox(parent)
@@ -278,6 +311,11 @@ class SkillsPage(RecordCrudPage):
         btn_pick = QPushButton("从屏幕取色（按确认热键确认）", parent)
         btn_pick.clicked.connect(self.request_pick_current)
         vbox.addWidget(btn_pick)
+
+        # 新增：测试按钮
+        btn_test = QPushButton("测试当前像素是否匹配", parent)
+        btn_test.clicked.connect(self.test_current_pixel)
+        vbox.addWidget(btn_test)
 
         vbox.addStretch(1)
 
@@ -307,6 +345,14 @@ class SkillsPage(RecordCrudPage):
             self.txt_trigger_key.setText("")
             self.spin_readbar.setValue(0)
 
+            # 新增字段
+            self.spin_game_id.setValue(0)
+            self.spin_cooldown_s.setValue(0.0)
+            self.spin_radius.setValue(0)
+            self.txt_icon_url.setText("")
+            self.txt_game_desc.setPlainText("")
+
+            # 像素相关
             self.cmb_monitor.setCurrentText("primary")
             self.spin_x.setValue(0)
             self.spin_y.setValue(0)
@@ -335,15 +381,28 @@ class SkillsPage(RecordCrudPage):
 
         self._building_form = True
         try:
+            # 基本
             self.txt_id.setText(s.id)
             self.txt_name.setText(s.name)
             self.chk_enabled.setChecked(bool(s.enabled))
             self.txt_trigger_key.setText(s.trigger.key)
             self.spin_readbar.setValue(int(s.cast.readbar_ms))
 
+            # 游戏元信息
+            self.spin_game_id.setValue(int(s.game_id or 0))
+            self.spin_cooldown_s.setValue((s.cooldown_ms or 0) / 1000.0)
+            self.spin_radius.setValue(int(s.radius or 0))
+            self.txt_icon_url.setText(s.icon_url or "")
+            self.txt_game_desc.setPlainText(s.game_desc or "")
+
+            # 像素
             self.cmb_monitor.setCurrentText(s.pixel.monitor or "primary")
             try:
-                rx, ry = self._cap.abs_to_rel(int(s.pixel.vx), int(s.pixel.vy), self.cmb_monitor.currentText())
+                rx, ry = self._cap.abs_to_rel(
+                    int(s.pixel.vx),
+                    int(s.pixel.vy),
+                    self.cmb_monitor.currentText(),
+                )
             except Exception:
                 rx, ry = 0, 0
             self.spin_x.setValue(int(rx))
@@ -359,6 +418,7 @@ class SkillsPage(RecordCrudPage):
             self.cmb_sample_mode.setCurrentText(disp_mode)
             self.spin_sample_radius.setValue(int(s.pixel.sample.radius))
 
+            # 备注
             self.txt_note.setPlainText(s.note or "")
         finally:
             self._building_form = False
@@ -396,6 +456,12 @@ class SkillsPage(RecordCrudPage):
             sample_mode=SAMPLE_DISPLAY_TO_VALUE.get(self.cmb_sample_mode.currentText(), "single"),
             sample_radius=int(self.spin_sample_radius.value()),
             note=self.txt_note.toPlainText().rstrip("\n"),
+
+            game_id=int(self.spin_game_id.value()),
+            game_desc=self.txt_game_desc.toPlainText(),
+            icon_url=self.txt_icon_url.text(),
+            cooldown_ms=int(self.spin_cooldown_s.value() * 1000),
+            radius=int(self.spin_radius.value()),
         )
 
         try:
@@ -408,7 +474,7 @@ class SkillsPage(RecordCrudPage):
 
         return True
 
-    # ---------- 监听表单变化，防抖应用 ----------
+    # ---------- 表单变更监听 ----------
 
     def _install_dirty_watchers(self) -> None:
         def on_any_changed(*_args) -> None:
@@ -419,11 +485,19 @@ class SkillsPage(RecordCrudPage):
             except Exception:
                 log.debug("SkillsPage._install_dirty_watchers: failed to update swatch", exc_info=True)
             self._apply_timer.start(200)
+
         # basic
         self.txt_name.textChanged.connect(on_any_changed)
         self.chk_enabled.toggled.connect(on_any_changed)
         self.txt_trigger_key.textChanged.connect(on_any_changed)
         self.spin_readbar.valueChanged.connect(on_any_changed)
+
+        # 游戏元信息
+        self.spin_game_id.valueChanged.connect(on_any_changed)
+        self.spin_cooldown_s.valueChanged.connect(on_any_changed)
+        self.spin_radius.valueChanged.connect(on_any_changed)
+        self.txt_icon_url.textChanged.connect(on_any_changed)
+        self.txt_game_desc.textChanged.connect(on_any_changed)
 
         # pixel
         self.cmb_monitor.currentTextChanged.connect(on_any_changed)
@@ -449,12 +523,14 @@ class SkillsPage(RecordCrudPage):
 
     def flush_to_model(self) -> None:
         """
-        供未来 UnsavedGuard 使用：把表单状态写回模型（不自动保存）。
+        供 UnsavedGuard 使用：把表单状态写回模型（不自动保存）。
         """
         try:
             self._apply_form_to_current(auto_save=False)
         except Exception:
             log.exception("SkillsPage.flush_to_model: _apply_form_to_current failed")
+
+    # ---------- 取色 / 测试 ----------
 
     def request_pick_current(self) -> None:
         """
@@ -467,7 +543,6 @@ class SkillsPage(RecordCrudPage):
             self._notify.error("请先选择一个技能")
             return
 
-        # flush form -> model
         if not self._apply_form_to_current(auto_save=False):
             return
 
@@ -519,3 +594,69 @@ class SkillsPage(RecordCrudPage):
             monitor=monitor,
             on_confirm=_on_confirm,
         )
+
+    def test_current_pixel(self) -> None:
+        """
+        基于当前技能像素配置，从屏幕采样一次颜色，并与配置的颜色+容差比较。
+        """
+        if not self.current_id:
+            self._notify.error("请先选择一个技能")
+            return
+
+        if not self._apply_form_to_current(auto_save=False):
+            return
+
+        sid = self.current_id
+        s = self._find_skill(sid)
+        if s is None:
+            self._notify.error("当前技能不存在")
+            return
+
+        from core.pick.capture import SampleSpec
+
+        sample = SampleSpec(
+            mode=s.pixel.sample.mode or "single",
+            radius=int(getattr(s.pixel.sample, "radius", 0) or 0),
+        )
+        mon = s.pixel.monitor or "primary"
+
+        try:
+            r, g, b = self._cap.get_rgb_scoped_abs(
+                x_abs=int(s.pixel.vx),
+                y_abs=int(s.pixel.vy),
+                sample=sample,
+                monitor_key=mon,
+                require_inside=False,
+            )
+        except Exception as e:
+            self._notify.error("测试取色失败", detail=str(e))
+            return
+
+        exp_r, exp_g, exp_b = int(s.pixel.color.r), int(s.pixel.color.g), int(s.pixel.color.b)
+        tol = int(s.pixel.tolerance)
+
+        diff_r = abs(r - exp_r)
+        diff_g = abs(g - exp_g)
+        diff_b = abs(b - exp_b)
+        max_diff = max(diff_r, diff_g, diff_b)
+
+        measured_hex = rgb_to_hex(r, g, b)
+        expected_hex = rgb_to_hex(exp_r, exp_g, exp_b)
+
+        try:
+            self._swatch.set_rgb(r, g, b)
+        except Exception:
+            pass
+
+        if max_diff <= tol:
+            self._notify.info(
+                f"取色测试通过：当前 {measured_hex}，期望 {expected_hex}，最大通道差 {max_diff} ≤ 容差 {tol}"
+            )
+        else:
+            self._notify.error(
+                "取色测试未通过",
+                detail=(
+                    f"当前 {measured_hex}，期望 {expected_hex}，"
+                    f"最大通道差 {max_diff} > 容差 {tol}"
+                ),
+            )

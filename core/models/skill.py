@@ -111,7 +111,7 @@ class TriggerConfig:
 @dataclass
 class CastConfig:
     readbar_ms: int = 0
-    cooldown_ms: int = 0  # 预留
+    cooldown_ms: int = 0  # 预留（与下面的 game 冷却不同，这里是本工具内部用）
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "CastConfig":
@@ -127,13 +127,38 @@ class CastConfig:
 
 @dataclass
 class Skill:
-    id: str = ""          # snowflake id string
+    """
+    单个技能配置：
+
+    - id        : 本工具内部的 snowflake id
+    - name      : 技能名称（你在本工具里看到/编辑的名字）
+    - enabled   : 是否启用
+    - trigger   : 触发键配置
+    - cast      : 读条等时间参数
+    - pixel     : 像素检测配置
+    - note      : 备注（用户自定义）
+
+    新增的一般游戏元数据（可从 GW2 技能 JSON 导入）：
+    - game_id      : 游戏中的技能 ID（例如 5752），便于外部对照
+    - game_desc    : 官方技能描述
+    - icon_url     : 技能图标 URL（后续可用于列表/详情显示）
+    - cooldown_ms  : 冷却时间（毫秒），从 JSON 的 Recharge(s) 转换而来
+    - radius       : 技能半径（如有），从 Distance fact 中提取
+    """
+    id: str = ""          # snowflake id string（本工具内部）
     name: str = ""
     enabled: bool = True
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
     cast: CastConfig = field(default_factory=CastConfig)
     pixel: PixelSpec = field(default_factory=PixelSpec)
     note: str = ""
+
+    # 通用游戏元信息
+    game_id: int = 0
+    game_desc: str = ""
+    icon_url: str = ""
+    cooldown_ms: int = 0
+    radius: int = 0
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Skill":
@@ -146,6 +171,12 @@ class Skill:
             cast=CastConfig.from_dict(d.get("cast", {}) or {}),
             pixel=PixelSpec.from_dict(d.get("pixel", {}) or {}),
             note=as_str(d.get("note", "")),
+
+            game_id=as_int(d.get("game_id", 0), 0),
+            game_desc=as_str(d.get("game_desc", "")),
+            icon_url=as_str(d.get("icon_url", "")),
+            cooldown_ms=as_int(d.get("cooldown_ms", 0), 0),
+            radius=as_int(d.get("radius", 0), 0),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -157,6 +188,12 @@ class Skill:
             "cast": self.cast.to_dict(),
             "pixel": self.pixel.to_dict(),
             "note": self.note,
+
+            "game_id": int(self.game_id),
+            "game_desc": self.game_desc,
+            "icon_url": self.icon_url,
+            "cooldown_ms": int(self.cooldown_ms),
+            "radius": int(self.radius),
         }
 
 

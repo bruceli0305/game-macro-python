@@ -11,11 +11,13 @@ from core.models.skill import Skill, ColorRGB
 
 @dataclass(frozen=True)
 class SkillFormPatch:
+    # 基本信息
     name: str
     enabled: bool
     trigger_key: str
     readbar_ms: int
 
+    # 像素检测配置
     monitor: str
     vx: int
     vy: int
@@ -28,7 +30,16 @@ class SkillFormPatch:
     sample_mode: str
     sample_radius: int
 
+    # 备注
     note: str
+
+    # ---- 新增：通用游戏字段（从 GW2 等游戏 JSON 导入） ----
+    # 全都提供默认值，保证旧代码在未传入这些字段时也能正常工作。
+    game_id: int = 0          # 游戏中的技能 ID，例如 5752
+    game_desc: str = ""       # 官方技能描述
+    icon_url: str = ""        # 技能图标 URL
+    cooldown_ms: int = 0      # 冷却时间（毫秒）
+    radius: int = 0           # 技能半径（如有）
 
 
 class SkillsService:
@@ -69,13 +80,16 @@ class SkillsService:
         self._session.mark_dirty("skills")
 
     def _apply_patch_to_skill(self, s: Skill, patch: SkillFormPatch) -> None:
+        # 基本信息
         s.name = (patch.name or "").strip()
         s.enabled = bool(patch.enabled)
 
+        # 触发键 / 读条
         s.trigger.type = "key"
         s.trigger.key = (patch.trigger_key or "").strip()
         s.cast.readbar_ms = clamp_int(int(patch.readbar_ms), 0, 10**9)
 
+        # 像素配置
         s.pixel.monitor = (patch.monitor or "primary").strip() or "primary"
         s.pixel.vx = clamp_int(int(patch.vx), -10**9, 10**9)
         s.pixel.vy = clamp_int(int(patch.vy), -10**9, 10**9)
@@ -89,7 +103,30 @@ class SkillsService:
         s.pixel.sample.mode = (patch.sample_mode or "single").strip() or "single"
         s.pixel.sample.radius = clamp_int(int(patch.sample_radius), 0, 50)
 
+        # 备注
         s.note = patch.note or ""
+
+        # ---- 通用游戏字段 ----
+        # 这些字段用于在 UI 中展示/记录来自游戏本身的元信息（ID/描述/图标/冷却/半径）。
+        try:
+            s.game_id = int(patch.game_id or 0)
+        except Exception:
+            s.game_id = 0
+
+        s.game_desc = (patch.game_desc or "").strip()
+        s.icon_url = (patch.icon_url or "").strip()
+
+        try:
+            cd = int(patch.cooldown_ms or 0)
+        except Exception:
+            cd = 0
+        s.cooldown_ms = clamp_int(cd, 0, 10**9)
+
+        try:
+            rad = int(patch.radius or 0)
+        except Exception:
+            rad = 0
+        s.radius = clamp_int(rad, 0, 10**9)
 
     def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
         s = self.find(sid)
