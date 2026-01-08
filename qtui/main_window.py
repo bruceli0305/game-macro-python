@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QCloseEvent
 
-import logging  # 新增
+import logging
 
 from core.app.services.app_services import AppServices
 from core.app.services.profile_service import ProfileService
@@ -39,7 +39,10 @@ from rotation_editor.ui.editor.main_page import RotationEditorPage
 from qtui.exec_hotkey import ExecHotkeyController
 from qtui.quick_exec_panel import QuickExecPanel
 
-log = logging.getLogger(__name__)  # 新增
+from qtui.extensions.gw2_skill_import_dialog import Gw2SkillImportDialog  # 新增：GW2 插件对话框
+
+log = logging.getLogger(__name__)
+
 
 class MainWindow(QMainWindow):
     """
@@ -52,6 +55,7 @@ class MainWindow(QMainWindow):
     - 取色：QtPickCoordinator + 预览窗，供 SkillsPage / PointsPage 使用
     - 几何：WindowStateController 负责记忆窗口大小/位置
     - 未保存变更：UnsavedChangesGuard 负责提示保存/放弃/取消
+    - 插件 / 扩展：如 GW2 技能导入
     """
 
     def __init__(
@@ -119,6 +123,7 @@ class MainWindow(QMainWindow):
         # 执行启停热键控制器（初始化为 None，稍后在 _setup_central_widget 后创建）
         self._exec_hotkey: Optional[ExecHotkeyController] = None
         self._quick_panel: Optional[QuickExecPanel] = None
+
         # 脏状态标题“*”
         try:
             self.services.session.subscribe_dirty(self._on_store_dirty)
@@ -166,7 +171,7 @@ class MainWindow(QMainWindow):
         from qtui.icons import resource_path
 
         candidates = [
-            resource_path("assets/icons/app.ico"),        # 新增
+            resource_path("assets/icons/app.ico"),
             resource_path("assets/icons/profile.svg"),
             resource_path("assets/icons/profile.png"),
         ]
@@ -235,7 +240,7 @@ class MainWindow(QMainWindow):
             ctx=self._ctx,
             session=self.services.session,
             notify=self.notify,
-            dispatcher=self.dispatcher,  # 新增：将 QtDispatcher 作为 Scheduler 传给执行引擎
+            dispatcher=self.dispatcher,  # 将 QtDispatcher 作为 Scheduler 传给执行引擎
             parent=self,
         )
 
@@ -248,6 +253,7 @@ class MainWindow(QMainWindow):
         # 默认显示基础配置
         self._stack.setCurrentIndex(self._page_indices["base"])
         self._nav.set_active_page("base")
+
         # 快捷执行面板：初始创建并隐藏
         try:
             # 不再把 MainWindow 作为 parent，让它成为独立顶层窗口，
@@ -256,17 +262,18 @@ class MainWindow(QMainWindow):
                 ctx=self._ctx,
                 engine_host=self._page_rotation_editor,
                 open_editor_cb=self._open_rotation_editor,
-                parent=None,  # 关键改动
+                parent=None,
             )
             self._quick_panel.hide()
         except Exception:
             self._quick_panel = None
-        
+
         # 信号连接
         self._nav.page_selected.connect(self._on_page_selected)
         self._nav.profile_selected.connect(self._on_profile_selected)
         self._nav.profile_action.connect(self._on_profile_action)
         self._nav.quick_exec_requested.connect(self._on_quick_exec_requested)
+        self._nav.plugin_action.connect(self._on_plugin_action)  # 新增：插件入口
 
         self.setCentralWidget(central)
 
@@ -339,6 +346,16 @@ class MainWindow(QMainWindow):
         由 NavPanel 触发的新建/复制/重命名/删除。
         """
         self.profile_controller.on_action(action, self._ctx)
+
+    def _on_plugin_action(self, action: str) -> None:
+        """
+        来自 NavPanel 的插件/扩展操作。
+        """
+        action = (action or "").strip()
+        if action == "gw2_skill_import":
+            self._open_gw2_skill_import_dialog()
+        else:
+            self.notify.error(f"未知插件操作: {action}")
 
     # ---------- 应用新的 ProfileContext 到 UI ----------
 
@@ -570,8 +587,6 @@ class MainWindow(QMainWindow):
 
     # ---------- 从方案页打开循环编辑器 ----------
 
-    # ---------- 从方案页打开循环编辑器 ----------
-
     def _open_rotation_editor(self, preset_id: str) -> None:
         """
         由 RotationPresetsPage 调用：
@@ -607,6 +622,26 @@ class MainWindow(QMainWindow):
             self.status.set_page("循环编辑器")
             self.status.status_msg("ready", ttl_ms=1000)
 
+    # ---------- GW2 技能导入对话框 ----------
+
+    # ---------- GW2 技能导入对话框 ----------
+
+    def _open_gw2_skill_import_dialog(self) -> None:
+        """
+        打开 GW2 技能导入插件窗口。
+        导入完成后会刷新技能配置页的列表。
+        """
+        try:
+            dlg = Gw2SkillImportDialog(
+                parent=self,
+                ctx=self._ctx,
+                services=self.services,
+                on_imported=self._page_skills.refresh_tree,  # 导入后刷新列表
+            )
+            dlg.exec()
+        except Exception as e:
+            log.exception("failed to open Gw2SkillImportDialog")
+            self.notify.error("无法打开 GW2 技能导入窗口", detail=str(e))
     # ---------- 关闭事件：先守卫未保存变更，再停止取色并保存几何 ----------
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -687,7 +722,7 @@ class MainWindow(QMainWindow):
                     ctx=self._ctx,
                     engine_host=self._page_rotation_editor,
                     open_editor_cb=self._open_rotation_editor,
-                    parent=None,  # 关键改动
+                    parent=None,
                 )
             except Exception:
                 self.notify.error("无法创建快捷执行面板")

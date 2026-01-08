@@ -30,18 +30,24 @@ class NavPanel(QWidget):
         - 技能配置
         - 取色点位配置
         - 循环/轨道方案（Rotation presets）
+    - 执行工具：
+        - 快捷执行面板
+    - 插件 / 扩展：
+        - GW2 技能导入（插件示例）
 
     信号：
     - profile_selected(str)      : 用户从下拉框选择了某个 profile
     - profile_action(str)        : "new" | "copy" | "rename" | "delete"
     - page_selected(str)         : "base" | "skills" | "points" | "rotation"
     - quick_exec_requested()     : 用户点击“快捷执行面板”按钮
+    - plugin_action(str)         : 插件相关操作，例如 "gw2_skill_import"
     """
 
     profile_selected = Signal(str)
     profile_action = Signal(str)
     page_selected = Signal(str)
     quick_exec_requested = Signal()
+    plugin_action = Signal(str)   # 新增：插件操作
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -146,20 +152,32 @@ class NavPanel(QWidget):
         self._btn_rotation.clicked.connect(lambda: self.page_selected.emit("rotation"))
         layout.addWidget(self._btn_rotation)
 
-        # -------- 工具组：快捷执行 --------
+        # -------- 工具组：执行 --------
         add_group_header("执行")
 
         self._btn_quick_exec = QPushButton("快捷执行面板", self)
-        # 复用 rotation 图标，后续可替换为专门的“play”图标
+        # 这里复用 rotation 图标，后续可以换成一个 play 图标
         self._btn_quick_exec.setIcon(icon_rotation)
         self._btn_quick_exec.setCheckable(False)
         self._btn_quick_exec.clicked.connect(self.quick_exec_requested.emit)
         layout.addWidget(self._btn_quick_exec)
 
+        # -------- 插件 / 扩展 组 --------
+        add_group_header("插件 / 扩展")
+
+        icon_plugin = load_icon("settings", style, QStyle.StandardPixmap.SP_DesktopIcon)
+        self._btn_gw2_import = QPushButton("GW2 技能导入", self)
+        self._btn_gw2_import.setIcon(icon_plugin)
+        self._btn_gw2_import.setCheckable(False)
+        self._btn_gw2_import.clicked.connect(
+            lambda: self.plugin_action.emit("gw2_skill_import")
+        )
+        layout.addWidget(self._btn_gw2_import)
+
         layout.addStretch(1)
 
         # 底部提示
-        hint = QLabel("Phase 1：配置管理", self)
+        hint = QLabel("Phase 1：配置管理 + 插件扩展", self)
         hint.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(hint)
 

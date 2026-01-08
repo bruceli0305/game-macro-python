@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QDoubleSpinBox,
 )
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 
 from core.profiles import ProfileContext
 from core.models.common import clamp_int
@@ -203,6 +203,10 @@ class SkillsPage(RecordCrudPage):
 
     def _build_tab_basic(self, parent: QWidget) -> None:
         layout = QFormLayout(parent)
+        # 收紧整体行距，靠上对齐
+        layout.setVerticalSpacing(6)
+        layout.setFormAlignment(Qt.AlignTop)
+        layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.txt_id = QLineEdit(parent)
         self.txt_id.setReadOnly(True)
@@ -212,6 +216,7 @@ class SkillsPage(RecordCrudPage):
         layout.addRow("名称", self.txt_name)
 
         self.chk_enabled = QCheckBox("启用", parent)
+        # 没有 label 的行可以传空字符串，让控件紧挨上面
         layout.addRow("", self.chk_enabled)
 
         self.txt_trigger_key = QLineEdit(parent)
@@ -222,34 +227,41 @@ class SkillsPage(RecordCrudPage):
         self.spin_readbar.setSingleStep(10)
         layout.addRow("读条时间(ms)", self.spin_readbar)
 
-        # -------- 通用游戏元信息 --------
-        layout.addRow(QLabel("--- 游戏元数据 (可选) ---", parent), QLabel("", parent))
+        # -------- 游戏元数据标题行（单列控件，避免大块空白） --------
+        header = QLabel("--- 游戏元数据 (可选) ---", parent)
+        header.setStyleSheet("color: #aaaaaa;")
+        # addRow(QWidget) 的重载，只占一行，下面紧跟字段
+        layout.addRow(header)
 
+        # 游戏技能 ID
         self.spin_game_id = QSpinBox(parent)
         self.spin_game_id.setRange(0, 2**31 - 1)
         self.spin_game_id.setSingleStep(1)
         layout.addRow("游戏技能ID(game_id)", self.spin_game_id)
 
+        # 冷却时间（秒）
         self.spin_cooldown_s = QDoubleSpinBox(parent)
         self.spin_cooldown_s.setRange(0.0, 600.0)
         self.spin_cooldown_s.setSingleStep(0.25)
         self.spin_cooldown_s.setDecimals(2)
         layout.addRow("冷却时间(s)", self.spin_cooldown_s)
 
+        # 技能半径
         self.spin_radius = QSpinBox(parent)
         self.spin_radius.setRange(0, 100000)
         self.spin_radius.setSingleStep(10)
         layout.addRow("技能半径", self.spin_radius)
 
+        # 图标 URL
         self.txt_icon_url = QLineEdit(parent)
         self.txt_icon_url.setPlaceholderText("技能图标 URL，可选")
         layout.addRow("图标 URL", self.txt_icon_url)
 
+        # 游戏描述
         self.txt_game_desc = QTextEdit(parent)
         self.txt_game_desc.setPlaceholderText("官方技能描述（可选，仅用于展示）")
         self.txt_game_desc.setFixedHeight(60)
         layout.addRow("游戏描述", self.txt_game_desc)
-
     def _build_tab_pixel(self, parent: QWidget) -> None:
         vbox = QVBoxLayout(parent)
 
