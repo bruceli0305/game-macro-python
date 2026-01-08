@@ -33,21 +33,22 @@ class NavPanel(QWidget):
     - 执行工具：
         - 快捷执行面板
     - 插件 / 扩展：
-        - GW2 技能导入（插件示例）
+        - GW2 技能导入
+        - 循环推演（模拟）
 
     信号：
     - profile_selected(str)      : 用户从下拉框选择了某个 profile
     - profile_action(str)        : "new" | "copy" | "rename" | "delete"
     - page_selected(str)         : "base" | "skills" | "points" | "rotation"
     - quick_exec_requested()     : 用户点击“快捷执行面板”按钮
-    - plugin_action(str)         : 插件相关操作，例如 "gw2_skill_import"
+    - plugin_action(str)         : 插件相关操作，例如 "gw2_skill_import" / "rotation_sim"
     """
 
     profile_selected = Signal(str)
     profile_action = Signal(str)
     page_selected = Signal(str)
     quick_exec_requested = Signal()
-    plugin_action = Signal(str)   # 新增：插件操作
+    plugin_action = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -166,6 +167,7 @@ class NavPanel(QWidget):
         add_group_header("插件 / 扩展")
 
         icon_plugin = load_icon("settings", style, QStyle.StandardPixmap.SP_DesktopIcon)
+
         self._btn_gw2_import = QPushButton("GW2 技能导入", self)
         self._btn_gw2_import.setIcon(icon_plugin)
         self._btn_gw2_import.setCheckable(False)
@@ -173,6 +175,15 @@ class NavPanel(QWidget):
             lambda: self.plugin_action.emit("gw2_skill_import")
         )
         layout.addWidget(self._btn_gw2_import)
+
+        # 新增：循环推演插件按钮
+        self._btn_rotation_sim = QPushButton("循环推演 (模拟)", self)
+        self._btn_rotation_sim.setIcon(icon_plugin)
+        self._btn_rotation_sim.setCheckable(False)
+        self._btn_rotation_sim.clicked.connect(
+            lambda: self.plugin_action.emit("rotation_sim")
+        )
+        layout.addWidget(self._btn_rotation_sim)
 
         layout.addStretch(1)
 

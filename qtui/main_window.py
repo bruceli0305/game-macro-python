@@ -40,6 +40,7 @@ from qtui.exec_hotkey import ExecHotkeyController
 from qtui.quick_exec_panel import QuickExecPanel
 
 from qtui.extensions.gw2_skill_import_dialog import Gw2SkillImportDialog  # 新增：GW2 插件对话框
+from qtui.extensions.rotation_simulation_dialog import RotationSimulationDialog  # 新增：循环推演对话框
 
 log = logging.getLogger(__name__)
 
@@ -354,9 +355,10 @@ class MainWindow(QMainWindow):
         action = (action or "").strip()
         if action == "gw2_skill_import":
             self._open_gw2_skill_import_dialog()
+        elif action == "rotation_sim":
+            self._open_rotation_sim_dialog()
         else:
             self.notify.error(f"未知插件操作: {action}")
-
     # ---------- 应用新的 ProfileContext 到 UI ----------
 
     def _apply_ctx_to_ui(self, ctx: ProfileContext) -> None:
@@ -624,8 +626,6 @@ class MainWindow(QMainWindow):
 
     # ---------- GW2 技能导入对话框 ----------
 
-    # ---------- GW2 技能导入对话框 ----------
-
     def _open_gw2_skill_import_dialog(self) -> None:
         """
         打开 GW2 技能导入插件窗口。
@@ -642,6 +642,32 @@ class MainWindow(QMainWindow):
         except Exception as e:
             log.exception("failed to open Gw2SkillImportDialog")
             self.notify.error("无法打开 GW2 技能导入窗口", detail=str(e))
+    
+    def _open_rotation_sim_dialog(self) -> None:
+        """
+        打开循环推演结果查看器窗口。
+
+        - 使用当前 ProfileContext 和 ProfileSession 构造 RotationService；
+        - 仅做只读推演，不修改任何 rotations 配置。
+        """
+        from rotation_editor.core.services.rotation_service import RotationService
+
+        try:
+            svc = RotationService(
+                session=self.services.session,
+                notify_dirty=lambda: None,
+                notify_error=lambda m, d="": self.notify.error(m, detail=d),
+            )
+            dlg = RotationSimulationDialog(
+                parent=self,
+                ctx=self._ctx,
+                rotation_service=svc,
+            )
+            dlg.exec()
+        except Exception as e:
+            log.exception("failed to open RotationSimulationDialog")
+            self.notify.error("无法打开循环推演窗口", detail=str(e))
+
     # ---------- 关闭事件：先守卫未保存变更，再停止取色并保存几何 ----------
 
     def closeEvent(self, event: QCloseEvent) -> None:
