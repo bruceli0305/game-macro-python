@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QPushButton,
     QDoubleSpinBox,
+    QScrollArea,
+    QGroupBox,
 )
 from PySide6.QtCore import QTimer, Qt
 
@@ -227,6 +229,12 @@ class SkillsPage(RecordCrudPage):
         self.spin_readbar.setSingleStep(10)
         layout.addRow("读条时间(ms)", self.spin_readbar)
 
+        # 技能次数（多发技能用）
+        self.spin_shots_per_cycle = QSpinBox(parent)
+        self.spin_shots_per_cycle.setRange(1, 1000)
+        self.spin_shots_per_cycle.setSingleStep(1)
+        layout.addRow("技能次数(shots_per_cycle)", self.spin_shots_per_cycle)
+
         # -------- 游戏元数据标题行（单列控件，避免大块空白） --------
         header = QLabel("--- 游戏元数据 (可选) ---", parent)
         header.setStyleSheet("color: #aaaaaa;")
@@ -262,74 +270,164 @@ class SkillsPage(RecordCrudPage):
         self.txt_game_desc.setPlaceholderText("官方技能描述（可选，仅用于展示）")
         self.txt_game_desc.setFixedHeight(60)
         layout.addRow("游戏描述", self.txt_game_desc)
+
     def _build_tab_pixel(self, parent: QWidget) -> None:
-        vbox = QVBoxLayout(parent)
+        root_vbox = QVBoxLayout(parent)
+        root_vbox.setContentsMargins(0, 0, 0, 0)
+        root_vbox.setSpacing(8)
 
-        # 第一组：屏幕 + 坐标
-        form_head = QFormLayout()
-        vbox.addLayout(form_head)
+        # -------- 主像素分组 --------
+        grp_main = QGroupBox("主像素 (技能是否就绪 / 可用检测)", parent)
+        main_layout = QVBoxLayout(grp_main)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(6)
 
-        self.cmb_monitor = QComboBox(parent)
+        # 屏幕
+        form_main = QFormLayout()
+        form_main.setContentsMargins(0, 0, 0, 0)
+        form_main.setSpacing(4)
+        main_layout.addLayout(form_main)
+
+        self.cmb_monitor = QComboBox(grp_main)
         self.cmb_monitor.addItems(["primary", "all", "monitor_1", "monitor_2"])
-        form_head.addRow("屏幕", self.cmb_monitor)
+        form_main.addRow("屏幕", self.cmb_monitor)
 
-        self.spin_x = QSpinBox(parent)
+        # 位置 X/Y 一行
+        pos_widget = QWidget(grp_main)
+        pos_h = QHBoxLayout(pos_widget)
+        pos_h.setContentsMargins(0, 0, 0, 0)
+        pos_h.setSpacing(4)
+
+        self.spin_x = QSpinBox(grp_main)
         self.spin_x.setRange(0, 9999999)
         self.spin_x.setSingleStep(1)
-        form_head.addRow("X(rel)", self.spin_x)
 
-        self.spin_y = QSpinBox(parent)
+        self.spin_y = QSpinBox(grp_main)
         self.spin_y.setRange(0, 9999999)
         self.spin_y.setSingleStep(1)
-        form_head.addRow("Y(rel)", self.spin_y)
 
-        # 颜色预览
-        self._swatch = ColorSwatch(parent)
-        vbox.addWidget(self._swatch)
+        pos_h.addWidget(QLabel("X(rel)", pos_widget))
+        pos_h.addWidget(self.spin_x)
+        pos_h.addSpacing(8)
+        pos_h.addWidget(QLabel("Y(rel)", pos_widget))
+        pos_h.addWidget(self.spin_y)
+        pos_h.addStretch(1)
 
-        # 第二组：RGB
-        form_rgb = QFormLayout()
-        vbox.addLayout(form_rgb)
+        form_main.addRow("位置", pos_widget)
 
-        self.spin_r = QSpinBox(parent)
+        # 颜色预览（主像素）
+        self._swatch = ColorSwatch(grp_main)
+        main_layout.addWidget(self._swatch)
+
+        # RGB 一行
+        rgb_widget = QWidget(grp_main)
+        rgb_h = QHBoxLayout(rgb_widget)
+        rgb_h.setContentsMargins(0, 0, 0, 0)
+        rgb_h.setSpacing(4)
+
+        self.spin_r = QSpinBox(grp_main)
         self.spin_r.setRange(0, 255)
-        form_rgb.addRow("R", self.spin_r)
-
-        self.spin_g = QSpinBox(parent)
+        self.spin_g = QSpinBox(grp_main)
         self.spin_g.setRange(0, 255)
-        form_rgb.addRow("G", self.spin_g)
-
-        self.spin_b = QSpinBox(parent)
+        self.spin_b = QSpinBox(grp_main)
         self.spin_b.setRange(0, 255)
-        form_rgb.addRow("B", self.spin_b)
 
-        # 第三组：容差 + 采样模式/半径
+        rgb_h.addWidget(QLabel("R", rgb_widget))
+        rgb_h.addWidget(self.spin_r)
+        rgb_h.addSpacing(4)
+        rgb_h.addWidget(QLabel("G", rgb_widget))
+        rgb_h.addWidget(self.spin_g)
+        rgb_h.addSpacing(4)
+        rgb_h.addWidget(QLabel("B", rgb_widget))
+        rgb_h.addWidget(self.spin_b)
+        rgb_h.addStretch(1)
+
+        rgb_form = QFormLayout()
+        rgb_form.setContentsMargins(0, 0, 0, 0)
+        rgb_form.setSpacing(4)
+        rgb_form.addRow("颜色RGB", rgb_widget)
+        main_layout.addLayout(rgb_form)
+
+        # 容差 + 采样模式/半径
         form_more = QFormLayout()
-        vbox.addLayout(form_more)
+        form_more.setContentsMargins(0, 0, 0, 0)
+        form_more.setSpacing(4)
+        main_layout.addLayout(form_more)
 
-        self.spin_tol = QSpinBox(parent)
+        self.spin_tol = QSpinBox(grp_main)
         self.spin_tol.setRange(0, 255)
         form_more.addRow("容差", self.spin_tol)
 
-        self.cmb_sample_mode = QComboBox(parent)
+        sample_widget = QWidget(grp_main)
+        sample_h = QHBoxLayout(sample_widget)
+        sample_h.setContentsMargins(0, 0, 0, 0)
+        sample_h.setSpacing(4)
+
+        self.cmb_sample_mode = QComboBox(grp_main)
         self.cmb_sample_mode.addItems(list(SAMPLE_DISPLAY_TO_VALUE.keys()))
-        form_more.addRow("采样模式", self.cmb_sample_mode)
-
-        self.spin_sample_radius = QSpinBox(parent)
+        self.spin_sample_radius = QSpinBox(grp_main)
         self.spin_sample_radius.setRange(0, 50)
-        form_more.addRow("半径", self.spin_sample_radius)
 
-        # 取色按钮
-        btn_pick = QPushButton("从屏幕取色（按确认热键确认）", parent)
+        sample_h.addWidget(self.cmb_sample_mode)
+        sample_h.addSpacing(4)
+        sample_h.addWidget(QLabel("半径", sample_widget))
+        sample_h.addWidget(self.spin_sample_radius)
+        sample_h.addStretch(1)
+
+        form_more.addRow("采样", sample_widget)
+
+        # 取色 + 测试 按钮同一行
+        btn_row = QWidget(grp_main)
+        btn_h = QHBoxLayout(btn_row)
+        btn_h.setContentsMargins(0, 0, 0, 0)
+        btn_h.setSpacing(8)
+
+        btn_pick = QPushButton("从屏幕取色（按确认热键确认）", grp_main)
         btn_pick.clicked.connect(self.request_pick_current)
-        vbox.addWidget(btn_pick)
+        btn_h.addWidget(btn_pick)
 
-        # 新增：测试按钮
-        btn_test = QPushButton("测试当前像素是否匹配", parent)
+        btn_test = QPushButton("测试当前像素是否匹配", grp_main)
         btn_test.clicked.connect(self.test_current_pixel)
-        vbox.addWidget(btn_test)
+        btn_h.addWidget(btn_test)
 
-        vbox.addStretch(1)
+        btn_h.addStretch(1)
+        main_layout.addWidget(btn_row)
+
+        root_vbox.addWidget(grp_main)
+
+        # -------- 弹药阶段分组（多发技能） --------
+        grp_ammo = QGroupBox("弹药阶段像素 (多发技能用，每阶段一个独立像素点)", parent)
+        ammo_outer_layout = QVBoxLayout(grp_ammo)
+        ammo_outer_layout.setContentsMargins(8, 8, 8, 8)
+        ammo_outer_layout.setSpacing(6)
+
+        lbl_hint = QLabel(
+            "当技能有多发弹药时，可以为每个阶段配置一个像素点：\n"
+            "例如 shots_per_cycle=3 时，可配置剩余 3/2/1 发时各自的像素点。",
+            grp_ammo,
+        )
+        lbl_hint.setWordWrap(True)
+        ammo_outer_layout.addWidget(lbl_hint)
+
+        # 滚动区域承载多个阶段块
+        scroll = QScrollArea(grp_ammo)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        scroll_inner = QWidget(scroll)
+        self._ammo_stages_layout = QVBoxLayout(scroll_inner)
+        self._ammo_stages_layout.setContentsMargins(0, 0, 0, 0)
+        self._ammo_stages_layout.setSpacing(8)
+
+        scroll.setWidget(scroll_inner)
+        ammo_outer_layout.addWidget(scroll)
+
+        # 保存每个阶段行的控件引用
+        self._ammo_stage_rows: list[dict[str, Any]] = []
+        self._rebuild_ammo_stage_rows(0, stages_data=None)
+
+        root_vbox.addWidget(grp_ammo)
+        root_vbox.addStretch(1)
 
     def _build_tab_note(self, parent: QWidget) -> None:
         vbox = QVBoxLayout(parent)
@@ -344,41 +442,6 @@ class SkillsPage(RecordCrudPage):
             self._apply_timer.stop()
         except Exception:
             pass
-
-    def _clear_form(self) -> None:
-        self._cancel_pending_apply()
-        self.set_header_title("未选择")
-        self._building_form = True
-        try:
-            self._current_id = None
-            self.txt_id.setText("")
-            self.txt_name.setText("")
-            self.chk_enabled.setChecked(True)
-            self.txt_trigger_key.setText("")
-            self.spin_readbar.setValue(0)
-
-            # 新增字段
-            self.spin_game_id.setValue(0)
-            self.spin_cooldown_s.setValue(0.0)
-            self.spin_radius.setValue(0)
-            self.txt_icon_url.setText("")
-            self.txt_game_desc.setPlainText("")
-
-            # 像素相关
-            self.cmb_monitor.setCurrentText("primary")
-            self.spin_x.setValue(0)
-            self.spin_y.setValue(0)
-            self.spin_r.setValue(0)
-            self.spin_g.setValue(0)
-            self.spin_b.setValue(0)
-            self._swatch.set_rgb(0, 0, 0)
-            self.spin_tol.setValue(0)
-            self.cmb_sample_mode.setCurrentText("单像素")
-            self.spin_sample_radius.setValue(0)
-
-            self.txt_note.setPlainText("")
-        finally:
-            self._building_form = False
 
     def _load_into_form(self, rid: str) -> None:
         self._cancel_pending_apply()
@@ -400,6 +463,9 @@ class SkillsPage(RecordCrudPage):
             self.txt_trigger_key.setText(s.trigger.key)
             self.spin_readbar.setValue(int(s.cast.readbar_ms))
 
+            # 技能次数
+            self.spin_shots_per_cycle.setValue(int(getattr(s, "shots_per_cycle", 1) or 1))
+
             # 游戏元信息
             self.spin_game_id.setValue(int(s.game_id or 0))
             self.spin_cooldown_s.setValue((s.cooldown_ms or 0) / 1000.0)
@@ -407,7 +473,7 @@ class SkillsPage(RecordCrudPage):
             self.txt_icon_url.setText(s.icon_url or "")
             self.txt_game_desc.setPlainText(s.game_desc or "")
 
-            # 像素
+            # 像素（主像素）
             self.cmb_monitor.setCurrentText(s.pixel.monitor or "primary")
             try:
                 rx, ry = self._cap.abs_to_rel(
@@ -430,6 +496,51 @@ class SkillsPage(RecordCrudPage):
             self.cmb_sample_mode.setCurrentText(disp_mode)
             self.spin_sample_radius.setValue(int(s.pixel.sample.radius))
 
+            # 弹药阶段像素列表 (ammo_stages)
+            stages_data: list[dict[str, Any]] = []
+            for st in getattr(s, "ammo_stages", []) or []:
+                try:
+                    charges = int(getattr(st, "charges_left", 0) or 0)
+                    pix = st.pixel
+                    mon2 = getattr(pix, "monitor", "primary") or "primary"
+                    vx2 = int(getattr(pix, "vx", 0) or 0)
+                    vy2 = int(getattr(pix, "vy", 0) or 0)
+                    cr = int(getattr(pix.color, "r", 0) or 0)
+                    cg = int(getattr(pix.color, "g", 0) or 0)
+                    cb = int(getattr(pix.color, "b", 0) or 0)
+                    tol2 = int(getattr(pix, "tolerance", 0) or 0)
+                    smode = getattr(pix.sample, "mode", "single") or "single"
+                    srad = int(getattr(pix.sample, "radius", 0) or 0)
+                except Exception:
+                    continue
+                if charges <= 0:
+                    continue
+                stages_data.append(
+                    {
+                        "charges_left": charges,
+                        "monitor": mon2,
+                        "vx": vx2,
+                        "vy": vy2,
+                        "r": cr,
+                        "g": cg,
+                        "b": cb,
+                        "tolerance": tol2,
+                        "sample_mode": smode,
+                        "sample_radius": srad,
+                    }
+                )
+
+            # 若存在阶段像素，用它们重建行；否则按 shots_per_cycle 提供默认数量的空行
+            if stages_data:
+                count = len(stages_data)
+                self._rebuild_ammo_stage_rows(count, stages_data=stages_data)
+            else:
+                count = int(getattr(s, "shots_per_cycle", 1) or 1)
+                if count > 1:
+                    self._rebuild_ammo_stage_rows(count, stages_data=None)
+                else:
+                    self._rebuild_ammo_stage_rows(0, stages_data=None)
+
             # 备注
             self.txt_note.setPlainText(s.note or "")
         finally:
@@ -443,6 +554,7 @@ class SkillsPage(RecordCrudPage):
 
         sid = self._current_id
 
+        # 主像素：相对坐标 -> 绝对坐标
         mon = (self.cmb_monitor.currentText() or "primary").strip() or "primary"
         rel_x = clamp_int(int(self.spin_x.value()), 0, 10**9)
         rel_y = clamp_int(int(self.spin_y.value()), 0, 10**9)
@@ -450,6 +562,53 @@ class SkillsPage(RecordCrudPage):
             vx, vy = self._cap.rel_to_abs(rel_x, rel_y, mon)
         except Exception:
             vx, vy = rel_x, rel_y
+
+        # 弹药阶段像素：相对坐标 -> 绝对坐标 + 收集颜色/容差/采样
+        ammo_stages_data: list[dict[str, Any]] = []
+        for row in getattr(self, "_ammo_stage_rows", []) or []:
+            sp_ch = row.get("charges")
+            cmb_mon = row.get("monitor")
+            sp_x = row.get("x")
+            sp_y = row.get("y")
+            sp_r = row.get("r")
+            sp_g = row.get("g")
+            sp_b = row.get("b")
+            sp_tol = row.get("tol")
+            cmb_smode = row.get("sample_mode")
+            sp_srad = row.get("sample_radius")
+
+            if not (sp_ch and cmb_mon and sp_x and sp_y and sp_r and sp_g and sp_b and sp_tol and cmb_smode and sp_srad):
+                continue
+
+            charges = int(sp_ch.value())
+            if charges <= 0:
+                continue
+
+            mon2 = (cmb_mon.currentText() or "primary").strip() or "primary"
+            rel_ax = clamp_int(int(sp_x.value()), 0, 10**9)
+            rel_ay = clamp_int(int(sp_y.value()), 0, 10**9)
+            try:
+                avx, avy = self._cap.rel_to_abs(rel_ax, rel_ay, mon2)
+            except Exception:
+                avx, avy = rel_ax, rel_ay
+
+            smode_disp = cmb_smode.currentText()
+            smode = SAMPLE_DISPLAY_TO_VALUE.get(smode_disp, "single")
+
+            ammo_stages_data.append(
+                {
+                    "charges_left": charges,
+                    "monitor": mon2,
+                    "vx": int(avx),
+                    "vy": int(avy),
+                    "r": int(sp_r.value()),
+                    "g": int(sp_g.value()),
+                    "b": int(sp_b.value()),
+                    "tolerance": int(sp_tol.value()),
+                    "sample_mode": smode,
+                    "sample_radius": int(sp_srad.value()),
+                }
+            )
 
         from core.app.services.skills_service import SkillFormPatch
 
@@ -474,6 +633,9 @@ class SkillsPage(RecordCrudPage):
             icon_url=self.txt_icon_url.text(),
             cooldown_ms=int(self.spin_cooldown_s.value() * 1000),
             radius=int(self.spin_radius.value()),
+
+            shots_per_cycle=int(self.spin_shots_per_cycle.value()),
+            ammo_stages=ammo_stages_data,
         )
 
         try:
@@ -503,6 +665,8 @@ class SkillsPage(RecordCrudPage):
         self.chk_enabled.toggled.connect(on_any_changed)
         self.txt_trigger_key.textChanged.connect(on_any_changed)
         self.spin_readbar.valueChanged.connect(on_any_changed)
+        # shots_per_cycle 变更时须重建 ammo 行
+        self.spin_shots_per_cycle.valueChanged.connect(self._on_shots_per_cycle_changed)
 
         # 游戏元信息
         self.spin_game_id.valueChanged.connect(on_any_changed)
@@ -511,7 +675,7 @@ class SkillsPage(RecordCrudPage):
         self.txt_icon_url.textChanged.connect(on_any_changed)
         self.txt_game_desc.textChanged.connect(on_any_changed)
 
-        # pixel
+        # pixel（主像素）
         self.cmb_monitor.currentTextChanged.connect(on_any_changed)
         self.spin_x.valueChanged.connect(on_any_changed)
         self.spin_y.valueChanged.connect(on_any_changed)
@@ -522,8 +686,13 @@ class SkillsPage(RecordCrudPage):
         self.cmb_sample_mode.currentTextChanged.connect(on_any_changed)
         self.spin_sample_radius.valueChanged.connect(on_any_changed)
 
+        # 弹药阶段行的控件，在 _rebuild_ammo_stage_rows 内部单独 connect 到 _on_ammo_stage_changed
+
         # note
         self.txt_note.textChanged.connect(on_any_changed)
+
+        # 保存统一的 dirty 触发函数供行复用
+        self._on_any_changed_for_ammo = on_any_changed
 
     # ---------- 辅助 ----------
 
@@ -672,3 +841,281 @@ class SkillsPage(RecordCrudPage):
                     f"最大通道差 {max_diff} > 容差 {tol}"
                 ),
             )
+
+    def _rebuild_ammo_stage_rows(self, count: int, stages_data: Optional[list[dict[str, Any]]] = None) -> None:
+        """
+        重建弹药阶段像素行（多行布局 + 滚动区域）：
+        - count: 行数
+        - stages_data: 可选初始数据，每项包含
+            {
+                "charges_left": int,
+                "monitor": str,
+                "vx": int, "vy": int,
+                "r": int, "g": int, "b": int,
+                "tolerance": int,
+                "sample_mode": str,
+                "sample_radius": int,
+            }
+        UI 上每个阶段显示为一个小卡片，包含多行：
+            行1: 阶段标题 + 剩余弹药数
+            行2: 屏幕 + X/Y（位置一行）
+            行3: RGB（颜色一行）
+            行4: 容差
+            行5: 采样模式 + 半径
+        """
+        # 清除旧行引用
+        if hasattr(self, "_ammo_stage_rows") and self._ammo_stage_rows:
+            for row in self._ammo_stage_rows:
+                pass
+
+        # 清空布局中的子控件
+        if hasattr(self, "_ammo_stages_layout") and self._ammo_stages_layout is not None:
+            while self._ammo_stages_layout.count() > 0:
+                item = self._ammo_stages_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+
+        self._ammo_stage_rows = []
+
+        if count <= 0:
+            return
+
+        # 准备数据列表
+        data_list: list[dict[str, Any]] = []
+        if stages_data:
+            data_list = list(stages_data)
+        if not data_list:
+            # shots_per_cycle=N 时，默认生成 N 行 charges_left=N..1
+            for ch in range(count, 0, -1):
+                data_list.append(
+                    {
+                        "charges_left": ch,
+                        "monitor": "primary",
+                        "vx": 0,
+                        "vy": 0,
+                        "r": 0,
+                        "g": 0,
+                        "b": 0,
+                        "tolerance": 0,
+                        "sample_mode": "single",
+                        "sample_radius": 0,
+                    }
+                )
+        else:
+            # 与 count 不一致时做截断/补全
+            if len(data_list) > count:
+                data_list = data_list[:count]
+            elif len(data_list) < count:
+                last_ch = data_list[-1].get("charges_left", 1) if data_list else 1
+                for _ in range(count - len(data_list)):
+                    last_ch = max(1, last_ch - 1)
+                    data_list.append(
+                        {
+                            "charges_left": last_ch,
+                            "monitor": "primary",
+                            "vx": 0,
+                            "vy": 0,
+                            "r": 0,
+                            "g": 0,
+                            "b": 0,
+                            "tolerance": 0,
+                            "sample_mode": "single",
+                            "sample_radius": 0,
+                        }
+                    )
+
+        # 创建每个阶段块
+        for i in range(count):
+            row_data = data_list[i]
+            ch = int(row_data.get("charges_left", 0) or 0)
+            mon2 = (row_data.get("monitor", "primary") or "primary").strip() or "primary"
+            vx2 = int(row_data.get("vx", 0) or 0)
+            vy2 = int(row_data.get("vy", 0) or 0)
+            rr = int(row_data.get("r", 0) or 0)
+            gg = int(row_data.get("g", 0) or 0)
+            bb = int(row_data.get("b", 0) or 0)
+            tol2 = int(row_data.get("tolerance", 0) or 0)
+            smode = row_data.get("sample_mode", "single") or "single"
+            srad = int(row_data.get("sample_radius", 0) or 0)
+
+            # 整个阶段块（小卡片）
+            block = QGroupBox(parent=self.right_body)
+            block.setTitle(f"阶段 {i+1}")
+            v = QVBoxLayout(block)
+            v.setContentsMargins(6, 4, 6, 4)
+            v.setSpacing(4)
+
+            # 行1：剩余弹药数
+            form_top = QFormLayout()
+            form_top.setContentsMargins(0, 0, 0, 0)
+            form_top.setSpacing(4)
+            sp_charges = QSpinBox(block)
+            sp_charges.setRange(0, 1000)
+            sp_charges.setValue(ch)
+            form_top.addRow("剩余弹药数", sp_charges)
+            v.addLayout(form_top)
+
+            # 行2：屏幕 + X/Y（位置一行）
+            form_pos = QFormLayout()
+            form_pos.setContentsMargins(0, 0, 0, 0)
+            form_pos.setSpacing(4)
+
+            cmb_mon = QComboBox(block)
+            cmb_mon.addItems(["primary", "all", "monitor_1", "monitor_2"])
+            cmb_mon.setCurrentText(mon2)
+            form_pos.addRow("屏幕", cmb_mon)
+
+            pos_widget = QWidget(block)
+            pos_h = QHBoxLayout(pos_widget)
+            pos_h.setContentsMargins(0, 0, 0, 0)
+            pos_h.setSpacing(4)
+
+            sp_x = QSpinBox(block)
+            sp_x.setRange(0, 9999999)
+            sp_x.setSingleStep(1)
+            sp_x.setValue(vx2)
+
+            sp_y = QSpinBox(block)
+            sp_y.setRange(0, 9999999)
+            sp_y.setSingleStep(1)
+            sp_y.setValue(vy2)
+
+            pos_h.addWidget(QLabel("X(像素)", pos_widget))
+            pos_h.addWidget(sp_x)
+            pos_h.addSpacing(8)
+            pos_h.addWidget(QLabel("Y(像素)", pos_widget))
+            pos_h.addWidget(sp_y)
+            pos_h.addStretch(1)
+
+            form_pos.addRow("位置", pos_widget)
+            v.addLayout(form_pos)
+
+            # 行3：颜色 RGB 一行
+            form_rgb = QFormLayout()
+            form_rgb.setContentsMargins(0, 0, 0, 0)
+            form_rgb.setSpacing(4)
+
+            rgb_widget = QWidget(block)
+            rgb_h = QHBoxLayout(rgb_widget)
+            rgb_h.setContentsMargins(0, 0, 0, 0)
+            rgb_h.setSpacing(4)
+
+            sp_r = QSpinBox(block)
+            sp_r.setRange(0, 255)
+            sp_r.setValue(rr)
+
+            sp_g = QSpinBox(block)
+            sp_g.setRange(0, 255)
+            sp_g.setValue(gg)
+
+            sp_b = QSpinBox(block)
+            sp_b.setRange(0, 255)
+            sp_b.setValue(bb)
+
+            rgb_h.addWidget(QLabel("R", rgb_widget))
+            rgb_h.addWidget(sp_r)
+            rgb_h.addSpacing(4)
+            rgb_h.addWidget(QLabel("G", rgb_widget))
+            rgb_h.addWidget(sp_g)
+            rgb_h.addSpacing(4)
+            rgb_h.addWidget(QLabel("B", rgb_widget))
+            rgb_h.addWidget(sp_b)
+            rgb_h.addStretch(1)
+
+            form_rgb.addRow("颜色RGB", rgb_widget)
+            v.addLayout(form_rgb)
+
+            # 行4：容差
+            form_tol = QFormLayout()
+            form_tol.setContentsMargins(0, 0, 0, 0)
+            form_tol.setSpacing(4)
+            sp_tol = QSpinBox(block)
+            sp_tol.setRange(0, 255)
+            sp_tol.setValue(tol2)
+            form_tol.addRow("容差", sp_tol)
+            v.addLayout(form_tol)
+
+            # 行5：采样模式 + 半径
+            form_sample = QFormLayout()
+            form_sample.setContentsMargins(0, 0, 0, 0)
+            form_sample.setSpacing(4)
+
+            sample_widget = QWidget(block)
+            sample_h = QHBoxLayout(sample_widget)
+            sample_h.setContentsMargins(0, 0, 0, 0)
+            sample_h.setSpacing(4)
+
+            cmb_smode = QComboBox(block)
+            cmb_smode.addItems(list(SAMPLE_DISPLAY_TO_VALUE.keys()))
+            # value -> display
+            disp = None
+            for k, v_mode in SAMPLE_DISPLAY_TO_VALUE.items():
+                if v_mode == smode:
+                    disp = k
+                    break
+            cmb_smode.setCurrentText(disp or "单像素")
+
+            sp_srad = QSpinBox(block)
+            sp_srad.setRange(0, 50)
+            sp_srad.setValue(srad)
+
+            sample_h.addWidget(cmb_smode)
+            sample_h.addSpacing(4)
+            sample_h.addWidget(QLabel("半径", sample_widget))
+            sample_h.addWidget(sp_srad)
+            sample_h.addStretch(1)
+
+            form_sample.addRow("采样", sample_widget)
+            v.addLayout(form_sample)
+
+            # 将块加到滚动容器
+            self._ammo_stages_layout.addWidget(block)
+
+            # 记录控件引用
+            self._ammo_stage_rows.append(
+                {
+                    "charges": sp_charges,
+                    "monitor": cmb_mon,
+                    "x": sp_x,
+                    "y": sp_y,
+                    "r": sp_r,
+                    "g": sp_g,
+                    "b": sp_b,
+                    "tol": sp_tol,
+                    "sample_mode": cmb_smode,
+                    "sample_radius": sp_srad,
+                }
+            )
+
+        # 行内控件变更需要触发 dirty
+        def _row_changed(*_args):
+            if self._building_form:
+                return
+            self._apply_timer.start(200)
+
+        for row in self._ammo_stage_rows:
+            row["charges"].valueChanged.connect(_row_changed)
+            row["monitor"].currentTextChanged.connect(_row_changed)
+            row["x"].valueChanged.connect(_row_changed)
+            row["y"].valueChanged.connect(_row_changed)
+            row["r"].valueChanged.connect(_row_changed)
+            row["g"].valueChanged.connect(_row_changed)
+            row["b"].valueChanged.connect(_row_changed)
+            row["tol"].valueChanged.connect(_row_changed)
+            row["sample_mode"].currentTextChanged.connect(_row_changed)
+            row["sample_radius"].valueChanged.connect(_row_changed)
+
+    def _on_shots_per_cycle_changed(self) -> None:
+        """
+        当技能次数(shots_per_cycle)变更时，重建弹药阶段像素行。
+        简单策略：完全按新的 shots_per_cycle 重建行，原有阶段配置会丢失。
+        后续如果需要保留旧配置，可以在这里做更智能的 merge。
+        """
+        if self._building_form:
+            return
+        n = int(self.spin_shots_per_cycle.value() or 1)
+        if n <= 1:
+            self._rebuild_ammo_stage_rows(0, stages_data=None)
+        else:
+            self._rebuild_ammo_stage_rows(n, stages_data=None)

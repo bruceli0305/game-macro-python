@@ -1,12 +1,11 @@
-# core/app/services/skills_service.py
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, Optional, List, Dict, Any
 
 from core.app.session import ProfileSession
 from core.models.common import clamp_int
-from core.models.skill import Skill, ColorRGB
+from core.models.skill import Skill, ColorRGB, PixelSpec, SampleConfig, AmmoStagePixel
 
 
 @dataclass(frozen=True)
@@ -17,7 +16,7 @@ class SkillFormPatch:
     trigger_key: str
     readbar_ms: int
 
-    # 像素检测配置
+    # 像素检测配置（主像素）
     monitor: str
     vx: int
     vy: int
@@ -33,13 +32,26 @@ class SkillFormPatch:
     # 备注
     note: str
 
-    # ---- 新增：通用游戏字段（从 GW2 等游戏 JSON 导入） ----
-    # 全都提供默认值，保证旧代码在未传入这些字段时也能正常工作。
-    game_id: int = 0          # 游戏中的技能 ID，例如 5752
-    game_desc: str = ""       # 官方技能描述
-    icon_url: str = ""        # 技能图标 URL
-    cooldown_ms: int = 0      # 冷却时间（毫秒）
-    radius: int = 0           # 技能半径（如有）
+    # ---- 通用游戏字段 ----
+    game_id: int = 0
+    game_desc: str = ""
+    icon_url: str = ""
+    cooldown_ms: int = 0
+    radius: int = 0
+
+    # ---- rotation & ammo 字段 ----
+    # 在 rotation 中一次轮到该技能希望打几发（逻辑层语义，默认 1）
+    shots_per_cycle: int = 1
+
+    # 弹药阶段像素数据：
+    # 每个 dict 结构约定至少包含：
+    #   { "charges_left": int,
+    #     "monitor": str,
+    #     "vx": int, "vy": int,
+    #     "r": int, "g": int, "b": int,
+    #     "tolerance": int,
+    #     "sample_mode": str, "sample_radius": int }
+    ammo_stages: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class SkillsService:
@@ -89,7 +101,7 @@ class SkillsService:
         s.trigger.key = (patch.trigger_key or "").strip()
         s.cast.readbar_ms = clamp_int(int(patch.readbar_ms), 0, 10**9)
 
-        # 像素配置
+        # 像素配置（主像素）
         s.pixel.monitor = (patch.monitor or "primary").strip() or "primary"
         s.pixel.vx = clamp_int(int(patch.vx), -10**9, 10**9)
         s.pixel.vy = clamp_int(int(patch.vy), -10**9, 10**9)
@@ -107,7 +119,6 @@ class SkillsService:
         s.note = patch.note or ""
 
         # ---- 通用游戏字段 ----
-        # 这些字段用于在 UI 中展示/记录来自游戏本身的元信息（ID/描述/图标/冷却/半径）。
         try:
             s.game_id = int(patch.game_id or 0)
         except Exception:
@@ -127,6 +138,55 @@ class SkillsService:
         except Exception:
             rad = 0
         s.radius = clamp_int(rad, 0, 10**9)
+
+        # ---- rotation & ammo 字段 ----
+
+        # 技能次数（至少 1 次）
+        try:
+            s.shots_per_cycle = clamp_int(int(getattr(patch, "shots_per_cycle", 1)), 1, 10**3)
+        except Exception:
+            s.shots_per_cycle = 1
+
+        # 弹药阶段像素列表
+        stages_list: List[AmmoStagePixel] = []
+        for item in (patch.ammo_stages or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                ch = int(item.get("charges_left", 0) or 0)
+                mon2 = (item.get("monitor", "primary") or "primary").strip() or "primary"
+                vx2 = clamp_int(int(item.get("vx", 0) or 0), -10**9, 10**9)
+                vy2 = clamp_int(int(item.get("vy", 0) or 0), -10**9, 10**9)
+                r2 = clamp_int(int(item.get("r", 0) or 0), 0, 255)
+                g2 = clamp_int(int(item.get("g", 0) or 0), 0, 255)
+                b2 = clamp_int(int(item.get("b", 0) or 0), 0, 255)
+                tol2 = clamp_int(int(item.get("tolerance", 0) or 0), 0, 255)
+                mode2 = (item.get("sample_mode", "single") or "single").strip() or "single"
+                rad2 = clamp_int(int(item.get("sample_radius", 0) or 0), 0, 50)
+            except Exception:
+                continue
+
+            if ch <= 0:
+                continue
+
+            pix = PixelSpec(
+                monitor=mon2,
+                vx=vx2,
+                vy=vy2,
+                color=ColorRGB(r=r2, g=g2, b=b2),
+                tolerance=tol2,
+                sample=SampleConfig(mode=mode2, radius=rad2),
+            )
+            stages_list.append(
+                AmmoStagePixel(
+                    charges_left=ch,
+                    pixel=pix,
+                )
+            )
+
+        # 按 charges_left 从大到小排序（例如 3,2,1,...）
+        stages_list.sort(key=lambda st: int(getattr(st, "charges_left", 0) or 0), reverse=True)
+        s.ammo_stages = stages_list
 
     def apply_form_patch(self, sid: str, patch: SkillFormPatch, *, auto_save: bool) -> tuple[bool, bool]:
         s = self.find(sid)

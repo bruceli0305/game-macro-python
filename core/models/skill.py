@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core.models.common import as_bool, as_dict, as_int, as_list, as_str, clamp_int
 
@@ -61,9 +61,7 @@ class PixelSpec:
     def from_dict(d: Dict[str, Any]) -> "PixelSpec":
         d = as_dict(d)
 
-        # Backward compatibility:
-        # - new schema uses vx/vy
-        # - older schema used x/y (relative coords), but repos will migrate those on load.
+        # new schema uses vx/vy；旧 schema 的 x/y 已在加载时迁移到 vx/vy
         vx_raw = d.get("vx", None)
         vy_raw = d.get("vy", None)
         if vx_raw is None:
@@ -126,6 +124,31 @@ class CastConfig:
 
 
 @dataclass
+class AmmoStagePixel:
+    """
+    弹药阶段像素配置：
+    - charges_left: 剩余弹药数（3/2/1/...）
+    - pixel       : 对应该阶段的像素点（位置 + 颜色 + 容差 + 采样）
+    """
+    charges_left: int
+    pixel: PixelSpec
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "AmmoStagePixel":
+        d = as_dict(d)
+        return AmmoStagePixel(
+            charges_left=clamp_int(as_int(d.get("charges_left", 0), 0), 0, 10**6),
+            pixel=PixelSpec.from_dict(d.get("pixel", {}) or {}),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "charges_left": int(self.charges_left),
+            "pixel": self.pixel.to_dict(),
+        }
+
+
+@dataclass
 class Skill:
     """
     单个技能配置：
@@ -144,6 +167,11 @@ class Skill:
     - icon_url     : 技能图标 URL（后续可用于列表/详情显示）
     - cooldown_ms  : 冷却时间（毫秒），从 JSON 的 Recharge(s) 转换而来
     - radius       : 技能半径（如有），从 Distance fact 中提取
+
+    新增：多发 / 弹药相关：
+    - shots_per_cycle : 在 rotation 中，一次轮到该技能希望打几发（逻辑层语义）
+    - ammo_stages     : 不同剩余弹药数 (charges_left) 对应的像素点列表
+                        每个像素点可以有不同的位置和颜色（适配不同形状的数字/图标）
     """
     id: str = ""          # snowflake id string（本工具内部）
     name: str = ""
@@ -160,9 +188,24 @@ class Skill:
     cooldown_ms: int = 0
     radius: int = 0
 
+    # rotation & ammo 语义
+    shots_per_cycle: int = 1
+    ammo_stages: List[AmmoStagePixel] = field(default_factory=list)
+
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Skill":
         d = as_dict(d)
+
+        # 弹药阶段像素列表
+        stages_raw = as_list(d.get("ammo_stages", []))
+        stages: List[AmmoStagePixel] = []
+        for item in stages_raw:
+            if isinstance(item, dict):
+                try:
+                    stages.append(AmmoStagePixel.from_dict(item))
+                except Exception:
+                    pass
+
         return Skill(
             id=as_str(d.get("id", "")),
             name=as_str(d.get("name", "")),
@@ -177,10 +220,13 @@ class Skill:
             icon_url=as_str(d.get("icon_url", "")),
             cooldown_ms=as_int(d.get("cooldown_ms", 0), 0),
             radius=as_int(d.get("radius", 0), 0),
+
+            shots_per_cycle=as_int(d.get("shots_per_cycle", 1), 1),
+            ammo_stages=stages,
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "enabled": bool(self.enabled),
@@ -194,7 +240,12 @@ class Skill:
             "icon_url": self.icon_url,
             "cooldown_ms": int(self.cooldown_ms),
             "radius": int(self.radius),
+
+            "shots_per_cycle": int(self.shots_per_cycle),
         }
+        if self.ammo_stages:
+            out["ammo_stages"] = [st.to_dict() for st in self.ammo_stages]
+        return out
 
 
 @dataclass
