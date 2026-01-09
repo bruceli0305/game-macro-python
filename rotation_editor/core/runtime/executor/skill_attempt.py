@@ -32,7 +32,15 @@ from .lock_policy import LockPolicyConfig, decide_on_lock_busy
 
 
 StartSignalMode = Literal["pixel", "cast_bar", "none"]
-CompletionPolicy = Literal["ASSUME_SUCCESS", "REQUIRE_SIGNAL", "HYBRID_ASSUME", "HYBRID_FAIL"]
+
+# 新增 CD_BLACK 用于“图标变黑确认进入冷却”
+CompletionPolicy = Literal[
+    "ASSUME_SUCCESS",
+    "REQUIRE_SIGNAL",
+    "HYBRID_ASSUME",
+    "HYBRID_FAIL",
+    "CD_BLACK",
+]
 
 
 @dataclass(frozen=True)
@@ -373,6 +381,40 @@ class SkillAttemptExecutor:
         )
         return rgb
 
+    def _sample_skill_pixel_rgb_from_snapshot(self, skill) -> Optional[Tuple[int, int, int]]:
+        """
+        从当前 snapshot 中采样指定 skill.pixel 的 RGB。
+        - snapshot 不可用 / skill 无 pixel 配置 -> 返回 None
+        """
+        if skill is None:
+            return None
+
+        pix = getattr(skill, "pixel", None)
+        if pix is None:
+            return None
+
+        snap_res = self._capman.get_snapshot()
+        from rotation_editor.core.runtime.capture.manager import SnapshotOk
+        if not isinstance(snap_res, SnapshotOk) or snap_res.snapshot is None:
+            return None
+
+        from rotation_editor.ast import SnapshotPixelSampler
+        sampler = SnapshotPixelSampler(scanner=self._capman.get_scanner(), snapshot=snap_res.snapshot)
+
+        try:
+            sample = SampleSpec(mode=pix.sample.mode, radius=int(pix.sample.radius))
+        except Exception:
+            sample = SampleSpec(mode="single", radius=0)
+
+        rgb = sampler.sample_rgb_abs(
+            monitor_key=(getattr(pix, "monitor", None) or "primary"),
+            x_abs=int(getattr(pix, "vx", 0)),
+            y_abs=int(getattr(pix, "vy", 0)),
+            sample=sample,
+            require_inside=False,
+        )
+        return rgb
+
     def _send_key(self, skill, attempt_id: str) -> bool:
         key = (getattr(getattr(skill, "trigger", None), "key", "") or "").strip()
         if not key:
@@ -500,7 +542,12 @@ class SkillAttemptExecutor:
 
             if started:
                 self._store.mark_cast_started(attempt_id)
-                ok_complete = self._wait_complete(attempt_id=attempt_id, readbar_ms=readbar_ms, complete_expr=complete_expr)
+                ok_complete = self._wait_complete(
+                    attempt_id=attempt_id,
+                    skill_id=skill_id,
+                    readbar_ms=readbar_ms,
+                    complete_expr=complete_expr,
+                )
                 if ok_complete:
                     self._store.finish_success(attempt_id)
                     return ExecutionResult(outcome="SUCCESS", advance="ADVANCE", next_delay_ms=max(0, int(self._cfg.default_gap_ms)), reason="success")
@@ -574,6 +621,7 @@ class SkillAttemptExecutor:
         self,
         *,
         attempt_id: str,
+        skill_id: str,
         readbar_ms: int,
         complete_expr: Optional[Expr],
     ) -> bool:
@@ -585,6 +633,7 @@ class SkillAttemptExecutor:
         if max_wait_ms <= 0:
             max_wait_ms = max(500, int(readbar_ms))
 
+        # 1) 仅按时间假定成功
         if pol == "ASSUME_SUCCESS":
             self._store.set_stage(attempt_id, "COMPLETE_WAIT", message="complete_wait_assume")
             if _wait_ms(self._stop_evt, int(max(0, readbar_ms))):
@@ -592,6 +641,63 @@ class SkillAttemptExecutor:
                 return False
             return True
 
+        # 2) 通过技能图标“变黑”确认进入冷却（CD_BLACK 模式，忽略 complete_expr）
+        if pol == "CD_BLACK":
+            self._store.set_stage(attempt_id, "COMPLETE_WAIT", message="complete_wait_cd_black")
+
+            skill = self._find_skill(skill_id)
+            # 较小的容差，贴近纯黑但允许一点噪声
+            cd_tol = 5
+
+            last_log_ms = 0
+            deadline = mono_ms() + max_wait_ms
+
+            while mono_ms() < deadline:
+                if self._stop_evt is not None and self._stop_evt.is_set():
+                    self._store.finish_stopped(attempt_id, "stopped")
+                    return False
+
+                rgb = self._sample_skill_pixel_rgb_from_snapshot(skill)
+
+                # 节流记录 complete_check_cd_black
+                if self._should_log(last_log_ms):
+                    last_log_ms = mono_ms()
+                    self._store.append_attempt_event(
+                        attempt_id,
+                        type="COMPLETE_CHECK",
+                        message="complete_check_cd_black",
+                        detail="",
+                        extra={
+                            "rgb": tuple(rgb) if rgb is not None else None,
+                            "cd_tol": int(cd_tol),
+                            "policy": "CD_BLACK",
+                        },
+                    )
+
+                if rgb is not None:
+                    r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+                    max_diff = max(abs(r - 0), abs(g - 0), abs(b - 0))
+                    if max_diff <= cd_tol:
+                        # 认为技能图标进入冷却态 -> 完成成功
+                        self._store.append_attempt_event(
+                            attempt_id,
+                            type="COMPLETE_OBSERVED",
+                            message="complete_observed_cd_black",
+                            detail="",
+                            extra={
+                                "rgb": (r, g, b),
+                                "cd_tol": int(cd_tol),
+                            },
+                        )
+                        return True
+
+                _wait_ms(self._stop_evt, poll)
+
+            # 超时：未见图标变黑 -> 判为失败
+            self._store.finish_fail(attempt_id, "timeout")
+            return False
+
+        # 3) 需要表达式信号的策略（REQUIRE_SIGNAL / HYBRID_*）
         if complete_expr is None:
             if pol == "HYBRID_ASSUME":
                 self._store.set_stage(attempt_id, "COMPLETE_WAIT", message="complete_wait_no_expr_fallback_assume")

@@ -84,8 +84,8 @@ def main():
     # 获取当前目录
     current_dir = os.path.dirname(os.path.abspath(__file__))
     # 设置目标目录为 rotation_editor
-    # target_dir = os.path.join(current_dir, 'rotation_editor')
-    target_dir = current_dir
+    target_dir = os.path.join(current_dir, 'rotation_editor')
+    # target_dir = current_dir
     # 查找所有.py文件
     python_files = find_python_files(target_dir)
     

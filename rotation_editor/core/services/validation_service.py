@@ -52,7 +52,7 @@ class ValidationService:
     - 条件 AST 编译与 probes 收集
     - 节点引用合法性（skill/condition）
     - Gateway 动作参数合法性（目标模式/轨道/节点）
-    - Track 步骤容量约束：同一轨道同一 step_index 上节点数不超过 2
+    - Track 步骤容量约束：同一轨道同一 step_index 上节点数不超过 1
     """
 
     ALLOWED_GW_ACTIONS: Set[str] = {"switch_mode", "jump_track", "jump_node", "exec_skill", "end"}
@@ -141,14 +141,14 @@ class ValidationService:
                 else:
                     diags.append(warn("node.kind.unknown", f"{npath}.kind", "未知节点 kind", detail=kind))
 
-            # 轨道 step 容量约束：同一轨道同一 step_index 上节点数不超过 2
+            # 轨道 step 容量约束：同一轨道同一 step_index 上节点数不超过 1
             for step_val, cnt in step_counts.items():
-                if cnt > 2:
+                if cnt > 1:
                     diags.append(
                         err(
                             "track.step.too_many_nodes",
                             path,
-                            f"同一轨道的 step_index={step_val} 上节点数超过 2 个",
+                            f"同一轨道的 step_index={step_val} 上节点数超过 1 个",
                             detail=f"step={step_val}, count={cnt}",
                         )
                     )

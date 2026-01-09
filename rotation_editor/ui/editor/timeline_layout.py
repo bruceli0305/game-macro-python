@@ -96,12 +96,8 @@ def build_timeline_layout(
     - 使用固定步长 STEP_MS（必须与 TimelineCanvas._step_ms 一致）作为时间网格。
     - 若该轨道存在任一节点 step_index > 0：启用 step 轴布局：
         * 所有节点按 step_index 分组；
-        * 每个 step 的显示跨度固定为 STEP_MS；
-        * 同一 step 内最多 2 个节点：
-              * 1 个：lane = -1（居中）
-              * 2 个：lane = 0（上）/ 1（下），时间跨度相同
-        * >2 个理论上不应出现（ValidationService + RotationEditService 有约束），
-          若出现则仅前 2 个分配 lane，其余都放在下层 lane=1（尽量不炸）。
+        * 设计上同一 step 内最多 1 个节点（ValidationService + RotationEditService 做约束），
+          兼容旧数据时若出现多个，则仍按 lane 0/1 渲染，但新配置不应再出现这种情况。
     - 若所有节点 step_index <= 0：按顺序均匀排布：
         * 第 i 个节点：start_ms = i * STEP_MS, end_ms = (i+1) * STEP_MS
         * lane 均为 -1（居中）。

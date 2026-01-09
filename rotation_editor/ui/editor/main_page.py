@@ -973,6 +973,7 @@ class RotationEditorPage(QWidget):
         # cast_bar settings for complete policy
         cb_mode = (getattr(cb, "mode", "timer") or "timer").strip().lower() if cb is not None else "timer"
         cb_point = (getattr(cb, "point_id", "") or "").strip() if cb is not None else ""
+
         try:
             cb_tol = int(getattr(cb, "tolerance", 15) or 15) if cb is not None else 15
         except Exception:
@@ -994,11 +995,13 @@ class RotationEditorPage(QWidget):
         if cb_factor > 10.0:
             cb_factor = 10.0
 
-        # completion policy: bar -> require signal；否则 assume success
+        # completion policy:
+        # - bar 模式且配置了 point_id -> REQUIRE_SIGNAL（使用施法条点位像素）
+        # - 否则 -> CD_BLACK（通过技能图标变黑确认进入冷却）
         if cb_mode == "bar" and cb_point:
             complete_policy = "REQUIRE_SIGNAL"
         else:
-            complete_policy = "ASSUME_SUCCESS"
+            complete_policy = "CD_BLACK"
 
         attempt_cfg = SkillAttemptConfig(
             default_gap_ms=gap,
@@ -1019,7 +1022,7 @@ class RotationEditorPage(QWidget):
                 cast_bar_tolerance=cb_tol,
             ),
             complete=CompleteSignalConfig(
-                policy=complete_policy,  # ASSUME_SUCCESS / REQUIRE_SIGNAL
+                policy=complete_policy,  # ASSUME_SUCCESS / REQUIRE_SIGNAL / CD_BLACK
                 poll_ms=cb_poll,
                 max_wait_factor=cb_factor,
                 cast_bar_point_id=cb_point,

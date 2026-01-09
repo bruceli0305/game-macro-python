@@ -403,9 +403,16 @@ class MacroEngineNew:
                 node_start_expr_json=getattr(node, "start_expr", None),
                 node_complete_expr_json=getattr(node, "complete_expr", None),
             )
-            self._apply_exec_result(scope=scope, track_id=track_id, res=res, now_ms=now_ms)
+            # 严格顺序只作用于模式轨道上的 SkillNode
+            strict = (scope == "mode")
+            self._apply_exec_result(
+                scope=scope,
+                track_id=track_id,
+                res=res,
+                now_ms=now,
+                strict=strict,
+            )
             return
-
         if isinstance(node, GatewayNode):
             self._exec_gateway(preset=preset, scope=scope, track_id=track_id, gw=node, now_ms=now_ms)
             return
@@ -424,11 +431,34 @@ class MacroEngineNew:
         track_id: str,
         res: ExecutionResult,
         now_ms: int,
+        strict: bool = False,
     ) -> None:
+        """
+        根据 ExecutionResult 更新运行时状态：
+
+        - scope: "global" | "mode"
+        - track_id: 对应运行时里的某条轨道
+        - res: 执行结果（SUCCESS/FAILED/SKIPPED_* 等）
+        - now_ms: 当前时间戳（毫秒）
+        - strict: 严格顺序模式标志（目前仅对 mode 轨道上的 SkillNode 使用）
+
+        严格顺序语义（仅作用于 mode 轨道 + strict=True）：
+        - outcome == SKIPPED_NOT_READY:
+            * 表示技能 CD / 像素等“尚未就绪”，不允许跳过；
+            * 强制 HOLD（不推进节点），等待下一次再试。
+        - outcome == FAILED:
+            * send_key_failed: 发键/配置致命问题 -> 直接停止引擎并报错；
+            * 其他 FAILED（no_cast_start / complete_failed / timeout 等）：
+                - 认为当前节点本轮尝试失败，允许按原始 advance 推进，
+                  避免整条主循环轨道被永久卡在一个节点。
+        - 其他 outcome（SUCCESS / SKIPPED_DISABLED / SKIPPED_LOCK_BUSY 等）：
+            * 完全按 ExecutionResult.advance 行事。
+        """
         global_rt = self._global_rt
         if global_rt is None:
             return
 
+        # 执行器显式请求停止（STOPPED），直接停引擎
         if res.outcome == "STOPPED":
             self._stop_reason = "stopped"
             self._stop_evt.set()
@@ -436,27 +466,66 @@ class MacroEngineNew:
 
         delay = int(max(0, res.next_delay_ms))
 
+        # 先按原始结果初始化“有效 advance 策略”
+        eff_advance = res.advance
+
+        # 严格顺序只作用于 mode 轨道
+        if scope == "mode" and strict:
+            # 1) 未 ready：严格顺序下绝不允许跳过
+            if res.outcome == "SKIPPED_NOT_READY":
+                eff_advance = "HOLD"
+
+            # 2) 已经尝试过但 FAILED：根据 reason 决定是否致命
+            elif res.outcome == "FAILED":
+                reason = (res.reason or "").strip().lower()
+
+                # 2.1 发键失败：配置/环境致命问题 -> 停引擎
+                if reason == "send_key_failed":
+                    # 记录到状态仓库
+                    self._store.engine_error(
+                        "send_key_failed",
+                        f"技能发键失败，track={track_id}",
+                    )
+                    # 通知 UI
+                    self._emit_error(
+                        "技能发键失败，已停止循环",
+                        f"track_id={track_id}, reason=send_key_failed",
+                    )
+                    if getattr(self._cfg, "stop_on_error", True):
+                        self._stop_reason = "error"
+                        self._stop_evt.set()
+                    # 不再为该轨道安排后续调度
+                    return
+
+                # 2.2 其他 FAILED（no_cast_start / complete_failed / timeout 等）
+                #     保持原始 eff_advance（通常是 ADVANCE），允许推进到下一个节点，
+                #     避免因为像素/网络/被打断导致整条主循环锁死。
+                #     这里不做额外修改。
+                #     pass
+
+        # ---- 更新运行时调度信息 ----
+
         if scope == "global":
             rt = global_rt.get(track_id)
             if rt is None:
                 return
             rt.next_time_ms = int(now_ms + delay)
-            if res.advance == "ADVANCE":
+            if eff_advance == "ADVANCE":
                 rt.advance()
             return
 
+        # mode 轨道
         if self._mode_rt is None:
             return
         rt2 = self._mode_rt.tracks.get(track_id)
         if rt2 is None:
             return
         rt2.next_time_ms = int(now_ms + delay)
-        if res.advance == "ADVANCE":
+        if eff_advance == "ADVANCE":
             rt2.advance()
             self._mode_rt.ensure_step_runnable()
 
     # ---------------- Gateway actions ----------------
-
     def _exec_gateway(
         self,
         *,
