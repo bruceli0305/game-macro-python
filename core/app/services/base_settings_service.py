@@ -8,6 +8,7 @@ from core.models.base import BaseFile
 from core.models.common import clamp_int
 from core.input.hotkey import normalize, parse
 
+import logging
 
 @dataclass(frozen=True)
 class BaseSettingsPatch:

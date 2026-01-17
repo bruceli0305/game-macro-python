@@ -409,7 +409,7 @@ class MacroEngineNew:
                 scope=scope,
                 track_id=track_id,
                 res=res,
-                now_ms=now,
+                now_ms=now_ms,
                 strict=strict,
             )
             return
