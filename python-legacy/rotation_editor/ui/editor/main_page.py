@@ -1,0 +1,1347 @@
+from __future__ import annotations
+
+from typing import Optional, Protocol, Callable, Dict, Any
+
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QComboBox,
+    QStyle,
+    QMessageBox,
+    QMenu,
+    QInputDialog,
+)
+
+from core.profiles import ProfileContext
+from core.app.session import ProfileSession
+
+from qtui.notify import UiNotify
+from qtui.icons import load_icon
+
+from rotation_editor.core.services.rotation_service import RotationService
+from rotation_editor.core.services.rotation_edit_service import RotationEditService
+from rotation_editor.core.models import RotationPreset, GatewayNode
+
+from rotation_editor.ui.editor.node_panel import NodeListPanel
+from rotation_editor.ui.editor.timeline_canvas import TimelineCanvas
+from rotation_editor.ui.editor.mode_bar import ModeTabBar
+
+from rotation_editor.core.runtime.engine import (
+    MacroEngine,
+    EngineConfig,
+    ExecutionCursor,
+)
+from rotation_editor.core.runtime.executor.skill_attempt import (
+    SkillAttemptConfig,
+    StartSignalConfig,
+    CompleteSignalConfig,
+)
+from rotation_editor.core.runtime.executor.lock_policy import LockPolicyConfig
+
+import logging  # 新增
+
+log = logging.getLogger(__name__)  # 新增
+
+class SchedulerLike(Protocol):
+    """
+    简单的调度器协议：
+    - MacroEngine 只依赖一个 call_soon(fn) 方法
+    - QtDispatcher / 其他实现只要提供同名方法即可作为 dispatcher 使用
+    """
+    def call_soon(self, fn: Callable[[], None]) -> None: ...
+
+class RotationEditorPage(QWidget):
+    """
+    循环编辑器页 + 执行引擎控制（修复版）：
+    - 保证 _on_start_clicked 等方法存在，避免 AttributeError
+    - 新增轨道规则：
+        1) 没有 mode 不允许新增轨道
+        2) 有 mode 时：新增轨道只能选 全局 / 当前模式
+    - 右键轨道菜单：增加“打开调试面板...”
+    """
+
+    def __init__(
+        self,
+        *,
+        ctx: ProfileContext,
+        session: ProfileSession,
+        notify: UiNotify,
+        dispatcher: SchedulerLike,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._ctx = ctx
+        self._session = session
+        self._notify = notify
+        self._dispatcher = dispatcher
+
+        self._preset_svc = RotationService(
+            session=self._session,
+            notify_dirty=self._on_service_dirty,
+            notify_error=lambda m, d="": self._notify.error(m, detail=d),
+        )
+        self._edit_svc = RotationEditService(
+            session=self._session,
+            notify_dirty=None,
+            notify_error=lambda m, d="": self._notify.error(m, detail=d),
+        )
+
+        self._current_preset_id: Optional[str] = None
+        self._current_mode_id: Optional[str] = None
+
+        self._building = False
+        self._dirty_ui = False
+
+        # 执行引擎
+        self._engine: Optional[MacroEngine] = None   # <<< 这里改成 MacroEngineNew
+        self._engine_running: bool = False
+        self._engine_paused: bool = False
+        # 新增：记录当前使用的发键模式 & 诊断信息
+        self._key_sender_mode_used: str = "pynput"
+        self._key_sender_detail: str = ""
+        self._last_executed_node_label: str = ""  # 新增：最近执行的节点标签
+
+        self._build_ui()
+        self._subscribe_store_dirty()
+        self._rebuild_preset_combo()
+        self._select_first_preset_if_any()
+
+        self._update_zoom_label()
+        self._update_engine_buttons()
+
+    # ---------- UI 构建 ----------
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        style = self.style()
+
+        # 顶部：标题 + preset 下拉 + 引擎按钮 + 保存/重载 + 缩放 + 脏标记
+        header = QHBoxLayout()
+        lbl_title = QLabel("循环编辑器", self)
+        f = lbl_title.font()
+        f.setPointSize(16)
+        f.setBold(True)
+        lbl_title.setFont(f)
+        header.addWidget(lbl_title)
+
+        header.addSpacing(20)
+        header.addWidget(QLabel("方案:", self))
+
+        self._cmb_preset = QComboBox(self)
+        self._cmb_preset.currentIndexChanged.connect(self._on_preset_changed)
+        header.addWidget(self._cmb_preset, 1)
+
+        self._btn_start = QPushButton("开始", self)
+        self._btn_start.clicked.connect(self._on_start_clicked)
+        header.addWidget(self._btn_start)
+
+        self._btn_pause = QPushButton("暂停", self)
+        self._btn_pause.clicked.connect(self._on_pause_clicked)
+        header.addWidget(self._btn_pause)
+
+        self._btn_step = QPushButton("单步", self)
+        self._btn_step.clicked.connect(self._on_step_clicked)
+        header.addWidget(self._btn_step)
+
+        self._btn_stop = QPushButton("停止", self)
+        self._btn_stop.clicked.connect(self._on_stop_clicked)
+        header.addWidget(self._btn_stop)
+
+        header.addSpacing(10)
+
+        icon_reload = load_icon("reload", style, QStyle.StandardPixmap.SP_BrowserReload)
+        icon_save = load_icon("save", style, QStyle.StandardPixmap.SP_DialogSaveButton)
+
+        self._btn_reload = QPushButton("重新加载", self)
+        self._btn_reload.setIcon(icon_reload)
+        self._btn_reload.clicked.connect(self._on_reload)
+        header.addWidget(self._btn_reload)
+
+        self._btn_save = QPushButton("保存", self)
+        self._btn_save.setIcon(icon_save)
+        self._btn_save.clicked.connect(self._on_save)
+        header.addWidget(self._btn_save)
+
+        # 缩放控件
+        header.addSpacing(10)
+        self._btn_zoom_out = QPushButton("-", self)
+        self._btn_zoom_out.setFixedWidth(26)
+        self._btn_zoom_out.clicked.connect(self._on_zoom_out_clicked)
+        header.addWidget(self._btn_zoom_out)
+
+        self._lbl_zoom = QLabel("100%", self)
+        self._lbl_zoom.setFixedWidth(48)
+        self._lbl_zoom.setAlignment(Qt.AlignCenter)
+        header.addWidget(self._lbl_zoom)
+
+        self._btn_zoom_in = QPushButton("+", self)
+        self._btn_zoom_in.setFixedWidth(26)
+        self._btn_zoom_in.clicked.connect(self._on_zoom_in_clicked)
+        header.addWidget(self._btn_zoom_in)
+
+        header.addSpacing(4)
+        self._btn_zoom_reset = QPushButton("1x", self)
+        self._btn_zoom_reset.setFixedWidth(32)
+        self._btn_zoom_reset.clicked.connect(self._on_zoom_reset_clicked)
+        header.addWidget(self._btn_zoom_reset)
+
+        header.addSpacing(10)
+        self._lbl_dirty = QLabel("", self)
+        header.addWidget(self._lbl_dirty)
+
+        root.addLayout(header)
+
+        # 模式操作行
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+
+        mode_row.addWidget(QLabel("模式:", self))
+
+        self._tab_modes = ModeTabBar(self)
+        self._tab_modes.modeChanged.connect(self._on_mode_changed_from_tab)
+        mode_row.addWidget(self._tab_modes, 1)
+
+        self._btn_mode_add = QPushButton("新增模式", self)
+        self._btn_mode_add.clicked.connect(self._on_mode_add_clicked)
+        mode_row.addWidget(self._btn_mode_add)
+
+        self._btn_mode_rename = QPushButton("重命名模式", self)
+        self._btn_mode_rename.clicked.connect(self._on_mode_rename_clicked)
+        mode_row.addWidget(self._btn_mode_rename)
+
+        self._btn_mode_delete = QPushButton("删除模式", self)
+        self._btn_mode_delete.clicked.connect(self._on_mode_delete_clicked)
+        mode_row.addWidget(self._btn_mode_delete)
+
+        root.addLayout(mode_row)
+
+        # NodeListPanel（逻辑组件，不显示）
+        self._panel_nodes = NodeListPanel(
+            ctx=self._ctx,
+            edit_svc=self._edit_svc,
+            notify=self._notify,
+            parent=self,
+        )
+        self._panel_nodes.hide()
+
+        # 时间轴画布
+        self._timeline_canvas = TimelineCanvas(self)
+        self._timeline_canvas.nodeClicked.connect(self._on_timeline_node_clicked)
+        self._timeline_canvas.nodesReordered.connect(self._on_timeline_nodes_reordered)
+        self._timeline_canvas.nodeCrossMoved.connect(self._on_timeline_node_moved_cross)
+        self._timeline_canvas.nodeContextMenuRequested.connect(self._on_timeline_node_context_menu)
+        self._timeline_canvas.trackContextMenuRequested.connect(self._on_timeline_track_context_menu)
+        self._timeline_canvas.trackAddRequested.connect(self._on_timeline_track_add_requested)
+        self._timeline_canvas.stepChanged.connect(self._on_timeline_step_changed)
+        self._timeline_canvas.zoomChanged.connect(self._on_canvas_zoom_changed)
+
+        root.addWidget(self._timeline_canvas, 1)
+
+    # ---------- Store dirty ----------
+
+    def _subscribe_store_dirty(self) -> None:
+        try:
+            self._session.subscribe_dirty(self._on_store_dirty)
+        except Exception:
+            pass
+
+    def _on_store_dirty(self, parts) -> None:
+        """
+        监听 ProfileSession.dirty 变化：
+        - 更新“未保存*”指示
+        - 若引擎正在运行，points/skills/rotations 变更时刷新 capture plan
+        """
+        try:
+            parts_set = set(parts or [])
+        except Exception:
+            # 不应该发生，但如果 parts 不是可迭代，记录日志并降级为空集合
+            log.exception("_on_store_dirty: unexpected parts value, treat as empty")
+            parts_set = set()
+
+        self._dirty_ui = "rotations" in parts_set
+        self._update_dirty_ui()
+
+        # points/skills/rotations 变更时，若引擎运行则重建 capture plan
+        if self._engine is not None and self._engine.is_running():
+            if any(p in parts_set for p in ("points", "skills", "rotations")):
+                try:
+                    self._engine.invalidate_capture_plan()
+                except Exception:
+                    # 记录异常，但不影响后续 UI 操作
+                    log.exception("invalidate_capture_plan failed in _on_store_dirty")
+
+    def _on_service_dirty(self) -> None:
+        pass
+
+    def _update_dirty_ui(self) -> None:
+        self._lbl_dirty.setText("未保存*" if self._dirty_ui else "")
+        self._btn_save.setStyleSheet("color: orange;" if self._dirty_ui else "")
+
+    # ---------- 缩放 ----------
+
+    def _on_canvas_zoom_changed(self) -> None:
+        self._refresh_timeline()
+        self._update_zoom_label()
+
+    def _on_zoom_in_clicked(self) -> None:
+        self._timeline_canvas.zoom_in()
+
+    def _on_zoom_out_clicked(self) -> None:
+        self._timeline_canvas.zoom_out()
+
+    def _on_zoom_reset_clicked(self) -> None:
+        self._timeline_canvas.reset_zoom()
+
+    def _update_zoom_label(self) -> None:
+        ratio = self._timeline_canvas.zoom_ratio()
+        pct = int(round(ratio * 100))
+        self._lbl_zoom.setText(f"{pct:d}%")
+
+    def _refresh_timeline(self) -> None:
+        preset = self._current_preset()
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    # ---------- 上下文切换 ----------
+
+    def set_context(self, ctx: ProfileContext) -> None:
+        """
+        更新编辑器使用的 ProfileContext：
+
+        - 停止并丢弃旧引擎实例（避免继续引用旧 ctx / 旧 capture plan）
+        - 重置当前选中的 preset/mode
+        - 刷新 NodeListPanel 与 TimelineCanvas 数据源
+        """
+        self._ctx = ctx
+
+        # 若引擎还在运行，先停止
+        if self._engine is not None and self._engine.is_running():
+            try:
+                self._engine.stop("context_changed")
+            except Exception:
+                pass
+
+        # 丢弃旧引擎实例，保证下一次 _ensure_engine 会用新的 ctx 重建
+        self._engine = None
+        self._engine_running = False
+        self._engine_paused = False
+
+        # 重置当前选中 preset/mode
+        self._current_preset_id = None
+        self._current_mode_id = None
+
+        # 清空节点面板与时间轴
+        # 注意：这里改为位置参数调用，避免依赖形参名
+        self._panel_nodes.set_context(self._ctx, None)
+        self._panel_nodes.set_target(None, None)
+        self._timeline_canvas.set_data(self._ctx, None, None)
+
+        # 重新构建 preset 下拉与模式 tabs
+        self._rebuild_preset_combo()
+        self._select_first_preset_if_any()
+        self._update_zoom_label()
+
+    # ---------- preset 相关 ----------
+
+    def _rebuild_preset_combo(self) -> None:
+        self._building = True
+        try:
+            self._cmb_preset.clear()
+            presets = self._preset_svc.list_presets()
+            for p in presets:
+                self._cmb_preset.addItem(p.name or "(未命名)", userData=p.id)
+        finally:
+            self._building = False
+
+    def _select_first_preset_if_any(self) -> None:
+        if self._cmb_preset.count() == 0:
+            self._current_preset_id = None
+            self._current_mode_id = None
+            self._rebuild_mode_tabs()
+            # 这里也改为位置参数
+            self._panel_nodes.set_context(self._ctx, None)
+            self._panel_nodes.set_target(None, None)
+            self._timeline_canvas.set_data(self._ctx, None, None)
+            return
+        item_index = 0
+        self._cmb_preset.setCurrentIndex(item_index)
+        self._on_preset_changed(item_index)
+
+    def _current_preset(self) -> Optional[RotationPreset]:
+        pid = self._current_preset_id
+        if not pid:
+            return None
+        return self._preset_svc.find_preset(pid)
+
+    def _on_preset_changed(self, index: int) -> None:
+        if self._building:
+            return
+
+        data = self._cmb_preset.currentData()
+        if not isinstance(data, str):
+            self._current_preset_id = None
+            self._current_mode_id = None
+            self._rebuild_mode_tabs()
+            # 位置参数
+            self._panel_nodes.set_context(self._ctx, None)
+            self._panel_nodes.set_target(None, None)
+            self._timeline_canvas.set_data(self._ctx, None, None)
+            return
+
+        self._current_preset_id = data
+        preset = self._current_preset()
+
+        self._current_mode_id = None
+        self._rebuild_mode_tabs()
+
+        mode_id = self._tab_modes.current_mode_id()
+        self._current_mode_id = mode_id or None
+
+        # 关键改动：用位置参数，不再用关键字 preset=
+        self._panel_nodes.set_context(self._ctx, preset)
+        self._panel_nodes.set_target(self._current_mode_id, None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+        self._update_zoom_label()
+
+    # ---------- 模式 tabs ----------
+
+    def _rebuild_mode_tabs(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._tab_modes.set_modes([], None)
+            self._current_mode_id = None
+            return
+
+        self._tab_modes.set_modes(preset.modes or [], self._current_mode_id)
+        self._current_mode_id = self._tab_modes.current_mode_id() or None
+
+    def _on_mode_changed_from_tab(self, mode_id: str) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._current_mode_id = None
+            self._timeline_canvas.set_data(self._ctx, None, None)
+            self._panel_nodes.set_target(None, None)
+            return
+
+        self._current_mode_id = (mode_id or "").strip() or None
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(self._current_mode_id, None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    # ---------- 模式 CRUD ----------
+
+    def _on_mode_add_clicked(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._notify.error("请先创建一个方案")
+            return
+
+        name, ok = QInputDialog.getText(self, "新建模式", "模式名称：", text="新模式")
+        if not ok:
+            return
+
+        m = self._edit_svc.create_mode(preset, name)
+        self._current_mode_id = m.id
+        self._rebuild_mode_tabs()
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(self._current_mode_id, None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    def _on_mode_rename_clicked(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            return
+        mid = self._tab_modes.current_mode_id()
+        if not mid:
+            self._notify.error("请先选择要重命名的模式")
+            return
+
+        name, ok = QInputDialog.getText(self, "重命名模式", "新名称：")
+        if not ok:
+            return
+
+        changed = self._edit_svc.rename_mode(preset, mid, name)
+        if not changed:
+            self._notify.status_msg("名称未变化", ttl_ms=1500)
+            return
+        self._rebuild_mode_tabs()
+
+    def _on_mode_delete_clicked(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            return
+        mid = self._tab_modes.current_mode_id()
+        if not mid:
+            self._notify.error("请先选择要删除的模式")
+            return
+
+        mode = next((m for m in preset.modes if m.id == mid), None)
+        if mode is None:
+            return
+
+        ok = QMessageBox.question(
+            self,
+            "删除模式",
+            f"确认删除模式：{mode.name} ？\n\n将删除该模式下的所有轨道和节点。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ok != QMessageBox.Yes:
+            return
+
+        deleted = self._edit_svc.delete_mode(preset, mid)
+        if not deleted:
+            return
+
+        self._current_mode_id = None
+        self._rebuild_mode_tabs()
+
+        preset2 = self._current_preset()
+        self._panel_nodes.set_context(self._ctx, preset=preset2)
+        self._panel_nodes.set_target(self._current_mode_id, None)
+        self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+
+    # ---------- 新增轨道：规则实现 ----------
+    # 1) 没有 mode 不允许新增
+    # 2) 有 mode 时，只允许 全局 / 当前模式（不允许选其它 mode）
+
+    def _on_timeline_track_add_requested(self, mode_id: str) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._notify.error("请先创建一个方案")
+            return
+
+        modes = list(preset.modes or [])
+        if not modes:
+            self._notify.error("请先新增模式后再创建轨道")
+            return
+
+        preferred_mid = (mode_id or "").strip() or (self._current_mode_id or "").strip()
+        if not preferred_mid:
+            for m in modes:
+                mid = (m.id or "").strip()
+                if mid:
+                    preferred_mid = mid
+                    break
+        if not preferred_mid:
+            self._notify.error("模式 ID 无效：mode.id 不能为空")
+            return
+
+        mode_name = next((m.name or "" for m in modes if (m.id or "").strip() == preferred_mid), "") or "当前模式"
+
+        scope_items = [f"仅当前模式：{mode_name}", "全局轨道"]
+        choice, ok = QInputDialog.getItem(self, "新增轨道", "请选择新增到：", scope_items, 0, False)
+        if not ok:
+            return
+
+        chosen_mid = preferred_mid if choice == scope_items[0] else None
+
+        name, ok = QInputDialog.getText(self, "新建轨道", "轨道名称：", text="新轨道")
+        if not ok:
+            return
+
+        track = self._edit_svc.create_track(preset=preset, mode_id=chosen_mid, name=name)
+        if track is None:
+            self._notify.error("新建轨道失败")
+            return
+
+        if chosen_mid:
+            self._current_mode_id = chosen_mid
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == chosen_mid:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(chosen_mid, track.id)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    # ---------- Timeline 联动 ----------
+
+    def _on_timeline_node_clicked(self, mode_id: str, track_id: str, node_index: int) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        if mode_id_s:
+            self._current_mode_id = mode_id_s
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id_s:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+        self._panel_nodes.select_node_index(node_index)
+
+    def _on_timeline_nodes_reordered(self, mode_id: str, track_id: str, node_ids: list) -> None:
+        preset = self._current_preset()
+        if preset is None or not node_ids:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        changed = self._edit_svc.reorder_nodes_by_ids(
+            preset=preset,
+            mode_id=mode_id_s or None,
+            track_id=track_id_s or None,
+            node_ids=list(node_ids),
+        )
+        if not changed:
+            return
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    def _on_timeline_node_moved_cross(
+        self,
+        src_mode_id: str,
+        src_track_id: str,
+        dst_mode_id: str,
+        dst_track_id: str,
+        dst_index: int,
+        node_id: str,
+    ) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        moved = self._edit_svc.move_node_between_tracks(
+            preset=preset,
+            src_mode_id=src_mode_id or None,
+            src_track_id=src_track_id or None,
+            dst_mode_id=dst_mode_id or None,
+            dst_track_id=dst_track_id or None,
+            node_id=node_id,
+            dst_index=int(dst_index),
+        )
+        if not moved:
+            return
+
+        dst_mid = (dst_mode_id or "").strip()
+        if dst_mid:
+            self._current_mode_id = dst_mid
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == dst_mid:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        self._panel_nodes.set_context(self._ctx, preset=preset)
+        self._panel_nodes.set_target(dst_mid or None, dst_track_id or None)
+        self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+    def _on_timeline_node_context_menu(
+        self,
+        mode_id: str,
+        track_id: str,
+        node_index: int,
+        gx: int,
+        gy: int,
+    ) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        if mode_id_s:
+            self._current_mode_id = mode_id_s
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id_s:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        try:
+            self._panel_nodes.set_context(self._ctx, preset=preset)
+            self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+            self._panel_nodes.select_node_index(node_index)
+        except Exception:
+            pass
+
+        node = self._edit_svc.get_node(
+            preset=preset,
+            mode_id=mode_id_s or None,
+            track_id=track_id_s or None,
+            index=int(node_index),
+        )
+        is_gateway = isinstance(node, GatewayNode)
+
+        menu = QMenu(self)
+        act_edit = menu.addAction("编辑节点属性...")
+        act_cond = menu.addAction("设置条件...") if is_gateway else None
+        act_del = menu.addAction("删除节点")
+
+        action = menu.exec(QPoint(int(gx), int(gy)))
+        if action is None:
+            return
+
+        if action == act_edit:
+            try:
+                self._panel_nodes.edit_current_node()
+                preset2 = self._current_preset()
+                self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+            except Exception as e:
+                self._notify.error("编辑节点失败", detail=str(e))
+
+        elif action == act_del:
+            try:
+                self._panel_nodes.delete_current_node()
+                preset2 = self._current_preset()
+                self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+            except Exception as e:
+                self._notify.error("删除节点失败", detail=str(e))
+
+        elif act_cond is not None and action == act_cond:
+            try:
+                self._panel_nodes.set_condition_for_current()
+                preset2 = self._current_preset()
+                self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+            except Exception as e:
+                self._notify.error("设置条件失败", detail=str(e))
+
+    def _on_timeline_track_context_menu(self, mode_id: str, track_id: str, gx: int, gy: int) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        mode_id_s = (mode_id or "").strip()
+        track_id_s = (track_id or "").strip()
+
+        if mode_id_s:
+            self._current_mode_id = mode_id_s
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id_s:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+        try:
+            self._panel_nodes.set_context(self._ctx, preset=preset)
+            self._panel_nodes.set_target(mode_id_s or None, track_id_s or None)
+        except Exception:
+            pass
+
+        menu = QMenu(self)
+        act_new_skill = menu.addAction("新增技能节点...")
+        act_new_gw = menu.addAction("新增网关节点...")
+        menu.addSeparator()
+        act_debug = menu.addAction("打开调试面板...")
+        menu.addSeparator()
+        act_del_track = menu.addAction("删除此轨道")
+
+        action = menu.exec(QPoint(int(gx), int(gy)))
+        if action is None:
+            return
+
+        if action == act_debug:
+            # 打开调试面板：传入技能快照、施法锁状态和引擎状态三类回调
+            try:
+                from rotation_editor.ui.editor.debug_stats_dialog import DebugStatsDialog
+            except Exception as e:
+                self._notify.error("打开调试面板失败", detail=str(e))
+                return
+
+            eng = self._ensure_engine()
+
+            def get_snapshot():
+                try:
+                    return eng.get_skill_stats_snapshot()
+                except Exception:
+                    return []
+
+            def get_lock():
+                try:
+                    return bool(eng.is_cast_locked())
+                except Exception:
+                    return False
+
+            def get_engine_state():
+                try:
+                    return eng.get_engine_state_snapshot()
+                except Exception:
+                    return {}
+
+            dlg = DebugStatsDialog(
+                get_snapshot=get_snapshot,
+                get_lock_state=get_lock,
+                get_engine_state=get_engine_state,
+                parent=self,
+            )
+            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.show()
+            return
+
+        if action == act_new_skill or action == act_new_gw:
+            try:
+                if action == act_new_skill:
+                    self._panel_nodes.add_skill_node()
+                else:
+                    self._panel_nodes.add_gateway_node()
+            except Exception as e:
+                self._notify.error("新增节点失败", detail=str(e))
+                return
+
+            preset2 = self._current_preset()
+            self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+            return
+
+        if action == act_del_track:
+            if not track_id_s:
+                self._notify.error("当前轨道没有有效 ID，无法删除")
+                return
+
+            t = self._edit_svc.get_track(preset, mode_id_s or None, track_id_s or None)
+            t_name = t.name if (t is not None and getattr(t, "name", None)) else ""
+            ok = QMessageBox.question(
+                self,
+                "删除轨道",
+                f"确认删除轨道：{t_name or '(未命名轨道)'} ？\n\n该操作将删除此轨道上的所有节点。",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ok != QMessageBox.Yes:
+                return
+
+            deleted = self._edit_svc.delete_track(preset=preset, mode_id=mode_id_s or None, track_id=track_id_s or None)
+            if not deleted:
+                self._notify.error("删除轨道失败：轨道不存在")
+                return
+
+            preset2 = self._current_preset()
+            self._panel_nodes.set_context(self._ctx, preset=preset2)
+            self._panel_nodes.set_target(mode_id_s or None, None)
+            self._timeline_canvas.set_data(self._ctx, preset2, self._current_mode_id)
+            self._notify.info("已删除轨道")
+            return
+
+    def _on_timeline_step_changed(self, mode_id: str, track_id: str, node_id: str, step_index: int) -> None:
+        """
+        TimelineCanvas 通知：某个节点被拖拽到了新的 step_index。
+
+        规则：
+        - 同一轨道同一 step 只能有 1 个节点；
+        - 若 set_node_step 返回 False，说明该 step 已被占用或没有变化，
+          此时应让时间轴“弹回”到模型中的位置（通过重绘实现）。
+        """
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        mid = (mode_id or "").strip() or None
+        tid = (track_id or "").strip() or None
+
+        changed = self._edit_svc.set_node_step(
+            preset=preset,
+            mode_id=mid,
+            track_id=tid,
+            node_id=node_id or "",
+            step_index=int(step_index),
+        )
+
+        # 无论成功与否，都使用模型状态重绘一次时间轴和节点列表：
+        # - 若成功：展示新的 step 布局；
+        # - 若失败：展示原有布局，相当于把拖拽的节点弹回原位。
+        try:
+            self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+        except Exception:
+            pass
+
+        try:
+            self._panel_nodes.set_context(self._ctx, preset)
+            self._panel_nodes.set_target(mid, tid)
+        except Exception:
+            pass
+
+        # 如有需要，这里可以根据 changed 再做一些提示：
+        # if not changed:
+        #     self._notify.status_msg("该 Step 已有节点，无法放置多个节点", ttl_ms=1500)
+    # ---------- 保存 / 重载 ----------
+
+    def _on_reload(self) -> None:
+        if self._engine_running:
+            self._notify.error("请先停止循环，再重新加载循环配置")
+            return
+        ok = QMessageBox.question(
+            self,
+            "重新加载",
+            "将从磁盘重新加载 rotations，放弃当前未保存更改。\n\n确认继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ok != QMessageBox.Yes:
+            return
+        try:
+            self._preset_svc.reload_cmd()
+            self._rebuild_preset_combo()
+            self._select_first_preset_if_any()
+            self._notify.info("已重新加载循环配置")
+        except Exception as e:
+            self._notify.error("重新加载失败", detail=str(e))
+
+    def _on_save(self) -> None:
+        if self._engine_running:
+            self._notify.error("请先停止循环，再保存循环配置")
+            return
+        saved = self._preset_svc.save_cmd()
+        if saved:
+            self._notify.info("循环配置已保存")
+        else:
+            self._notify.status_msg("没有需要保存的更改", ttl_ms=1500)
+
+    def flush_to_model(self) -> None:
+        pass
+
+    # ---------- 引擎控制 ----------
+    def _ensure_engine(self) -> MacroEngine:
+        """
+        获取或创建执行引擎 (MacroEngine)：
+
+        - 若已有引擎实例（无论是否在运行），则直接返回该实例；
+        - 若尚未创建过，则按当前 ctx.base.exec / ctx.base.cast_bar 配置构造一个新的引擎。
+        """
+        if self._engine is not None:
+            return self._engine
+
+        ex = getattr(self._ctx.base, "exec", None)
+        cb = getattr(self._ctx.base, "cast_bar", None)
+
+        def _get_int(name: str, default: int, lo: int = 0, hi: int = 10**9) -> int:
+            try:
+                v = int(getattr(ex, name, default) if ex is not None else default)
+            except Exception:
+                v = int(default)
+            if v < lo:
+                v = lo
+            if v > hi:
+                v = hi
+            return v
+
+        def _get_str(name: str, default: str) -> str:
+            try:
+                v = str(getattr(ex, name, default) if ex is not None else default)
+            except Exception:
+                v = default
+            v = (v or "").strip()
+            return v or default
+
+        # gap / poll
+        gap = _get_int("default_skill_gap_ms", 50, 0, 10**6)
+        poll_not_ready = _get_int("poll_not_ready_ms", 50, 10, 10**6)
+
+        # start signal mode
+        start_mode = _get_str("start_signal_mode", "pixel").lower()
+        if start_mode not in ("pixel", "cast_bar", "none"):
+            start_mode = "pixel"
+
+        start_timeout = _get_int("start_timeout_ms", 20, 1, 10**6)
+        start_poll = _get_int("start_poll_ms", 10, 5, 10**6)
+        max_retries = _get_int("max_retries", 3, 0, 1000)
+        retry_gap = _get_int("retry_gap_ms", 30, 0, 10**6)
+
+        # cast_bar settings for complete policy
+        cb_mode = (getattr(cb, "mode", "timer") or "timer").strip().lower() if cb is not None else "timer"
+        cb_point = (getattr(cb, "point_id", "") or "").strip() if cb is not None else ""
+
+        try:
+            cb_tol = int(getattr(cb, "tolerance", 15) or 15) if cb is not None else 15
+        except Exception:
+            cb_tol = 15
+        cb_tol = max(0, min(255, cb_tol))
+
+        try:
+            cb_poll = int(getattr(cb, "poll_interval_ms", 30) or 30) if cb is not None else 30
+        except Exception:
+            cb_poll = 30
+        cb_poll = max(10, min(1000, cb_poll))
+
+        try:
+            cb_factor = float(getattr(cb, "max_wait_factor", 1.5) or 1.5) if cb is not None else 1.5
+        except Exception:
+            cb_factor = 1.5
+        if cb_factor < 0.1:
+            cb_factor = 0.1
+        if cb_factor > 10.0:
+            cb_factor = 10.0
+
+        # completion policy:
+        # - bar 模式且配置了 point_id -> REQUIRE_SIGNAL（使用施法条点位像素）
+        # - 否则 -> CD_BLACK（通过技能图标变黑确认进入冷却）
+        if cb_mode == "bar" and cb_point:
+            complete_policy = "REQUIRE_SIGNAL"
+        else:
+            complete_policy = "CD_BLACK"
+
+        attempt_cfg = SkillAttemptConfig(
+            default_gap_ms=gap,
+            poll_not_ready_ms=poll_not_ready,
+            lock=LockPolicyConfig(
+                policy="SKIP_AND_ADVANCE",
+                wait_timeout_ms=300,
+                wait_poll_ms=15,
+                skip_delay_ms=poll_not_ready,
+            ),
+            start=StartSignalConfig(
+                mode=start_mode,  # pixel/cast_bar/none
+                timeout_ms=start_timeout,
+                poll_ms=start_poll,
+                max_retries=max_retries,
+                retry_gap_ms=retry_gap,
+                cast_bar_point_id=cb_point,
+                cast_bar_tolerance=cb_tol,
+            ),
+            complete=CompleteSignalConfig(
+                policy=complete_policy,  # ASSUME_SUCCESS / REQUIRE_SIGNAL / CD_BLACK
+                poll_ms=cb_poll,
+                max_wait_factor=cb_factor,
+                cast_bar_point_id=cb_point,
+                cast_bar_tolerance=cb_tol,
+            ),
+            sample_log_throttle_ms=80,
+        )
+
+        # 选择 KeySender：pynput / hid
+        from rotation_editor.core.runtime.keyboard import PynputKeySender, HidDllKeySender
+
+        sender_mode_cfg = _get_str("key_sender_mode", "pynput").lower()
+        dll_path_cfg = _get_str("hid_dll_path", "assets/lib/KeyDispenserDLL.dll")
+
+        key_sender = None
+        # 默认记录
+        self._key_sender_mode_used = "pynput"
+        self._key_sender_detail = ""
+
+        if sender_mode_cfg == "hid":
+            try:
+                key_sender = HidDllKeySender(dll_path=dll_path_cfg)
+                self._key_sender_mode_used = "hid"
+                self._key_sender_detail = f"DLL OK: {dll_path_cfg}"
+            except Exception as e:
+                # HID 初始化失败：退回 pynput，但记录诊断信息
+                key_sender = None
+                self._key_sender_mode_used = "pynput(fallback_from_hid)"
+                self._key_sender_detail = f"HID 初始化失败: {e}"
+        else:
+            self._key_sender_mode_used = "pynput"
+            self._key_sender_detail = ""
+
+        self._engine = MacroEngine(
+            ctx=self._ctx,
+            scheduler=self._dispatcher,
+            callbacks=self,
+            key_sender=key_sender,  # None 时引擎内部会用 PynputKeySender
+            config=EngineConfig(
+                poll_interval_ms=20,
+                stop_on_error=True,
+                gateway_poll_delay_ms=10,
+            ),
+            attempt_cfg=attempt_cfg,
+        )
+        return self._engine
+
+    def _update_engine_buttons(self) -> None:
+        running = bool(self._engine_running)
+        paused = bool(self._engine_paused)
+        has_preset = self._cmb_preset.count() > 0
+
+        self._btn_start.setEnabled((not running) and has_preset)
+        self._btn_stop.setEnabled(running)
+        self._btn_pause.setEnabled(running)
+        self._btn_step.setEnabled(running and paused)
+
+        self._btn_pause.setText("继续" if paused else "暂停")
+
+        self._cmb_preset.setEnabled(not running)
+        self._btn_reload.setEnabled(not running)
+        self._btn_save.setEnabled(not running)
+
+        self._set_edit_enabled(not running)
+
+    def _set_edit_enabled(self, enabled: bool) -> None:
+        self._timeline_canvas.setEnabled(enabled)
+        self._panel_nodes.setEnabled(enabled)
+        self._btn_mode_add.setEnabled(enabled)
+        self._btn_mode_rename.setEnabled(enabled)
+        self._btn_mode_delete.setEnabled(enabled)
+
+    def _on_start_clicked(self) -> None:
+        preset = self._current_preset()
+        if preset is None:
+            self._notify.error("请先选择一个方案再启动循环")
+            return
+
+        eng = self._ensure_engine()
+        if eng.is_running():
+            self._notify.status_msg("循环已在运行中", ttl_ms=1500)
+            return
+
+        try:
+            eng.start(preset)
+        except Exception as e:
+            self._notify.error("启动循环失败", detail=str(e))
+
+    def _on_pause_clicked(self) -> None:
+        if self._engine is None or not self._engine_running:
+            return
+
+        if not self._engine_paused:
+            self._engine.pause()
+            self._engine_paused = True
+            self._notify.status_msg("循环已暂停", ttl_ms=1500)
+        else:
+            self._engine.resume()
+            self._engine_paused = False
+            self._notify.status_msg("循环已继续", ttl_ms=1500)
+
+        self._update_engine_buttons()
+
+    def _on_step_clicked(self) -> None:
+        if self._engine is None or not self._engine_running:
+            return
+        self._engine.pause()
+        self._engine_paused = True
+        self._engine.step()
+        self._notify.status_msg("单步执行一次", ttl_ms=1500)
+        self._update_engine_buttons()
+
+    def _on_stop_clicked(self) -> None:
+        if self._engine is None or not self._engine.is_running():
+            return
+        try:
+            self._engine.stop("user_stop")
+        except Exception as e:
+            self._notify.error("停止循环失败", detail=str(e))
+
+    # ---------- 引擎回调 ----------
+
+    def on_started(self, preset_id: str) -> None:
+        self._engine_running = True
+        self._engine_paused = False
+        self._update_engine_buttons()
+        self._notify.status_msg(f"循环执行已启动: {preset_id}", ttl_ms=2500)
+
+    def on_stopped(self, reason: str) -> None:
+        self._engine_running = False
+        self._engine_paused = False
+        self._update_engine_buttons()
+        self._timeline_canvas.set_current_node(None, "", -1)
+        self._notify.status_msg(f"循环执行已停止: {reason}", ttl_ms=2500)
+
+    def on_node_executed(self, cursor: ExecutionCursor, node) -> None:
+        label = getattr(node, "label", "") or "(节点)"
+        self._last_executed_node_label = label  # 记录最近执行的节点
+        self._notify.status_msg(f"执行节点: {label}", ttl_ms=800)
+
+        # 记录到调试日志（如果调试面板打开）
+        if hasattr(self, "_debug_dialog") and self._debug_dialog is not None:
+            try:
+                from rotation_editor.core.runtime.engine import ExecLogEntry
+                # on_node_executed 仍然保留，但详细日志由 on_exec_log 提供
+            except Exception:
+                pass
+
+        mode_id = cursor.mode_id or ""
+        track_id = cursor.track_id
+        idx = int(cursor.node_index)
+
+        preset = self._current_preset()
+        if preset is None:
+            return
+
+        if mode_id and mode_id != (self._current_mode_id or ""):
+            self._current_mode_id = mode_id
+            self._tab_modes.blockSignals(True)
+            try:
+                for i in range(self._tab_modes.count()):
+                    if self._tab_modes.tabData(i) == mode_id:
+                        self._tab_modes.setCurrentIndex(i)
+                        break
+            finally:
+                self._tab_modes.blockSignals(False)
+
+            self._panel_nodes.set_context(self._ctx, preset=preset)
+            self._panel_nodes.set_target(mode_id, None)
+            self._timeline_canvas.set_data(self._ctx, preset, self._current_mode_id)
+
+        self._timeline_canvas.set_current_node(mode_id or None, track_id, idx)
+
+    def on_error(self, msg: str, detail: str) -> None:
+        self._notify.error(msg, detail=detail)
+
+    def on_exec_log(self, entry) -> None:
+        """
+        引擎执行日志回调 — 每次调度决策都会触发。
+        将日志条目转发到调试面板（如果打开）。
+        """
+        if hasattr(self, "_debug_dialog") and self._debug_dialog is not None:
+            try:
+                self._debug_dialog.append_exec_log(entry)
+            except Exception:
+                pass
+
+    # ---------- 热键接口 ----------
+
+    def toggle_engine_via_hotkey(self) -> None:
+        """
+        供 ExecHotkeyController 使用的启停接口：
+
+        语义：
+        - 若引擎未运行：等价于点击“开始”，启动当前选中方案；
+        - 若引擎正在运行但未暂停：等价于点击“暂停”按钮；
+        - 若引擎正在运行且已暂停：等价于点击“继续”（再点一次暂停按钮）。
+
+        注意：
+        - “停止(Stop)” 仍只通过 UI 上的“停止”按钮触发，不再由热键触发。
+        """
+        # 未运行 -> 启动当前方案
+        if not self._engine_running:
+            self._on_start_clicked()
+            return
+
+        # 已运行 -> 切换暂停/继续
+        self._on_pause_clicked()
+
+    def open_preset(self, preset_id: str) -> None:
+        """
+        在当前 ctx 下，选中指定的 RotationPreset 并刷新 UI。
+
+        - preset_id 找不到时，会退回到第一个 preset（若存在）。
+        - 仅改变编辑器内部选中 preset，不影响 ProfileContext。
+        """
+        pid = (preset_id or "").strip()
+        if not pid:
+            # 若传入空 id，则按当前逻辑选第一个
+            self._select_first_preset_if_any()
+            return
+
+        # 确保 preset 下拉已构建
+        self._rebuild_preset_combo()
+
+        self._building = True
+        try:
+            target_index = -1
+            for i in range(self._cmb_preset.count()):
+                data = self._cmb_preset.itemData(i)
+                if isinstance(data, str) and data == pid:
+                    target_index = i
+                    break
+
+            if target_index >= 0:
+                self._cmb_preset.setCurrentIndex(target_index)
+            else:
+                # 找不到目标 preset，则退回第一个
+                if self._cmb_preset.count() > 0:
+                    self._cmb_preset.setCurrentIndex(0)
+        finally:
+            self._building = False
+
+        # 手动触发一次 _on_preset_changed 以刷新内部状态与时间轴
+        idx = self._cmb_preset.currentIndex()
+        if idx >= 0:
+            self._on_preset_changed(idx)
+    # ---------- 公共接口：供快捷执行面板 / 热键调用 ----------
+
+    def start_engine_for_preset(self, preset_id: Optional[str] = None) -> None:
+        """
+        供外部调用：
+        - 若提供 preset_id，则先在本页选中该 preset；
+        - 然后执行与“开始”按钮相同的逻辑（校验 + 启动引擎）。
+        """
+        pid = (preset_id or "").strip()
+        if pid:
+            try:
+                self.open_preset(pid)
+            except Exception:
+                pass
+        # 复用内部按钮逻辑
+        self._on_start_clicked()
+
+    def stop_engine(self) -> None:
+        """
+        供外部调用：等价于点击“停止”按钮。
+        """
+        self._on_stop_clicked()
+
+    def toggle_pause_engine(self) -> None:
+        """
+        供外部调用：等价于点击“暂停/继续”按钮。
+        """
+        self._on_pause_clicked()
+
+    def is_engine_running(self) -> bool:
+        return bool(self._engine is not None and self._engine_running)
+
+    def is_engine_paused(self) -> bool:
+        return bool(self._engine_running and self._engine_paused)
+
+    def get_engine_state_snapshot(self) -> Dict[str, Any]:
+        """
+        返回引擎当前状态快照（供快捷执行面板使用）。
+        """
+        if self._engine is None:
+            # 简单兜底
+            return {
+                "running": False,
+                "paused": False,
+                "preset_id": "",
+                "started_ms": 0,
+                "stop_reason": "",
+                "last_error": "",
+                "last_error_detail": "",
+            }
+        try:
+            return self._engine.get_engine_state_snapshot()
+        except Exception:
+            return {
+                "running": False,
+                "paused": False,
+                "preset_id": "",
+                "started_ms": 0,
+                "stop_reason": "error",
+                "last_error": "state_snapshot_failed",
+                "last_error_detail": "",
+            }
+    def get_last_executed_node_label(self) -> str:
+        """
+        返回最近一次执行的节点标签（供快捷执行面板显示）。
+        """
+        return getattr(self, "_last_executed_node_label", "") or ""
+
+    def get_key_sender_info(self) -> Dict[str, str]:
+        """
+        返回当前使用的发键模式与诊断信息（供快捷执行面板显示）。
+        """
+        mode = getattr(self, "_key_sender_mode_used", "pynput")
+        detail = getattr(self, "_key_sender_detail", "")
+        return {"mode": mode, "detail": detail}

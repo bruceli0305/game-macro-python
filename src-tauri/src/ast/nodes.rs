@@ -1,0 +1,41 @@
+use serde::{Deserialize, Serialize};
+
+/// AST 条件表达式节点（对齐 python-legacy ast/nodes.py）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Expr {
+    #[serde(rename = "and")]
+    And { children: Vec<Expr> },
+    #[serde(rename = "or")]
+    Or { children: Vec<Expr> },
+    #[serde(rename = "not")]
+    Not { child: Box<Expr> },
+    #[serde(rename = "const")]
+    Const { value: bool },
+    #[serde(rename = "pixel_point")]
+    PixelMatchPoint { point_id: String, tolerance: u8 },
+    #[serde(rename = "pixel_skill")]
+    PixelMatchSkill { skill_id: String, tolerance: u8 },
+    #[serde(rename = "cast_bar_changed")]
+    CastBarChanged { point_id: String, tolerance: u8 },
+    #[serde(rename = "skill_metric_ge")]
+    SkillMetricGE {
+        skill_id: String,
+        metric: SkillMetric,
+        count: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SkillMetric {
+    #[serde(rename = "success")]
+    Success,
+    #[serde(rename = "attempt_started")]
+    AttemptStarted,
+    #[serde(rename = "key_sent_ok")]
+    KeySentOk,
+    #[serde(rename = "cast_started")]
+    CastStarted,
+    #[serde(rename = "fail")]
+    Fail,
+}
