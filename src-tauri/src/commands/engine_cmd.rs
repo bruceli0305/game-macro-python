@@ -13,8 +13,10 @@ use crate::engine::runtime_state::{AttemptStage, RuntimeState};
 use crate::engine::skill_attempt::{KeySender, SkillAttemptConfig};
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::input::EnigoKeySender;
+use crate::models::base::BaseConfig;
 use crate::models::cycle::CycleConfig;
 use crate::models::point::Point;
+use crate::models::profile::Profile;
 use crate::models::skill::Skill;
 use crate::store::profile_store::ProfileStore;
 use crate::{AppState, EngineTaskHandle};
@@ -65,10 +67,13 @@ struct SkillRuntimePayload {
     fail: u32,
 }
 
-fn load_profile_config() -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>)> {
+fn load_profile_config() -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
     let dir = app_data_dir()?;
     let store = ProfileStore::new(dir);
-    let profile = store.load("default")?;
+    let profile = store.load_or_create_default("default")?;
+
+    validate_engine_profile(&profile)?;
+    let attempt_cfg = attempt_config_from_base(&profile.base);
 
     let config = profile
         .rotations
@@ -84,7 +89,69 @@ fn load_profile_config() -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>)> {
         skills.len()
     );
 
-    Ok((config, skills, points))
+    Ok((config, skills, points, attempt_cfg))
+}
+
+fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
+    SkillAttemptConfig {
+        default_gap_ms: base.exec.default_skill_gap_ms,
+        poll_not_ready_ms: base.exec.poll_not_ready_ms,
+        max_retries: base.exec.max_retries,
+        retry_gap_ms: base.exec.retry_gap_ms,
+        complete_poll_ms: base.cast_bar.poll_interval_ms,
+        complete_max_wait_factor: base.cast_bar.max_wait_factor,
+        ..SkillAttemptConfig::default()
+    }
+}
+
+fn validate_engine_profile(profile: &Profile) -> AppResult<()> {
+    let rotation = profile
+        .rotations
+        .first()
+        .ok_or_else(|| AppError::Config("default profile has no rotations".into()))?;
+    if rotation.phases.is_empty() {
+        return Err(AppError::Config(
+            "default rotation has no phases".to_string(),
+        ));
+    }
+
+    let mut has_executable_slot = false;
+    for phase in &rotation.phases {
+        for slot in &phase.skills {
+            let skill_id = slot.skill_id.trim();
+            if skill_id.is_empty() {
+                continue;
+            }
+            let Some(skill) = profile
+                .skills
+                .skills
+                .iter()
+                .find(|skill| skill.id.as_str() == skill_id)
+            else {
+                return Err(AppError::Config(format!(
+                    "slot references missing skill '{skill_id}'"
+                )));
+            };
+            if !skill.enabled {
+                continue;
+            }
+            if skill.trigger_key.trim().is_empty() {
+                return Err(AppError::Config(format!(
+                    "enabled skill '{}' has no trigger_key",
+                    skill.id
+                )));
+            }
+            has_executable_slot = true;
+        }
+    }
+
+    if !has_executable_slot {
+        return Err(AppError::Config(
+            "default rotation has no executable enabled skill slots".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn app_data_dir() -> AppResult<std::path::PathBuf> {
@@ -243,9 +310,9 @@ async fn run_engine_loop(
     config: CycleConfig,
     skills: Vec<Skill>,
     points: Vec<Point>,
+    attempt_cfg: SkillAttemptConfig,
 ) {
     let sampler = DirectPixelSampler;
-    let attempt_cfg = SkillAttemptConfig::default();
     let mut executor = CycleExecutor::new(&config, &points, &skills, &sampler, attempt_cfg);
 
     let mut key_sender: Box<dyn KeySender> = match EnigoKeySender::new() {
@@ -364,7 +431,7 @@ pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult
         EngineTaskHandle::pending(cancel.clone()),
     )?;
 
-    let (config, skills, points) = match load_profile_config() {
+    let (config, skills, points, attempt_cfg) = match load_profile_config() {
         Ok(config) => config,
         Err(error) => {
             if let Some(task) = take_engine_task(&state.engine_task)? {
@@ -380,7 +447,7 @@ pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult
 
     let task_cancel = cancel.clone();
     let join = tauri::async_runtime::spawn(async move {
-        run_engine_loop(app, task_cancel, config, skills, points).await;
+        run_engine_loop(app, task_cancel, config, skills, points, attempt_cfg).await;
     });
     let task = EngineTaskHandle::new(cancel, join);
     replace_engine_task(&state.engine_task, task)?;
@@ -403,10 +470,9 @@ pub fn engine_stop(state: State<'_, AppState>) -> CommandResult<String> {
 
 #[tauri::command]
 pub fn simulate_rotation() -> CommandResult<String> {
-    let (config, skills, points) = load_profile_config()?;
+    let (config, skills, points, attempt_cfg) = load_profile_config()?;
 
     let sampler = DirectPixelSampler;
-    let attempt_cfg = SkillAttemptConfig::default();
     let mut executor = CycleExecutor::new(&config, &points, &skills, &sampler, attempt_cfg);
 
     struct NoopKeySender;
@@ -481,6 +547,9 @@ pub fn engine_status(state: State<'_, AppState>) -> CommandResult<EngineStatus> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::cycle::{CyclePhase, SkillSlot};
+    use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig};
+    use crate::store::profile_store::default_profile;
 
     #[test]
     fn test_running_token_blocks_reserve() {
@@ -534,5 +603,90 @@ mod tests {
         assert_eq!(payload.skills[0].state, "SUCCESS");
         assert_eq!(payload.skills[0].attempt_started, 1);
         assert_eq!(payload.skills[0].success, 1);
+    }
+
+    fn test_skill(id: &str, key: &str, enabled: bool) -> Skill {
+        Skill {
+            id: id.into(),
+            name: id.into(),
+            enabled,
+            trigger_key: key.into(),
+            cast: CastConfig::default(),
+            pixel: PixelSpec {
+                monitor: "primary".into(),
+                vx: 0,
+                vy: 0,
+                color: ColorRGB { r: 0, g: 0, b: 0 },
+                tolerance: 0,
+                sample: SampleConfig {
+                    mode: "single".into(),
+                    radius: 0,
+                },
+            },
+            note: String::new(),
+            game_id: 0,
+            game_desc: String::new(),
+            icon_url: String::new(),
+            cooldown_ms: 0,
+            radius: 0,
+            shots_per_cycle: 1,
+            ammo_stages: vec![],
+        }
+    }
+
+    fn profile_with_slot(skill_id: &str) -> Profile {
+        let mut profile = default_profile("default");
+        profile.skills.skills = vec![test_skill(skill_id, "1", true)];
+        profile.rotations[0].phases = vec![CyclePhase {
+            name: "P1".into(),
+            skills: vec![SkillSlot {
+                skill_id: skill_id.into(),
+                priority: 1,
+                label: String::new(),
+                condition_expr: None,
+                start_expr: None,
+                complete_expr: None,
+                override_cast_ms: None,
+            }],
+            complete_when: "any_fired".into(),
+        }];
+        profile
+    }
+
+    #[test]
+    fn test_engine_profile_validation_rejects_empty_default() {
+        let profile = default_profile("default");
+
+        assert!(matches!(
+            validate_engine_profile(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_engine_profile_validation_accepts_enabled_slot_with_key() {
+        let profile = profile_with_slot("skill-1");
+
+        assert!(validate_engine_profile(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_attempt_config_uses_base_exec_values() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.base.exec.default_skill_gap_ms = 77;
+        profile.base.exec.poll_not_ready_ms = 88;
+        profile.base.exec.max_retries = 2;
+        profile.base.exec.retry_gap_ms = 33;
+        profile.base.cast_bar.poll_interval_ms = 44;
+        profile.base.cast_bar.max_wait_factor = 2.0;
+
+        let cfg = attempt_config_from_base(&profile.base);
+
+        assert_eq!(cfg.default_gap_ms, 77);
+        assert_eq!(cfg.poll_not_ready_ms, 88);
+        assert_eq!(cfg.max_retries, 2);
+        assert_eq!(cfg.retry_gap_ms, 33);
+        assert_eq!(cfg.complete_poll_ms, 44);
+        assert_eq!(cfg.complete_max_wait_factor, 2.0);
     }
 }

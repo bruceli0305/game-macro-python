@@ -4,10 +4,18 @@ import { IconPlus, IconTrash, IconChevronDown, IconChevronRight } from "@tabler/
 import SkillCard from "./SkillCard.vue";
 import type { CyclePhase } from "../../types/cycle";
 
+interface SkillCardMeta {
+  triggerKey: string;
+  readbarMs: number;
+  cooldownMs: number;
+  shotsPerCycle: number;
+}
+
 defineProps<{
   phase: CyclePhase;
   phaseIndex: number;
   skillNames: Record<string, string>;
+  skillMeta: Record<string, SkillCardMeta>;
   collapsed: boolean;
 }>();
 
@@ -79,6 +87,7 @@ function completeLabel(v: string) {
               :slot="slot"
               :index="si"
               :skill-name="skillNames[slot.skill_id] || null"
+              :meta="skillMeta[slot.skill_id] || null"
               @edit="emit('editSlot', si)"
               @remove="emit('removeSlot', si)"
             />

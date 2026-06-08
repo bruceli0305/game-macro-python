@@ -1,4 +1,4 @@
-﻿//! Phase and priority cycle executor.
+//! Phase and priority cycle executor.
 //!
 //! Execution model:
 //! 1. Keep the active phase index and fired skill sets.
@@ -17,7 +17,7 @@ use crate::engine::skill_attempt::{
 use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot};
 use crate::models::point::Point;
 use crate::models::skill::Skill;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // Cycle execution state.
@@ -30,6 +30,8 @@ pub struct CycleExecState {
     pub cycle_count: u32,
     pub fired_in_phase: HashSet<String>,
     pub fired_in_cycle: HashSet<String>,
+    pub fired_count_in_cycle: HashMap<String, u32>,
+    pub skill_ready_at_ms: HashMap<String, u64>,
     pub total_executed: u32,
     pub last_skill_id: String,
     pub last_outcome: String,
@@ -184,13 +186,16 @@ impl<'a> CycleExecutor<'a> {
                 continue;
             }
 
-            if self.state.fired_in_phase.contains(sid) && phase.complete_when != "always" {
+            if self.state.fired_in_phase.contains(sid)
+                && phase.complete_when != "always"
+                && !self.slot_can_fire_more_this_cycle(sid)
+            {
                 continue;
             }
 
             self.runtime.mark_node_exec(sid);
 
-            let (ready, cond_reason) = self.check_skill_ready(slot);
+            let (ready, cond_reason) = self.check_skill_ready(slot, now_ms);
             if !ready {
                 self.runtime.mark_ready_false(sid);
                 self.log_event(CycleLogEvent {
@@ -217,7 +222,7 @@ impl<'a> CycleExecutor<'a> {
         false
     }
 
-    fn check_skill_ready(&self, slot: &SkillSlot) -> (bool, String) {
+    fn check_skill_ready(&self, slot: &SkillSlot, now_ms: u64) -> (bool, String) {
         let sid = slot.skill_id.trim();
         if sid.is_empty() {
             return (false, "skill_id_empty".into());
@@ -228,6 +233,18 @@ impl<'a> CycleExecutor<'a> {
         };
         if !skill.enabled {
             return (false, "skill_disabled".into());
+        }
+        if let Some(ready_at) = self.state.skill_ready_at_ms.get(sid) {
+            if now_ms < *ready_at {
+                return (false, format!("cooldown_until={ready_at}"));
+            }
+        }
+        if !self.slot_can_fire_more_this_cycle(sid) {
+            let shot_limit = skill.shots_per_cycle.max(1);
+            return (false, format!("shots_per_cycle_exhausted={shot_limit}"));
+        }
+        if !self.skill_has_ammo(skill) {
+            return (false, "ammo_unavailable".into());
         }
 
         let expr = self
@@ -580,6 +597,17 @@ impl<'a> CycleExecutor<'a> {
         self.state.next_ready_ms = now_ms.saturating_add(u64::from(execution.next_delay_ms));
         self.state.fired_in_phase.insert(skill_id.to_string());
         self.state.fired_in_cycle.insert(skill_id.to_string());
+        *self
+            .state
+            .fired_count_in_cycle
+            .entry(skill_id.to_string())
+            .or_insert(0) += 1;
+        if let Some(cooldown_ms) = self.skill_cooldown_ms(skill_id) {
+            self.state.skill_ready_at_ms.insert(
+                skill_id.to_string(),
+                now_ms.saturating_add(u64::from(cooldown_ms)),
+            );
+        }
         self.state.total_executed += 1;
         self.state.last_skill_id = skill_id.to_string();
         self.state.last_outcome = outcome.clone();
@@ -644,6 +672,69 @@ impl<'a> CycleExecutor<'a> {
             .is_some_and(|(r, g, b)| r.max(g).max(b) <= 5)
     }
 
+    fn skill_cooldown_ms(&self, skill_id: &str) -> Option<u32> {
+        let skill = self
+            .skills
+            .iter()
+            .find(|skill| skill.id.as_str() == skill_id)?;
+        let cooldown_ms = skill.cooldown_ms.max(skill.cast.cooldown_ms);
+        (cooldown_ms > 0).then_some(cooldown_ms)
+    }
+
+    fn slot_can_fire_more_this_cycle(&self, skill_id: &str) -> bool {
+        let shot_limit = self
+            .skills
+            .iter()
+            .find(|skill| skill.id.as_str() == skill_id)
+            .map(|skill| skill.shots_per_cycle.max(1))
+            .unwrap_or(1);
+        self.state
+            .fired_count_in_cycle
+            .get(skill_id)
+            .copied()
+            .unwrap_or(0)
+            < shot_limit
+    }
+
+    fn slot_shots_complete_this_cycle(&self, skill_id: &str) -> bool {
+        let shot_limit = self
+            .skills
+            .iter()
+            .find(|skill| skill.id.as_str() == skill_id)
+            .map(|skill| skill.shots_per_cycle.max(1))
+            .unwrap_or(1);
+        self.state
+            .fired_count_in_cycle
+            .get(skill_id)
+            .copied()
+            .unwrap_or(0)
+            >= shot_limit
+    }
+
+    fn skill_has_ammo(&self, skill: &Skill) -> bool {
+        if skill.ammo_stages.is_empty() {
+            return true;
+        }
+
+        skill.ammo_stages.iter().any(|stage| {
+            if stage.charges_left == 0 {
+                return false;
+            }
+            let pix = &stage.pixel;
+            self.sampler
+                .sample_rgb_abs(
+                    &pix.monitor,
+                    pix.vx,
+                    pix.vy,
+                    &pix.sample.mode,
+                    pix.sample.radius,
+                )
+                .is_some_and(|current| {
+                    rgb_diff_max(current, (pix.color.r, pix.color.g, pix.color.b)) <= pix.tolerance
+                })
+        })
+    }
+
     fn apply_attempt_event(&mut self, event: AttemptEvent) {
         match event {
             AttemptEvent::AttemptStarted { skill_id } => {
@@ -678,19 +769,12 @@ impl<'a> CycleExecutor<'a> {
                 let sid = slot.skill_id.trim();
                 sid.is_empty()
                     || self.state.fired_in_phase.contains(sid)
-                    || !self.check_skill_ready(slot).0
+                    || !self.check_skill_ready(slot, self.state.next_ready_ms).0
             }),
-            _ => {
-                let all_ids: HashSet<&str> = phase
-                    .skills
-                    .iter()
-                    .map(|s| s.skill_id.as_str())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                all_ids
-                    .iter()
-                    .all(|id| self.state.fired_in_phase.contains(*id))
-            }
+            _ => phase.skills.iter().all(|slot| {
+                let skill_id = slot.skill_id.trim();
+                skill_id.is_empty() || self.slot_shots_complete_this_cycle(skill_id)
+            }),
         }
     }
 
@@ -705,6 +789,7 @@ impl<'a> CycleExecutor<'a> {
         self.state.phase_index = 0;
         self.state.fired_in_phase.clear();
         self.state.fired_in_cycle.clear();
+        self.state.fired_count_in_cycle.clear();
         // Runtime metrics are cumulative and are not reset per cycle.
     }
 
@@ -740,6 +825,13 @@ impl<'a> CycleExecutor<'a> {
     }
 }
 
+fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
+    let dr = (a.0 as i16 - b.0 as i16).unsigned_abs() as u8;
+    let dg = (a.1 as i16 - b.1 as i16).unsigned_abs() as u8;
+    let db = (a.2 as i16 - b.2 as i16).unsigned_abs() as u8;
+    dr.max(dg).max(db)
+}
+
 // ===========================================================================
 // 娴嬭瘯
 // ===========================================================================
@@ -749,7 +841,7 @@ mod tests {
     use super::*;
     use crate::ast::evaluator::PixelSampler;
     use crate::models::cycle::{CyclePhase, SkillSlot};
-    use crate::models::skill::{ColorRGB, PixelSpec, SampleConfig, Skill};
+    use crate::models::skill::{AmmoStagePixel, ColorRGB, PixelSpec, SampleConfig, Skill};
     use serde_json::json;
 
     struct DummySampler {
@@ -1337,5 +1429,133 @@ mod tests {
         assert_eq!(runtime.ready_false, 1);
         assert_eq!(runtime.attempt_started, 0);
         assert_eq!(runtime.success, 0);
+    }
+
+    #[test]
+    fn test_skill_cooldown_blocks_until_due() {
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![make_slot("sk1", 1)],
+                complete_when: "always".into(),
+            }],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+        };
+        let points = vec![];
+        let mut skill = make_skill("sk1", "f1");
+        skill.cooldown_ms = 100;
+        let skills = vec![skill];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.state.total_executed, 1);
+        assert!(!exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(exec.state.total_executed, 1);
+        assert!(exec.tick(&mut ks, &|| false, 100));
+        assert_eq!(exec.state.total_executed, 2);
+    }
+
+    #[test]
+    fn test_all_fired_respects_shots_per_cycle() {
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![make_slot("sk1", 1)],
+                complete_when: "all_fired".into(),
+            }],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+        };
+        let points = vec![];
+        let mut skill = make_skill("sk1", "f1");
+        skill.shots_per_cycle = 2;
+        let skills = vec![skill];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.state.phase_index, 0);
+        assert_eq!(exec.state.cycle_count, 0);
+        assert!(exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(exec.state.cycle_count, 1);
+        assert_eq!(exec.state.total_executed, 2);
+    }
+
+    #[test]
+    fn test_ammo_stage_pixel_blocks_when_no_charge_matches() {
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![make_slot("sk1", 1)],
+                complete_when: "any_fired".into(),
+            }],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+        };
+        let points = vec![];
+        let mut skill = make_skill("sk1", "f1");
+        skill.ammo_stages = vec![AmmoStagePixel {
+            charges_left: 1,
+            pixel: PixelSpec {
+                monitor: "primary".into(),
+                vx: 0,
+                vy: 0,
+                color: ColorRGB { r: 1, g: 2, b: 3 },
+                tolerance: 0,
+                sample: SampleConfig {
+                    mode: "single".into(),
+                    radius: 0,
+                },
+            },
+        }];
+        let skills = vec![skill];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(!exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.state.total_executed, 0);
+        let runtime = exec.runtime.skills.get("sk1").unwrap();
+        assert_eq!(runtime.ready_false, 1);
     }
 }

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { onMounted } from "vue";
-import { darkTheme, zhCN, dateZhCN } from "naive-ui";
+import {
+  NConfigProvider,
+  NMessageProvider,
+  darkTheme,
+  zhCN,
+  dateZhCN,
+} from "naive-ui";
 import AppLayout from "./components/AppLayout.vue";
 import { useHotkeys } from "./composables/useHotkeys";
 

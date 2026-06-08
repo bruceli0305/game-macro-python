@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref, onMounted } from "vue";
-import { NButton, NSpace, NDivider } from "naive-ui";
+import { NButton, NSpace, NDivider, useMessage } from "naive-ui";
 import { IconPlus, IconDeviceFloppy } from "@tabler/icons-vue";
 import PhaseLane from "../components/editor/PhaseLane.vue";
 import SkillEditModal from "../components/editor/SkillEditModal.vue";
@@ -10,10 +10,19 @@ import SkillStatusGrid from "../components/engine/SkillStatusGrid.vue";
 import { DEFAULT_PROFILE_NAME, useProfile } from "../composables/useProfile";
 import { useEngineStore } from "../stores/engine";
 import type { CycleConfig, SkillSlot } from "../types/cycle";
+import type { Point } from "../types/point";
 import type { Skill } from "../types/skill";
+
+interface SkillCardMeta {
+  triggerKey: string;
+  readbarMs: number;
+  cooldownMs: number;
+  shotsPerCycle: number;
+}
 
 const engineStore = useEngineStore();
 const { loadOrCreateProfile, saveRotations } = useProfile();
+const message = useMessage();
 
 const defaultConfig: CycleConfig = {
   name: "我的循环", phases: [{ name: "", skills: [], complete_when: "any_fired" }],
@@ -23,6 +32,8 @@ const config = reactive<CycleConfig>(JSON.parse(JSON.stringify(defaultConfig)));
 
 const savedSkills = ref<Skill[]>([]);
 const skillList = ref<{ id: string; name: string }[]>([]);
+const savedPoints = ref<Point[]>([]);
+const pointList = ref<{ id: string; name: string }[]>([]);
 const collapsedPhases = ref<Set<number>>(new Set());
 
 // 编辑弹窗状态
@@ -40,6 +51,7 @@ const editingPhaseIdx = ref(-1);
 const editingSlotIdx = ref(-1);
 
 const skillNames = ref<Record<string, string>>({});
+const skillMeta = ref<Record<string, SkillCardMeta>>({});
 
 onMounted(async () => {
   try {
@@ -48,6 +60,19 @@ onMounted(async () => {
     savedSkills.value = p?.skills?.skills || [];
     skillList.value = savedSkills.value.map((s) => ({ id: s.id, name: s.name || s.id }));
     skillNames.value = Object.fromEntries(savedSkills.value.map((s) => [s.id, s.name || s.id]));
+    skillMeta.value = Object.fromEntries(
+      savedSkills.value.map((s) => [
+        s.id,
+        {
+          triggerKey: s.trigger_key,
+          readbarMs: s.cast.readbar_ms,
+          cooldownMs: s.cooldown_ms || s.cast.cooldown_ms,
+          shotsPerCycle: s.shots_per_cycle,
+        },
+      ]),
+    );
+    savedPoints.value = p?.points?.points || [];
+    pointList.value = savedPoints.value.map((p) => ({ id: p.id, name: p.name || p.id }));
   } catch { /* 首次 */ }
 });
 
@@ -85,7 +110,11 @@ function toggleCollapse(i: number) {
 async function saveProfile() {
   try {
     await saveRotations(DEFAULT_PROFILE_NAME, [JSON.parse(JSON.stringify(config)) as CycleConfig]);
-  } catch (e) { console.error(e); }
+    message.success("循环配置已保存");
+  } catch (e) {
+    console.error(e);
+    message.error("保存失败，请检查技能和点位引用");
+  }
 }
 </script>
 
@@ -109,6 +138,7 @@ async function saveProfile() {
           :phase="phase"
           :phase-index="pi"
           :skill-names="skillNames"
+          :skill-meta="skillMeta"
           :collapsed="collapsedPhases.has(pi)"
           :style="engineStore.isRunning && engineStore.currentPhase === pi
             ? 'border-color: #18a058; box-shadow: 0 0 8px rgba(24,160,88,0.3)'
@@ -137,7 +167,7 @@ async function saveProfile() {
       :show="showEditModal"
       :slot="editingSlot"
       :skill-options="skillList"
-      :point-options="[]"
+      :point-options="pointList"
       @update:show="showEditModal = $event"
       @saved="onSaved"
     />
