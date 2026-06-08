@@ -21,6 +21,7 @@ Thumbs.db
 
 # Logs
 *.log
+.reasonix/
 
 # Python legacy (keep as reference, don't track changes)
 python-legacy/__pycache__/

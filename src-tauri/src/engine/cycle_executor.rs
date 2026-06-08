@@ -83,7 +83,6 @@ pub struct CycleExecutor<'a> {
 #[derive(Debug, Clone)]
 struct PendingAttempt {
     phase_index: usize,
-    phase_name: String,
     skill_id: String,
     readbar_ms: u32,
     start_expr: Expr,
@@ -207,7 +206,7 @@ impl<'a> CycleExecutor<'a> {
             }
 
             if let Some(execution) =
-                self.begin_skill_attempt(key_sender, slot, stopped, now_ms, phase_idx, phase)
+                self.begin_skill_attempt(key_sender, slot, stopped, now_ms, phase_idx)
             {
                 self.finish_skill_attempt(phase_idx, phase, sid, execution, now_ms);
             }
@@ -267,7 +266,6 @@ impl<'a> CycleExecutor<'a> {
         stopped: &dyn Fn() -> bool,
         now_ms: u64,
         phase_index: usize,
-        phase: &CyclePhase,
     ) -> Option<ExecutionResult> {
         let sid = slot.skill_id.trim().to_string();
         let Some(skill) = self.skills.iter().find(|skill| skill.id.as_str() == sid) else {
@@ -307,7 +305,6 @@ impl<'a> CycleExecutor<'a> {
 
         self.pending_attempt = Some(PendingAttempt {
             phase_index,
-            phase_name: phase.name.clone(),
             skill_id: sid,
             readbar_ms: slot.override_cast_ms.unwrap_or(skill.cast.readbar_ms),
             start_expr: slot

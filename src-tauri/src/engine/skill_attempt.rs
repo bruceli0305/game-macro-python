@@ -545,11 +545,9 @@ pub static START_DEFAULT: Expr = Expr::Const { value: true };
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::evaluator::{MetricProvider, PixelSampler};
-    use crate::ast::nodes::SkillMetric;
+    use crate::ast::evaluator::PixelSampler;
     use crate::models::point::Point;
     use crate::models::skill::{ColorRGB, PixelSpec, SampleConfig, Skill};
-    use std::collections::HashMap;
 
     // ---- 测试替身 ----
 
@@ -577,15 +575,6 @@ mod tests {
         fn send_key(&mut self, key: &str) -> bool {
             self.keys_sent.push(key.to_string());
             !self.should_fail
-        }
-    }
-
-    struct MapMetricProvider {
-        data: HashMap<String, HashMap<SkillMetric, u32>>,
-    }
-    impl MetricProvider for MapMetricProvider {
-        fn get_metric(&self, skill_id: &str, metric: &SkillMetric) -> Option<u32> {
-            self.data.get(skill_id)?.get(metric).copied()
         }
     }
 

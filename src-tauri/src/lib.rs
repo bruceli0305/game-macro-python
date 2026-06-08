@@ -1,19 +1,17 @@
-#![allow(dead_code)]
-
 use std::sync::Mutex;
 
 use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt};
 
-mod ast;
-mod capture;
+pub mod ast;
+pub mod capture;
 mod commands;
-mod engine;
-mod error;
-mod input;
-mod models;
-mod store;
+pub mod engine;
+pub mod error;
+pub mod input;
+pub mod models;
+pub mod store;
 
 /// Runtime handle for the active engine task.
 pub struct EngineTaskHandle {

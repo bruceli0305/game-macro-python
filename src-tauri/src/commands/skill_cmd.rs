@@ -9,10 +9,6 @@ struct Gw2SkillRaw {
     id: Option<u32>,
     name: Option<String>,
     description: Option<String>,
-    #[serde(rename = "type")]
-    skill_type: Option<String>,
-    weapon_type: Option<String>,
-    slot: Option<String>,
     #[serde(default)]
     facts: Vec<serde_json::Value>,
 }
