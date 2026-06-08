@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEngineStore } from "../stores/engine";
 import type { EngineRuntimeSnapshot, SkillAttemptStage } from "../types/engine";
+import type { Profile } from "../types/profile";
 
 
 export function useEngine() {
@@ -76,9 +77,43 @@ export function useEngine() {
     }
   }
 
+  async function preflight(): Promise<EnginePreflightReport> {
+    return await invoke<EnginePreflightReport>("engine_preflight");
+  }
+
   async function simulateRotation(): Promise<SimulationResult> {
     const json = await invoke<string>("simulate_rotation");
     return JSON.parse(json) as SimulationResult;
+  }
+
+  async function simulateRotationWithPixels(
+    pixelOverrides: PixelOverride[]
+  ): Promise<SimulationResult> {
+    const json = await invoke<string>("simulate_rotation_with_pixels", { pixelOverrides });
+    return JSON.parse(json) as SimulationResult;
+  }
+
+  async function simulateProfileRotation(profile: Profile): Promise<SimulationResult> {
+    const content = JSON.stringify(profile);
+    const json = await invoke<string>("simulate_profile_rotation", { content });
+    return JSON.parse(json) as SimulationResult;
+  }
+
+  async function simulateProfileRotationWithPixels(
+    profile: Profile,
+    pixelOverrides: PixelOverride[]
+  ): Promise<SimulationResult> {
+    const content = JSON.stringify(profile);
+    const json = await invoke<string>("simulate_profile_rotation_with_pixels", {
+      content,
+      pixelOverrides,
+    });
+    return JSON.parse(json) as SimulationResult;
+  }
+
+  async function simulateIpcSmokeFixture(): Promise<IpcSmokeFixtureResult> {
+    const json = await invoke<string>("simulate_ipc_smoke_fixture");
+    return JSON.parse(json) as IpcSmokeFixtureResult;
   }
 
   /** 取消事件监听 */
@@ -95,7 +130,18 @@ export function useEngine() {
     unlistenStopped = null;
   }
 
-  return { start, stop, simulateRotation, cleanup, store };
+  return {
+    start,
+    stop,
+    preflight,
+    simulateRotation,
+    simulateRotationWithPixels,
+    simulateProfileRotation,
+    simulateProfileRotationWithPixels,
+    simulateIpcSmokeFixture,
+    cleanup,
+    store,
+  };
 }
 
 interface EngineTickPayload {
@@ -179,6 +225,7 @@ export interface SimulationEvent {
   index: number;
   timeMs: number;
   phase: string;
+  event: string;
   skillId: string;
   skillName: string;
   outcome: string;
@@ -189,4 +236,31 @@ export interface SimulationEvent {
 
 export interface SimulationResult {
   events: SimulationEvent[];
+}
+
+export interface PixelOverride {
+  monitor: string;
+  x: number;
+  y: number;
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface IpcSmokeFixtureResult {
+  profile_id: string;
+  direct_events: number;
+  pixel_events: number;
+}
+
+export interface EnginePreflightReport {
+  ready: boolean;
+  engine_running: boolean;
+  profile_name: string;
+  exec_enabled: boolean;
+  rotation_count: number;
+  skill_count: number;
+  point_count: number;
+  executable_slot_count: number;
+  error: string | null;
 }

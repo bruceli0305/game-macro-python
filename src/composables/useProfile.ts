@@ -30,7 +30,7 @@ export function createDefaultProfile(name = DEFAULT_PROFILE_NAME): Profile {
       ui: { theme: "darkly" },
       capture: { monitor_policy: "primary" },
       pick: {
-        confirm_hotkey: "f8",
+        confirm_hotkey: "F8",
         mouse_avoid: true,
         mouse_avoid_offset_y: 80,
         mouse_avoid_settle_ms: 80,
@@ -45,7 +45,7 @@ export function createDefaultProfile(name = DEFAULT_PROFILE_NAME): Profile {
       },
       exec: {
         enabled: false,
-        toggle_hotkey: "",
+        toggle_hotkey: "F9",
         default_skill_gap_ms: 50,
         poll_not_ready_ms: 50,
         max_retries: 3,

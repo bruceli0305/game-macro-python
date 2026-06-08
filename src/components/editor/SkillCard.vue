@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NIcon, NTooltip } from "naive-ui";
+import { NButton, NIcon, NTooltip } from "naive-ui";
 import {
   IconChartBar,
   IconClock,
@@ -8,6 +8,8 @@ import {
   IconKeyboard,
   IconLink,
   IconMinus,
+  IconPencil,
+  IconTrash,
 } from "@tabler/icons-vue";
 import type { SkillSlot } from "../../types/cycle";
 
@@ -90,27 +92,43 @@ function onDblClick() {
 
 <template>
   <div
-    class="flex-shrink-0 w-44 rounded border border-white/10 bg-white/[0.04] hover:bg-white/[0.08] cursor-pointer transition-colors overflow-hidden select-none"
+    class="skill-card flex h-[112px] w-56 flex-shrink-0 flex-col overflow-hidden rounded border border-white/10 bg-white/[0.04] transition-colors hover:bg-white/[0.08]"
     @dblclick="onDblClick"
   >
-    <div class="flex items-center gap-1.5 px-2 py-1.5 border-b border-white/5">
+    <div class="skill-card-header flex items-center gap-1.5 px-2 py-1.5 border-b border-white/5">
       <span
-        class="inline-flex items-center justify-center min-w-[20px] h-5 rounded-full text-[11px] font-bold text-white flex-shrink-0"
+        class="skill-card-index inline-flex items-center justify-center min-w-[20px] h-5 rounded-full text-[11px] font-bold text-white flex-shrink-0"
         :style="{ backgroundColor: conditionMeta.color }"
       >
         {{ index + 1 }}
       </span>
-      <span class="text-xs text-gray-200 font-medium truncate flex-1 min-w-0">
+      <span class="skill-card-title text-xs text-gray-200 font-medium truncate flex-1 min-w-0">
         {{ skillName || slot.skill_id || "未选择" }}
       </span>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button size="tiny" quaternary circle @click.stop="emit('edit')">
+            <template #icon><IconPencil :size="13" /></template>
+          </n-button>
+        </template>
+        编辑技能槽
+      </n-tooltip>
+      <n-tooltip trigger="hover">
+        <template #trigger>
+          <n-button size="tiny" quaternary circle type="error" @click.stop="emit('remove')">
+            <template #icon><IconTrash :size="13" /></template>
+          </n-button>
+        </template>
+        删除技能槽
+      </n-tooltip>
     </div>
 
-    <div class="px-2 py-1 text-[11px] text-gray-400 space-y-0.5">
-      <div class="flex items-center gap-1 min-w-0">
+    <div class="skill-card-body min-h-0 flex-1 px-2 py-1 text-[11px] text-gray-400 space-y-0.5">
+      <div class="skill-card-row flex items-center gap-1 min-w-0">
         <NIcon size="13"><IconKeyboard /></NIcon>
         <span class="truncate">{{ triggerKey }}</span>
       </div>
-      <div class="flex items-center gap-1 min-w-0">
+      <div class="skill-card-row flex items-center gap-1 min-w-0">
         <NIcon size="13"><IconClock /></NIcon>
         <span class="truncate">{{ timingLabel }}</span>
       </div>
@@ -119,7 +137,7 @@ function onDblClick() {
     <n-tooltip trigger="hover">
       <template #trigger>
         <div
-          class="flex items-center gap-1 px-2 py-1 text-[11px] border-t border-white/5 cursor-help"
+          class="skill-card-condition flex items-center gap-1 px-2 py-1 text-[11px] border-t border-white/5 cursor-help"
           :style="{ color: conditionMeta.color }"
         >
           <NIcon size="13" class="flex-shrink-0">
@@ -132,3 +150,85 @@ function onDblClick() {
     </n-tooltip>
   </div>
 </template>
+
+<style scoped>
+.skill-card {
+  display: flex;
+  flex: 0 0 224px;
+  flex-direction: column;
+  width: 224px;
+  height: 112px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 4%);
+  transition: background-color 0.15s ease;
+}
+
+.skill-card:hover {
+  background: rgb(255 255 255 / 8%);
+}
+
+.skill-card-header,
+.skill-card-row,
+.skill-card-condition {
+  display: flex;
+  align-items: center;
+}
+
+.skill-card-header {
+  gap: 6px;
+  border-bottom: 1px solid rgb(255 255 255 / 5%);
+  padding: 6px 8px;
+}
+
+.skill-card-index {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.skill-card-title,
+.skill-card-row span,
+.skill-card-condition span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-card-title {
+  flex: 1 1 auto;
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.skill-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px 8px;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.skill-card-row {
+  min-width: 0;
+  gap: 4px;
+  line-height: 18px;
+}
+
+.skill-card-condition {
+  gap: 4px;
+  border-top: 1px solid rgb(255 255 255 / 5%);
+  padding: 4px 8px;
+  font-size: 11px;
+}
+</style>

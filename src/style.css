@@ -1,1 +1,195 @@
 @import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --scrollbar-size: 11px;
+  --scrollbar-size-compact: 8px;
+  --scrollbar-radius: 999px;
+  --scrollbar-surface-rgb: 11 13 18;
+  --scrollbar-track: rgb(255 255 255 / 2%);
+  --scrollbar-track-hover: rgb(255 255 255 / 5%);
+  --scrollbar-track-active: rgb(255 255 255 / 8%);
+  --scrollbar-thumb: rgb(124 137 158 / 48%);
+  --scrollbar-thumb-hover: rgb(157 174 201 / 76%);
+  --scrollbar-thumb-active: rgb(88 235 190 / 92%);
+  --scrollbar-thumb-ring: rgb(255 255 255 / 12%);
+  --scrollbar-thumb-accent: rgb(88 235 190 / 28%);
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--scrollbar-surface-rgb));
+  overflow: hidden;
+}
+
+* {
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+
+:where(
+  .n-layout-scroll-container,
+  .n-scrollbar-container,
+  .n-scrollbar-content,
+  .n-card,
+  .n-data-table-base-table-body,
+  .n-modal,
+  .n-modal-body-wrapper,
+  .n-drawer-body-content-wrapper,
+  .cm-scroller,
+  .cycle-phase-scroll,
+  .phase-skill-row,
+  .cycle-side-body
+) {
+  scrollbar-gutter: stable;
+}
+
+:where(.n-data-table-base-table-body, .cm-scroller, .phase-skill-row) {
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: var(--scrollbar-radius);
+}
+
+*::-webkit-scrollbar-track-piece {
+  background: var(--scrollbar-track);
+  border-radius: var(--scrollbar-radius);
+}
+
+*::-webkit-scrollbar-track:hover {
+  background: var(--scrollbar-track-hover);
+}
+
+*::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  min-height: 36px;
+  border: 3px solid transparent;
+  border-radius: var(--scrollbar-radius);
+  background: var(--scrollbar-thumb);
+  background-clip: content-box;
+  box-shadow:
+    inset 0 0 0 1px var(--scrollbar-thumb-ring),
+    inset 0 0 10px rgb(255 255 255 / 3%);
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease,
+    border-color 120ms ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  border-width: 2px;
+  background: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+  box-shadow:
+    inset 0 0 0 1px var(--scrollbar-thumb-ring),
+    inset 0 0 10px rgb(255 255 255 / 6%),
+    0 0 0 1px var(--scrollbar-thumb-accent);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  border-width: 2px;
+  background: var(--scrollbar-thumb-active);
+  background-clip: content-box;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 18%),
+    inset 0 0 10px rgb(255 255 255 / 8%),
+    0 0 0 1px var(--scrollbar-thumb-accent);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-resizer {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+:where(.n-data-table-base-table-body, .cm-scroller, .phase-skill-row)::-webkit-scrollbar {
+  width: var(--scrollbar-size-compact);
+  height: var(--scrollbar-size-compact);
+}
+
+:where(.n-data-table-base-table-body, .cm-scroller, .phase-skill-row)::-webkit-scrollbar-thumb {
+  border-width: 2px;
+}
+
+.n-scrollbar-rail {
+  border-radius: var(--scrollbar-radius) !important;
+  background-color: var(--scrollbar-track) !important;
+  padding: 2px !important;
+  opacity: 0.9 !important;
+  transition:
+    background-color 160ms ease,
+    opacity 160ms ease !important;
+}
+
+.n-scrollbar-rail--vertical {
+  right: 1px !important;
+  width: var(--scrollbar-size) !important;
+}
+
+.n-scrollbar-rail--horizontal {
+  bottom: 1px !important;
+  height: var(--scrollbar-size) !important;
+}
+
+.n-scrollbar-rail:hover {
+  background-color: var(--scrollbar-track-hover) !important;
+}
+
+.n-scrollbar-rail:active {
+  background-color: var(--scrollbar-track-active) !important;
+}
+
+.n-scrollbar-rail__scrollbar {
+  border-radius: var(--scrollbar-radius) !important;
+  background-color: var(--scrollbar-thumb) !important;
+  box-shadow:
+    inset 0 0 0 1px var(--scrollbar-thumb-ring),
+    inset 0 0 10px rgb(255 255 255 / 3%) !important;
+  min-height: 36px !important;
+  min-width: 36px !important;
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease,
+    opacity 120ms ease !important;
+}
+
+.n-scrollbar-rail__scrollbar:hover {
+  background-color: var(--scrollbar-thumb-hover) !important;
+  box-shadow:
+    inset 0 0 0 1px var(--scrollbar-thumb-ring),
+    inset 0 0 10px rgb(255 255 255 / 6%),
+    0 0 0 1px var(--scrollbar-thumb-accent) !important;
+}
+
+.n-scrollbar-rail__scrollbar:active {
+  background-color: var(--scrollbar-thumb-active) !important;
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 18%),
+    inset 0 0 10px rgb(255 255 255 / 8%),
+    0 0 0 1px var(--scrollbar-thumb-accent) !important;
+}

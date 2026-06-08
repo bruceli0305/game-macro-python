@@ -1,12 +1,14 @@
 //! Engine start, stop, status, and simulation commands.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
+use crate::ast::evaluator::PixelSampler;
 use crate::capture::capturer::DirectPixelSampler;
 use crate::engine::cycle_executor::CycleExecutor;
 use crate::engine::runtime_state::{AttemptStage, RuntimeState};
@@ -14,16 +16,29 @@ use crate::engine::skill_attempt::{KeySender, SkillAttemptConfig};
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::input::EnigoKeySender;
 use crate::models::base::BaseConfig;
-use crate::models::cycle::CycleConfig;
+use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot};
 use crate::models::point::Point;
 use crate::models::profile::Profile;
-use crate::models::skill::Skill;
-use crate::store::profile_store::ProfileStore;
+use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig, Skill};
+use crate::store::profile_store::{ProfileStore, default_profile};
 use crate::{AppState, EngineTaskHandle};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
     pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnginePreflightReport {
+    pub ready: bool,
+    pub engine_running: bool,
+    pub profile_name: String,
+    pub exec_enabled: bool,
+    pub rotation_count: usize,
+    pub skill_count: usize,
+    pub point_count: usize,
+    pub executable_slot_count: usize,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,12 +82,60 @@ struct SkillRuntimePayload {
     fail: u32,
 }
 
-fn load_profile_config() -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
+#[derive(Debug, Clone, Deserialize)]
+pub struct PixelOverride {
+    monitor: String,
+    x: i32,
+    y: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+struct OverridePixelSampler {
+    pixels: HashMap<(String, i32, i32), (u8, u8, u8)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct IpcSmokeFixtureSummary {
+    profile_id: String,
+    direct_events: usize,
+    pixel_events: usize,
+}
+
+impl OverridePixelSampler {
+    fn new(overrides: Vec<PixelOverride>) -> Self {
+        let pixels = overrides
+            .into_iter()
+            .map(|item| ((item.monitor, item.x, item.y), (item.r, item.g, item.b)))
+            .collect();
+        Self { pixels }
+    }
+}
+
+impl PixelSampler for OverridePixelSampler {
+    fn sample_rgb_abs(
+        &self,
+        monitor: &str,
+        x_abs: i32,
+        y_abs: i32,
+        _sample_mode: &str,
+        _sample_radius: u8,
+    ) -> Option<(u8, u8, u8)> {
+        self.pixels
+            .get(&(monitor.to_string(), x_abs, y_abs))
+            .copied()
+    }
+}
+
+fn load_profile_config(
+    require_exec_enabled: bool,
+) -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
     let dir = app_data_dir()?;
     let store = ProfileStore::new(dir);
     let profile = store.load_or_create_default("default")?;
 
-    validate_engine_profile(&profile)?;
+    validate_engine_profile(&profile, require_exec_enabled)?;
     let attempt_cfg = attempt_config_from_base(&profile.base);
 
     let config = profile
@@ -92,6 +155,129 @@ fn load_profile_config() -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, Skil
     Ok((config, skills, points, attempt_cfg))
 }
 
+fn simulation_inputs_from_profile(
+    profile: Profile,
+) -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
+    validate_engine_profile(&profile, false)?;
+    let attempt_cfg = attempt_config_from_base(&profile.base);
+
+    let config = profile
+        .rotations
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::Config("profile has no rotations".into()))?;
+
+    Ok((
+        config,
+        profile.skills.skills,
+        profile.points.points,
+        attempt_cfg,
+    ))
+}
+
+fn parse_profile_content(content: &str) -> AppResult<Profile> {
+    serde_json::from_str(content).map_err(AppError::from)
+}
+
+fn event_count_from_simulation_json(content: &str) -> AppResult<usize> {
+    let value: serde_json::Value = serde_json::from_str(content)?;
+    let events = value
+        .get("events")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| AppError::Engine("simulation response missing events array".into()))?;
+    Ok(events.len())
+}
+
+fn smoke_fixture_profile() -> Profile {
+    let mut profile = default_profile("ipc-smoke");
+    profile.points.points = vec![Point {
+        id: "smoke-point".into(),
+        name: "IPC smoke point".into(),
+        monitor: "primary".into(),
+        vx: 10,
+        vy: 20,
+        color: ColorRGB {
+            r: 12,
+            g: 34,
+            b: 56,
+        },
+        tolerance: 0,
+        sample: SampleConfig {
+            mode: "single".into(),
+            radius: 0,
+        },
+        captured_at: "ipc-smoke".into(),
+        note: "IPC smoke fixture".into(),
+    }];
+    profile.skills.skills = vec![Skill {
+        id: "smoke-skill".into(),
+        name: "IPC smoke skill".into(),
+        enabled: true,
+        trigger_key: "1".into(),
+        cast: CastConfig {
+            readbar_ms: 0,
+            cooldown_ms: 0,
+        },
+        pixel: PixelSpec {
+            monitor: "primary".into(),
+            vx: 30,
+            vy: 40,
+            color: ColorRGB {
+                r: 90,
+                g: 120,
+                b: 150,
+            },
+            tolerance: 0,
+            sample: SampleConfig {
+                mode: "single".into(),
+                radius: 0,
+            },
+        },
+        note: "IPC smoke fixture".into(),
+        game_id: 0,
+        game_desc: String::new(),
+        icon_url: String::new(),
+        cooldown_ms: 0,
+        radius: 0,
+        shots_per_cycle: 1,
+        ammo_stages: vec![],
+    }];
+    profile.rotations = vec![CycleConfig {
+        name: "IPC smoke rotation".into(),
+        poll_interval_ms: 10,
+        max_cycles: 1,
+        phases: vec![CyclePhase {
+            name: "P1".into(),
+            complete_when: "any_fired".into(),
+            skills: vec![SkillSlot {
+                skill_id: "smoke-skill".into(),
+                priority: 1,
+                label: "smoke-skill".into(),
+                condition_expr: Some(serde_json::json!({
+                    "type": "pixel_point",
+                    "point_id": "smoke-point",
+                    "tolerance": 0
+                })),
+                start_expr: None,
+                complete_expr: None,
+                override_cast_ms: None,
+            }],
+        }],
+    }];
+    profile
+}
+
+fn smoke_fixture_pixel_overrides() -> Vec<PixelOverride> {
+    vec![PixelOverride {
+        monitor: "primary".into(),
+        x: 10,
+        y: 20,
+        r: 12,
+        g: 34,
+        b: 56,
+    }]
+}
+
 fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
     SkillAttemptConfig {
         default_gap_ms: base.exec.default_skill_gap_ms,
@@ -104,7 +290,13 @@ fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
     }
 }
 
-fn validate_engine_profile(profile: &Profile) -> AppResult<()> {
+fn validate_engine_profile(profile: &Profile, require_exec_enabled: bool) -> AppResult<()> {
+    if require_exec_enabled && !profile.base.exec.enabled {
+        return Err(AppError::Config(
+            "macro execution is disabled in base.exec.enabled".into(),
+        ));
+    }
+
     let rotation = profile
         .rotations
         .first()
@@ -152,6 +344,48 @@ fn validate_engine_profile(profile: &Profile) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+fn count_executable_slots(profile: &Profile) -> usize {
+    let Some(rotation) = profile.rotations.first() else {
+        return 0;
+    };
+
+    rotation
+        .phases
+        .iter()
+        .flat_map(|phase| phase.skills.iter())
+        .filter(|slot| {
+            let skill_id = slot.skill_id.trim();
+            if skill_id.is_empty() {
+                return false;
+            }
+            profile.skills.skills.iter().any(|skill| {
+                skill.id.as_str() == skill_id
+                    && skill.enabled
+                    && !skill.trigger_key.trim().is_empty()
+            })
+        })
+        .count()
+}
+
+fn preflight_report_from_profile(profile: &Profile, engine_running: bool) -> EnginePreflightReport {
+    let validation = validate_engine_profile(profile, true);
+    EnginePreflightReport {
+        ready: validation.is_ok() && !engine_running,
+        engine_running,
+        profile_name: profile.meta.profile_name.clone(),
+        exec_enabled: profile.base.exec.enabled,
+        rotation_count: profile.rotations.len(),
+        skill_count: profile.skills.skills.len(),
+        point_count: profile.points.points.len(),
+        executable_slot_count: count_executable_slots(profile),
+        error: if engine_running {
+            Some("engine already running".into())
+        } else {
+            validation.err().map(|error| error.to_string())
+        },
+    }
 }
 
 fn app_data_dir() -> AppResult<std::path::PathBuf> {
@@ -422,6 +656,17 @@ async fn run_engine_loop(
 }
 
 #[tauri::command]
+pub fn engine_preflight(state: State<'_, AppState>) -> CommandResult<EnginePreflightReport> {
+    let dir = app_data_dir()?;
+    let store = ProfileStore::new(dir);
+    let profile = store.load_or_create_default("default")?;
+    let guard = state.engine_task.lock().map_err(engine_lock_error)?;
+    let engine_running = task_is_running(guard.as_ref());
+
+    Ok(preflight_report_from_profile(&profile, engine_running))
+}
+
+#[tauri::command]
 pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult<String> {
     ensure_engine_stopped(&state.engine_task)?;
 
@@ -431,7 +676,7 @@ pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult
         EngineTaskHandle::pending(cancel.clone()),
     )?;
 
-    let (config, skills, points, attempt_cfg) = match load_profile_config() {
+    let (config, skills, points, attempt_cfg) = match load_profile_config(true) {
         Ok(config) => config,
         Err(error) => {
             if let Some(task) = take_engine_task(&state.engine_task)? {
@@ -470,10 +715,82 @@ pub fn engine_stop(state: State<'_, AppState>) -> CommandResult<String> {
 
 #[tauri::command]
 pub fn simulate_rotation() -> CommandResult<String> {
-    let (config, skills, points, attempt_cfg) = load_profile_config()?;
+    let (config, skills, points, attempt_cfg) = load_profile_config(false)?;
 
     let sampler = DirectPixelSampler;
-    let mut executor = CycleExecutor::new(&config, &points, &skills, &sampler, attempt_cfg);
+    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+}
+
+#[tauri::command]
+pub fn simulate_rotation_with_pixels(pixel_overrides: Vec<PixelOverride>) -> CommandResult<String> {
+    let (config, skills, points, attempt_cfg) = load_profile_config(false)?;
+    let sampler = OverridePixelSampler::new(pixel_overrides);
+    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+}
+
+#[tauri::command]
+pub fn simulate_profile_rotation(content: String) -> CommandResult<String> {
+    let profile = parse_profile_content(&content)?;
+    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(profile)?;
+
+    let sampler = DirectPixelSampler;
+    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+}
+
+#[tauri::command]
+pub fn simulate_profile_rotation_with_pixels(
+    content: String,
+    pixel_overrides: Vec<PixelOverride>,
+) -> CommandResult<String> {
+    let profile = parse_profile_content(&content)?;
+    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(profile)?;
+    let sampler = OverridePixelSampler::new(pixel_overrides);
+    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+}
+
+#[tauri::command]
+pub fn simulate_ipc_smoke_fixture() -> CommandResult<String> {
+    let profile = smoke_fixture_profile();
+
+    let mut direct_profile = profile.clone();
+    if let Some(slot) = direct_profile
+        .rotations
+        .get_mut(0)
+        .and_then(|rotation| rotation.phases.get_mut(0))
+        .and_then(|phase| phase.skills.get_mut(0))
+    {
+        slot.condition_expr = None;
+    }
+
+    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(direct_profile)?;
+    let direct_sampler = DirectPixelSampler;
+    let direct_json =
+        simulate_rotation_with_sampler(&config, &skills, &points, &direct_sampler, attempt_cfg)?;
+
+    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(profile.clone())?;
+    let pixel_sampler = OverridePixelSampler::new(smoke_fixture_pixel_overrides());
+    let pixel_json =
+        simulate_rotation_with_sampler(&config, &skills, &points, &pixel_sampler, attempt_cfg)?;
+
+    let summary = IpcSmokeFixtureSummary {
+        profile_id: profile.meta.profile_id,
+        direct_events: event_count_from_simulation_json(&direct_json)?,
+        pixel_events: event_count_from_simulation_json(&pixel_json)?,
+    };
+
+    serde_json::to_string_pretty(&summary)
+        .map_err(AppError::from)
+        .map_err(Into::into)
+}
+
+fn simulate_rotation_with_sampler(
+    config: &CycleConfig,
+    skills: &[Skill],
+    points: &[Point],
+    sampler: &dyn PixelSampler,
+    attempt_cfg: SkillAttemptConfig,
+) -> CommandResult<String> {
+    let mut executor = CycleExecutor::new(config, points, skills, sampler, attempt_cfg);
 
     struct NoopKeySender;
     impl KeySender for NoopKeySender {
@@ -486,45 +803,38 @@ pub fn simulate_rotation() -> CommandResult<String> {
     let mut sim_events: Vec<serde_json::Value> = Vec::new();
     let max_ticks = 80;
     let mut time_ms: u64 = 0;
+    let mut log_cursor = 0usize;
 
     for _tick in 0..max_ticks {
         let acted = executor.tick(&mut key_sender, &|| false, time_ms);
-        if acted {
-            let phase_name = config
-                .phases
-                .get(
-                    executor
-                        .state
-                        .phase_index
-                        .min(config.phases.len().saturating_sub(1)),
-                )
-                .map(|phase| phase.name.as_str())
-                .unwrap_or("complete");
-            let skill_name = skills
-                .iter()
-                .find(|skill| skill.id == executor.state.last_skill_id)
-                .map(|skill| skill.name.as_str())
-                .unwrap_or("");
 
-            let skill = skills
-                .iter()
-                .find(|skill| skill.id == executor.state.last_skill_id);
+        for log in &executor.log[log_cursor..] {
+            let skill = skills.iter().find(|skill| skill.id == log.skill_id);
             let cast_ms = skill.map(|skill| skill.cast.readbar_ms).unwrap_or(0) as u64;
             let cd_ms = skill.map(|skill| skill.cooldown_ms).unwrap_or(0) as u64;
-            let gap = 50_u64;
 
             sim_events.push(serde_json::json!({
-                "index": executor.state.total_executed,
-                "timeMs": time_ms,
-                "phase": phase_name,
-                "skillId": executor.state.last_skill_id,
-                "skillName": skill_name,
-                "outcome": executor.state.last_outcome,
+                "index": sim_events.len() + 1,
+                "timeMs": log.ts_ms,
+                "phase": log.phase_name,
+                "event": log.event,
+                "skillId": log.skill_id,
+                "skillName": log.skill_name,
+                "outcome": log.outcome,
                 "castMs": cast_ms,
                 "cdMs": cd_ms,
-                "reason": "",
+                "reason": log.reason,
             }));
+        }
+        log_cursor = executor.log.len();
 
+        if acted {
+            let gap = 50_u64;
+            let cast_ms = skills
+                .iter()
+                .find(|skill| skill.id == executor.state.last_skill_id)
+                .map(|skill| skill.cast.readbar_ms)
+                .unwrap_or(0) as u64;
             time_ms += cast_ms.max(1) + gap;
         } else {
             time_ms += config.poll_interval_ms as u64;
@@ -548,6 +858,7 @@ pub fn engine_status(state: State<'_, AppState>) -> CommandResult<EngineStatus> 
 mod tests {
     use super::*;
     use crate::models::cycle::{CyclePhase, SkillSlot};
+    use crate::models::point::Point;
     use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig};
     use crate::store::profile_store::default_profile;
 
@@ -658,7 +969,7 @@ mod tests {
         let profile = default_profile("default");
 
         assert!(matches!(
-            validate_engine_profile(&profile),
+            validate_engine_profile(&profile, false),
             Err(AppError::Config(_))
         ));
     }
@@ -667,7 +978,62 @@ mod tests {
     fn test_engine_profile_validation_accepts_enabled_slot_with_key() {
         let profile = profile_with_slot("skill-1");
 
-        assert!(validate_engine_profile(&profile).is_ok());
+        assert!(validate_engine_profile(&profile, false).is_ok());
+    }
+
+    #[test]
+    fn test_engine_profile_validation_rejects_disabled_execution_for_start() {
+        let profile = profile_with_slot("skill-1");
+
+        assert!(matches!(
+            validate_engine_profile(&profile, true),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_engine_profile_validation_accepts_enabled_execution_for_start() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.base.exec.enabled = true;
+
+        assert!(validate_engine_profile(&profile, true).is_ok());
+    }
+
+    #[test]
+    fn test_preflight_report_rejects_empty_default_profile() {
+        let profile = default_profile("default");
+
+        let report = preflight_report_from_profile(&profile, false);
+
+        assert!(!report.ready);
+        assert!(!report.exec_enabled);
+        assert_eq!(report.executable_slot_count, 0);
+        assert!(report.error.is_some());
+    }
+
+    #[test]
+    fn test_preflight_report_accepts_enabled_executable_profile() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.base.exec.enabled = true;
+
+        let report = preflight_report_from_profile(&profile, false);
+
+        assert!(report.ready);
+        assert!(report.exec_enabled);
+        assert_eq!(report.skill_count, 1);
+        assert_eq!(report.executable_slot_count, 1);
+        assert!(report.error.is_none());
+    }
+
+    #[test]
+    fn test_preflight_report_rejects_running_engine() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.base.exec.enabled = true;
+
+        let report = preflight_report_from_profile(&profile, true);
+
+        assert!(!report.ready);
+        assert_eq!(report.error.as_deref(), Some("engine already running"));
     }
 
     #[test]
@@ -688,5 +1054,179 @@ mod tests {
         assert_eq!(cfg.retry_gap_ms, 33);
         assert_eq!(cfg.complete_poll_ms, 44);
         assert_eq!(cfg.complete_max_wait_factor, 2.0);
+    }
+
+    #[test]
+    fn test_simulate_with_pixel_overrides_satisfies_point_condition() {
+        let config = CycleConfig {
+            name: "sim".into(),
+            poll_interval_ms: 10,
+            max_cycles: 1,
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                complete_when: "any_fired".into(),
+                skills: vec![SkillSlot {
+                    skill_id: "skill-1".into(),
+                    priority: 1,
+                    label: String::new(),
+                    condition_expr: Some(serde_json::json!({
+                        "type": "pixel_point",
+                        "point_id": "point-1",
+                        "tolerance": 0
+                    })),
+                    start_expr: None,
+                    complete_expr: None,
+                    override_cast_ms: None,
+                }],
+            }],
+        };
+        let skills = vec![test_skill("skill-1", "1", true)];
+        let points = vec![Point {
+            id: "point-1".into(),
+            name: "point".into(),
+            monitor: "primary".into(),
+            vx: 10,
+            vy: 20,
+            color: ColorRGB { r: 1, g: 2, b: 3 },
+            tolerance: 0,
+            sample: SampleConfig {
+                mode: "single".into(),
+                radius: 0,
+            },
+            captured_at: String::new(),
+            note: String::new(),
+        }];
+        let sampler = OverridePixelSampler::new(vec![PixelOverride {
+            monitor: "primary".into(),
+            x: 10,
+            y: 20,
+            r: 1,
+            g: 2,
+            b: 3,
+        }]);
+
+        let json = simulate_rotation_with_sampler(
+            &config,
+            &skills,
+            &points,
+            &sampler,
+            SkillAttemptConfig::default(),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let events = value["events"].as_array().unwrap();
+
+        assert!(!events.is_empty());
+        assert_eq!(events[0]["skillId"], "skill-1");
+    }
+
+    #[test]
+    fn test_simulate_with_pixel_overrides_reports_condition_reason() {
+        let config = CycleConfig {
+            name: "sim".into(),
+            poll_interval_ms: 10,
+            max_cycles: 1,
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                complete_when: "any_fired".into(),
+                skills: vec![SkillSlot {
+                    skill_id: "skill-1".into(),
+                    priority: 1,
+                    label: String::new(),
+                    condition_expr: Some(serde_json::json!({
+                        "type": "pixel_point",
+                        "point_id": "point-1",
+                        "tolerance": 0
+                    })),
+                    start_expr: None,
+                    complete_expr: None,
+                    override_cast_ms: None,
+                }],
+            }],
+        };
+        let skills = vec![test_skill("skill-1", "1", true)];
+        let points = vec![Point {
+            id: "point-1".into(),
+            name: "point".into(),
+            monitor: "primary".into(),
+            vx: 10,
+            vy: 20,
+            color: ColorRGB { r: 1, g: 2, b: 3 },
+            tolerance: 0,
+            sample: SampleConfig {
+                mode: "single".into(),
+                radius: 0,
+            },
+            captured_at: String::new(),
+            note: String::new(),
+        }];
+        let sampler = OverridePixelSampler::new(vec![PixelOverride {
+            monitor: "primary".into(),
+            x: 10,
+            y: 20,
+            r: 9,
+            g: 9,
+            b: 9,
+        }]);
+
+        let json = simulate_rotation_with_sampler(
+            &config,
+            &skills,
+            &points,
+            &sampler,
+            SkillAttemptConfig::default(),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let events = value["events"].as_array().unwrap();
+
+        assert!(!events.is_empty());
+        assert_eq!(events[0]["event"], "skip");
+        assert_eq!(events[0]["outcome"], "NOT_READY");
+        assert!(
+            events[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("condition_false:"))
+        );
+    }
+
+    #[test]
+    fn test_simulate_profile_rotation_with_pixels_accepts_profile_content() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.rotations[0].max_cycles = 1;
+        let content = serde_json::to_string(&profile).unwrap();
+
+        let json = simulate_profile_rotation_with_pixels(content, vec![]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let events = value["events"].as_array().unwrap();
+
+        assert!(!events.is_empty());
+        assert_eq!(events[0]["skillId"], "skill-1");
+    }
+
+    #[test]
+    fn test_simulate_profile_rotation_rejects_empty_profile_content() {
+        let profile = default_profile("default");
+        let content = serde_json::to_string(&profile).unwrap();
+
+        assert!(simulate_profile_rotation_with_pixels(content, vec![]).is_err());
+    }
+
+    #[test]
+    fn test_simulate_ipc_smoke_fixture_returns_event_counts() {
+        let json = simulate_ipc_smoke_fixture().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["profile_id"], "ipc-smoke");
+        assert!(
+            value["direct_events"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
+        assert!(
+            value["pixel_events"]
+                .as_u64()
+                .is_some_and(|count| count > 0)
+        );
     }
 }

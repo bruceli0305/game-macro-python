@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { onMounted, onUnmounted } from "vue";
 import {
   NConfigProvider,
   NMessageProvider,
@@ -10,8 +10,21 @@ import {
 import AppLayout from "./components/AppLayout.vue";
 import { useHotkeys } from "./composables/useHotkeys";
 
-const { setup } = useHotkeys();
-onMounted(() => setup());
+const { setup, teardown, reload } = useHotkeys();
+
+function reloadHotkeys() {
+  void reload();
+}
+
+onMounted(() => {
+  void setup();
+  window.addEventListener("hotkeys:reload", reloadHotkeys);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("hotkeys:reload", reloadHotkeys);
+  void teardown();
+});
 </script>
 
 <template>

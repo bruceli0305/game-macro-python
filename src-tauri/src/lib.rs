@@ -83,12 +83,18 @@ pub fn run() {
             commands::engine_cmd::engine_start,
             commands::engine_cmd::engine_stop,
             commands::engine_cmd::engine_status,
+            commands::engine_cmd::engine_preflight,
             commands::engine_cmd::simulate_rotation,
+            commands::engine_cmd::simulate_rotation_with_pixels,
+            commands::engine_cmd::simulate_profile_rotation,
+            commands::engine_cmd::simulate_profile_rotation_with_pixels,
+            commands::engine_cmd::simulate_ipc_smoke_fixture,
             commands::profile_cmd::profile_list,
             commands::profile_cmd::profile_load,
             commands::profile_cmd::profile_save,
             commands::capture_cmd::capture_sample,
             commands::capture_cmd::capture_at_cursor,
+            commands::capture_cmd::capture_diagnostics,
             commands::skill_cmd::gw2_skill_search,
         ])
         .build(tauri::generate_context!())

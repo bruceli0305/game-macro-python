@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { h, onMounted, onUnmounted, ref, type Component } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import {
   NLayout,
@@ -7,6 +7,7 @@ import {
   NLayoutContent,
   NMenu,
   NIcon,
+  useMessage,
 } from "naive-ui";
 import {
   IconSettings,
@@ -17,7 +18,11 @@ import {
   IconKeyboard,
 } from "@tabler/icons-vue";
 import type { MenuOption } from "naive-ui";
-import { h, type Component } from "vue";
+
+type AppMessagePayload = {
+  type?: "success" | "error" | "warning" | "info";
+  content?: string;
+};
 
 function renderIcon(icon: Component) {
   return () => h(NIcon, null, { default: () => h(icon) });
@@ -33,6 +38,7 @@ const menuOptions: MenuOption[] = [
 
 const router = useRouter();
 const route = useRoute();
+const message = useMessage();
 const collapsed = ref(false);
 
 const currentKey = ref((route.name as string) || "settings");
@@ -41,6 +47,31 @@ function onMenuUpdate(key: string) {
   currentKey.value = key;
   router.push({ name: key });
 }
+
+function onAppMessage(event: Event) {
+  const detail = (event as CustomEvent<AppMessagePayload>).detail;
+  const content = detail?.content?.trim();
+  if (!content) return;
+
+  switch (detail.type) {
+    case "success":
+      message.success(content);
+      break;
+    case "warning":
+      message.warning(content);
+      break;
+    case "info":
+      message.info(content);
+      break;
+    case "error":
+    default:
+      message.error(content);
+      break;
+  }
+}
+
+onMounted(() => window.addEventListener("app:message", onAppMessage));
+onUnmounted(() => window.removeEventListener("app:message", onAppMessage));
 </script>
 
 <template>

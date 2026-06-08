@@ -4,12 +4,23 @@ import { invoke } from "@tauri-apps/api/core";
 import { usePickerStore } from "../stores/picker";
 
 export interface CaptureAtCursorResult {
+  monitor: string;
   x: number;
   y: number;
   r: number;
   g: number;
   b: number;
   hex: string;
+}
+
+export interface CaptureDiagnosticsResult {
+  monitor_count: number;
+  monitors: string[];
+  cursor_x: number;
+  cursor_y: number;
+  cursor_monitor: string;
+  sample: CaptureAtCursorResult | null;
+  sample_error: string | null;
 }
 
 export function useCapture() {
@@ -34,5 +45,14 @@ export function useCapture() {
     }
   }
 
-  return { samplePixel, captureAtCursor, store };
+  async function captureDiagnostics(): Promise<CaptureDiagnosticsResult | null> {
+    try {
+      return await invoke<CaptureDiagnosticsResult>("capture_diagnostics");
+    } catch (e) {
+      console.error("capture_diagnostics failed:", e);
+      return null;
+    }
+  }
+
+  return { samplePixel, captureAtCursor, captureDiagnostics, store };
 }

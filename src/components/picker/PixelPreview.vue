@@ -1,40 +1,37 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from "vue";
+import { ref } from "vue";
 import { NModal, NCard, NButton, NSpace } from "naive-ui";
 import { IconPointer } from "@tabler/icons-vue";
+import { useCapture } from "../../composables/useCapture";
 
 const show = ref(false);
 const color = ref({ r: 0, g: 0, b: 0 });
 const hex = ref("#000000");
-const pos = ref({ x: 0, y: 0 });
-let timer: ReturnType<typeof setInterval> | null = null;
+const pos = ref({ monitor: "primary", x: 0, y: 0 });
+const loading = ref(false);
+const { captureAtCursor } = useCapture();
 
 async function startPicking() {
   show.value = true;
-  // 每 100ms 采样一次鼠标位置像素
-  timer = setInterval(async () => {
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      // 使用 Tauri 的 cursor position API 或直接传固定坐标
-      // 当前简化：采样屏幕中心附近
-      const x = 500 + Math.floor(Math.random() * 200);
-      const y = 500 + Math.floor(Math.random() * 200);
-      const [r, g, b] = await invoke<[number, number, number]>("capture_sample", { x, y });
-      color.value = { r, g, b };
-      hex.value = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-      pos.value = { x, y };
-    } catch (e) {
-      console.error("采样失败:", e);
-    }
-  }, 100);
+  await refreshAtCursor();
+}
+
+async function refreshAtCursor() {
+  loading.value = true;
+  try {
+    const result = await captureAtCursor();
+    if (!result) return;
+    color.value = { r: result.r, g: result.g, b: result.b };
+    hex.value = result.hex;
+    pos.value = { monitor: result.monitor, x: result.x, y: result.y };
+  } finally {
+    loading.value = false;
+  }
 }
 
 function stopPicking() {
-  if (timer) { clearInterval(timer); timer = null; }
   show.value = false;
 }
-
-onUnmounted(() => { if (timer) clearInterval(timer); });
 </script>
 
 <template>
@@ -54,6 +51,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
         <div>
           <div class="text-lg font-mono">{{ hex }}</div>
           <div class="text-sm text-gray-400">R:{{ color.r }} G:{{ color.g }} B:{{ color.b }}</div>
+          <div class="text-xs text-gray-500">显示器: {{ pos.monitor }}</div>
           <div class="text-xs text-gray-500">位置: ({{ pos.x }}, {{ pos.y }})</div>
         </div>
       </div>
@@ -70,6 +68,7 @@ onUnmounted(() => { if (timer) clearInterval(timer); });
       </div>
 
       <n-space justify="end" class="mt-4">
+        <n-button :loading="loading" @click="refreshAtCursor">刷新当前鼠标像素</n-button>
         <n-button @click="stopPicking">关闭</n-button>
       </n-space>
     </n-card>

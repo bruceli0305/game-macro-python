@@ -1,18 +1,21 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref } from "vue";
 import {
   NAlert,
   NButton,
   NCard,
   NInput,
   NInputNumber,
+  NSelect,
   NSpace,
   NSwitch,
   NText,
   useMessage,
 } from "naive-ui";
 import { IconDeviceFloppy } from "@tabler/icons-vue";
+import ProfileIssueSummary from "../components/common/ProfileIssueSummary.vue";
 import { DEFAULT_PROFILE_NAME, cloneProfile, useProfile } from "../composables/useProfile";
+import { firstProfileError, validateProfileForSave } from "../utils/profile-validation";
 import type { BaseConfig, Profile } from "../types/profile";
 
 const message = useMessage();
@@ -20,13 +23,17 @@ const { loadOrCreateProfile, saveProfile } = useProfile();
 const loading = ref(false);
 const saving = ref(false);
 const profile = ref<Profile | null>(null);
+const castBarModeOptions = [
+  { label: "计时模式", value: "timer" },
+  { label: "像素读条", value: "pixel" },
+];
 
 const base = reactive<BaseConfig>({
   schema_version: 2,
   ui: { theme: "darkly" },
   capture: { monitor_policy: "primary" },
   pick: {
-    confirm_hotkey: "f8",
+    confirm_hotkey: "F8",
     mouse_avoid: true,
     mouse_avoid_offset_y: 80,
     mouse_avoid_settle_ms: 80,
@@ -41,7 +48,7 @@ const base = reactive<BaseConfig>({
   },
   exec: {
     enabled: false,
-    toggle_hotkey: "",
+    toggle_hotkey: "F9",
     default_skill_gap_ms: 50,
     poll_not_ready_ms: 50,
     max_retries: 3,
@@ -50,12 +57,22 @@ const base = reactive<BaseConfig>({
 });
 
 function assignBase(next: BaseConfig) {
-  Object.assign(base, cloneBase(next));
+  const cloned = cloneBase(next);
+  if (!cloned.pick.confirm_hotkey.trim()) cloned.pick.confirm_hotkey = "F8";
+  if (!cloned.exec.toggle_hotkey.trim()) cloned.exec.toggle_hotkey = "F9";
+  Object.assign(base, cloned);
 }
 
 function cloneBase(next: BaseConfig): BaseConfig {
   return JSON.parse(JSON.stringify(next)) as BaseConfig;
 }
+
+const settingsIssues = computed(() => {
+  if (!profile.value) return [];
+  const next = cloneProfile(profile.value);
+  next.base = cloneBase(base);
+  return validateProfileForSave(next);
+});
 
 async function loadSettings() {
   loading.value = true;
@@ -77,8 +94,14 @@ async function persistSettings() {
     const next = cloneProfile(profile.value);
     next.base = cloneBase(base);
     next.meta.updated_at = new Date().toISOString();
+    const error = firstProfileError(validateProfileForSave(next));
+    if (error) {
+      message.error(error);
+      return;
+    }
     await saveProfile(DEFAULT_PROFILE_NAME, next);
     profile.value = next;
+    window.dispatchEvent(new CustomEvent("hotkeys:reload"));
     message.success("配置已保存");
   } catch (error) {
     console.error("save settings failed:", error);
@@ -103,6 +126,12 @@ onMounted(() => loadSettings());
 
     <n-alert v-if="loading" type="info" class="mb-4">正在加载配置...</n-alert>
 
+    <ProfileIssueSummary
+      :issues="settingsIssues"
+      title="保存检查"
+      :limit="6"
+    />
+
     <n-space vertical size="large">
       <n-card title="用户界面">
         <n-space vertical>
@@ -115,6 +144,8 @@ onMounted(() => loadSettings());
         <n-space vertical>
           <n-text>显示器策略</n-text>
           <n-input v-model:value="base.capture.monitor_policy" placeholder="primary" />
+          <n-text>取色确认热键</n-text>
+          <n-input v-model:value="base.pick.confirm_hotkey" placeholder="F8" />
           <n-space align="center">
             <n-text>取色时避让鼠标</n-text>
             <n-switch v-model:value="base.pick.mouse_avoid" />
@@ -129,7 +160,7 @@ onMounted(() => loadSettings());
       <n-card title="读条与完成检测">
         <n-space vertical>
           <n-text>模式</n-text>
-          <n-input v-model:value="base.cast_bar.mode" placeholder="timer" />
+          <n-select v-model:value="base.cast_bar.mode" :options="castBarModeOptions" />
           <n-text>读条点位 ID</n-text>
           <n-input v-model:value="base.cast_bar.point_id" placeholder="可选" />
           <n-text>容差</n-text>

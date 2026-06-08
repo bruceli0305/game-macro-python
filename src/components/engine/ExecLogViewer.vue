@@ -47,7 +47,6 @@ const logText = computed(() =>
   <n-log
     :log="logText"
     :rows="10"
-    language="naive-log"
     :trim="false"
   />
 </template>

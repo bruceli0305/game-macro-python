@@ -105,7 +105,7 @@ pub fn default_profile(name: &str) -> Profile {
                 monitor_policy: "primary".into(),
             },
             pick: PickConfig {
-                confirm_hotkey: "f8".into(),
+                confirm_hotkey: "F8".into(),
                 mouse_avoid: true,
                 mouse_avoid_offset_y: 80,
                 mouse_avoid_settle_ms: 80,
@@ -123,7 +123,7 @@ pub fn default_profile(name: &str) -> Profile {
             },
             exec: ExecConfig {
                 enabled: false,
-                toggle_hotkey: String::new(),
+                toggle_hotkey: "F9".into(),
                 default_skill_gap_ms: 50,
                 poll_not_ready_ms: 50,
                 max_retries: 3,

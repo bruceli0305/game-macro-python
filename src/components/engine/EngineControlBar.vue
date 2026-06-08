@@ -1,17 +1,98 @@
 <script setup lang="ts">
-import { NButton, NSpace, NTag } from "naive-ui";
-import { IconPlayerPlay, IconPlayerStop } from "@tabler/icons-vue";
-import { useEngine } from "../../composables/useEngine";
+import { computed, ref } from "vue";
+import { NButton, NSpace, NTag, useMessage } from "naive-ui";
+import { IconPlayerPlay, IconPlayerStop, IconRefresh } from "@tabler/icons-vue";
+import { useEngine, type EnginePreflightReport } from "../../composables/useEngine";
+import { useEnginePreflight } from "../../composables/useEnginePreflight";
 
-const { start, stop, store } = useEngine();
+const { start, stop, preflight, store } = useEngine();
+const { validateEngineStart } = useEnginePreflight();
+const message = useMessage();
+const backendPreflightRunning = ref(false);
+const backendPreflight = ref<EnginePreflightReport | null>(null);
+const backendPreflightSkipped = ref(false);
+
+const backendPreflightTagType = computed(() => {
+  if (backendPreflightSkipped.value) return "warning";
+  if (!backendPreflight.value) return "default";
+  return backendPreflight.value.ready ? "success" : "error";
+});
+
+const backendPreflightStatus = computed(() => {
+  if (backendPreflightSkipped.value) return "跳过";
+  if (!backendPreflight.value) return "未运行";
+  return backendPreflight.value.ready ? "通过" : "失败";
+});
+
+const backendPreflightDetail = computed(() => {
+  if (backendPreflightSkipped.value) return "Tauri IPC runtime unavailable";
+  if (!backendPreflight.value) return "";
+  const report = backendPreflight.value;
+  if (report.ready) {
+    return `${report.profile_name}: skills=${report.skill_count}, slots=${report.executable_slot_count}`;
+  }
+  return report.error || "backend preflight failed";
+});
+
+function hasTauriRuntime(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    "__TAURI_INTERNALS__" in (window as Window & { __TAURI_INTERNALS__?: unknown })
+  );
+}
+
+async function startWithValidation() {
+  try {
+    const error = await validateEngineStart();
+    if (error) {
+      message.error(error);
+      return;
+    }
+    await start();
+    message.success("引擎已启动");
+  } catch (e) {
+    console.error("engine_start failed:", e);
+    message.error(String(e || "引擎启动失败"));
+  }
+}
+
+async function stopEngine() {
+  await stop();
+  message.info("引擎已停止");
+}
+
+async function runBackendPreflight() {
+  backendPreflightRunning.value = true;
+  backendPreflight.value = null;
+  backendPreflightSkipped.value = false;
+  try {
+    if (!hasTauriRuntime()) {
+      backendPreflightSkipped.value = true;
+      message.warning("后端预检已跳过：当前不是 Tauri 运行环境");
+      return;
+    }
+
+    const report = await preflight();
+    backendPreflight.value = report;
+    if (report.ready) {
+      message.success("后端预检通过");
+    } else {
+      message.error(report.error || "后端预检失败");
+    }
+  } catch (error) {
+    message.error(String(error || "后端预检失败"));
+  } finally {
+    backendPreflightRunning.value = false;
+  }
+}
 </script>
 
 <template>
-  <n-space align="center">
+  <n-space align="center" wrap>
     <n-button
       v-if="!store.isRunning"
       type="success"
-      @click="start()"
+      @click="startWithValidation"
     >
       <template #icon><IconPlayerPlay /></template>
       启动
@@ -20,17 +101,37 @@ const { start, stop, store } = useEngine();
     <n-button
       v-if="store.isRunning"
       type="error"
-      @click="stop()"
+      @click="stopEngine"
     >
       <template #icon><IconPlayerStop /></template>
       停止
     </n-button>
 
+    <n-button size="small" :loading="backendPreflightRunning" @click="runBackendPreflight">
+      <template #icon><IconRefresh /></template>
+      后端预检
+    </n-button>
+
     <n-tag v-if="store.isRunning" type="success" size="small">运行中</n-tag>
     <n-tag v-else type="default" size="small">已停止</n-tag>
 
+    <n-tag
+      v-if="backendPreflight || backendPreflightSkipped"
+      :type="backendPreflightTagType"
+      size="small"
+    >
+      后端预检：{{ backendPreflightStatus }}
+    </n-tag>
+
     <span v-if="store.isRunning" class="text-xs text-gray-400">
       Phase {{ store.currentPhase + 1 }} · 循环 {{ store.cycleCount }}
+    </span>
+    <span
+      v-if="backendPreflight || backendPreflightSkipped"
+      class="max-w-[280px] truncate text-xs text-gray-400"
+      :title="backendPreflightDetail"
+    >
+      {{ backendPreflightDetail }}
     </span>
   </n-space>
 </template>
