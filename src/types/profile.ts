@@ -42,6 +42,23 @@ export interface CastBarConfig {
   tolerance: number;
   poll_interval_ms: number;
   max_wait_factor: number;
+  roi: CastBarRoiConfig;
+}
+export interface CastBarRoiConfig {
+  enabled: boolean;
+  monitor: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  baseline_color: ColorRGB;
+  diff_threshold: number;
+  min_changed_ratio: number;
+  border_enabled: boolean;
+  border_color: ColorRGB;
+  border_tolerance: number;
+  min_border_match_ratio: number;
+  confirm_frames: number;
 }
 export interface ExecConfig {
   enabled: boolean;

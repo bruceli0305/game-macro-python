@@ -7,6 +7,9 @@ use enigo::{Coordinate, Mouse};
 use serde::Serialize;
 
 use crate::capture::capturer::CaptureManager;
+use crate::capture::cast_bar_roi::{
+    CastBarRoiRequest, CastBarRoiSample, sample_cast_bar_roi, validate_cast_bar_roi_request,
+};
 use crate::error::{AppError, CommandResult};
 use crate::models::base::PickConfig;
 use crate::store::profile_store::ProfileStore;
@@ -173,6 +176,13 @@ pub fn capture_diagnostics() -> CommandResult<CaptureDiagnostics> {
         sample: sample_result,
         sample_error,
     })
+}
+
+#[tauri::command]
+pub fn capture_cast_bar_roi(request: CastBarRoiRequest) -> CommandResult<CastBarRoiSample> {
+    validate_cast_bar_roi_request(&request).map_err(AppError::Capture)?;
+    let capture = CaptureManager::new().map_err(AppError::Capture)?;
+    sample_cast_bar_roi(&capture, &request).map_err(|error| AppError::Capture(error).into())
 }
 
 #[cfg(test)]

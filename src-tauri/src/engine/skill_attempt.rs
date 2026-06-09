@@ -1,39 +1,34 @@
-//! 技能尝试状态机
+//! 鎶€鑳藉皾璇曠姸鎬佹満
 //!
-//! 对齐 python-legacy/rotation_editor/core/runtime/executor/skill_attempt.py
+//! 瀵归綈 python-legacy/rotation_editor/core/runtime/executor/skill_attempt.py
 //!
-//! 状态转移:
+//! 鐘舵€佽浆绉?
 //! ```text
-//! READY_CHECK ──false──→ SKIPPED_NOT_READY
-//!      │ true
-//!      ▼
-//! Lock acquire ──busy──→ SKIPPED_LOCK_BUSY (or WAIT_LOCK)
-//!      │ ok
-//!      ▼
-//! PREPARING → send_key
-//!      │ ok                      │ fail
-//!      ▼                         ▼
-//! START_WAIT (poll start_expr)  FAILED(send_key_failed)
-//!      │ true          │ timeout
-//!      ▼               ▼
-//! CASTING          FAILED(no_cast_start) or retry
-//!      │
-//! COMPLETE_WAIT (poll complete_expr or timer)
-//!      │ true          │ timeout(HYBRID_ASSUME→true)
-//!      ▼               ▼
-//!   SUCCESS         FAILED(timeout)
+//! READY_CHECK 鈹€鈹€false鈹€鈹€鈫?SKIPPED_NOT_READY
+//!      鈹?true
+//!      鈻?//! Lock acquire 鈹€鈹€busy鈹€鈹€鈫?SKIPPED_LOCK_BUSY (or WAIT_LOCK)
+//!      鈹?ok
+//!      鈻?//! PREPARING 鈫?send_key
+//!      鈹?ok                      鈹?fail
+//!      鈻?                        鈻?//! START_WAIT (poll start_expr)  FAILED(send_key_failed)
+//!      鈹?true          鈹?timeout
+//!      鈻?              鈻?//! CASTING          FAILED(no_cast_start) or retry
+//!      鈹?//! COMPLETE_WAIT (poll complete_expr or timer)
+//!      鈹?true          鈹?timeout(HYBRID_ASSUME鈫抰rue)
+//!      鈻?              鈻?//!   SUCCESS         FAILED(timeout)
 //! ```
 
 use crate::ast::evaluator::{
-    BaselineProvider, EvalContext, MetricProvider, PixelSampler, TriBool, evaluate,
+    BaselineProvider, CastBarRoiProvider, EvalContext, MetricProvider, PixelSampler, TriBool,
+    evaluate,
 };
 use crate::ast::nodes::Expr;
+use crate::models::base::CastBarRoiConfig;
 use crate::models::point::Point;
 use crate::models::skill::Skill;
 
 // ---------------------------------------------------------------------------
-// ExecutionResult — 统一返回值
-// ---------------------------------------------------------------------------
+// ExecutionResult 鈥?缁熶竴杩斿洖鍊?// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionResult {
@@ -58,6 +53,7 @@ pub enum Outcome {
 pub enum Advance {
     Advance,
     Hold,
+    NextPhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,40 +124,60 @@ impl ExecutionResult {
 }
 
 // ---------------------------------------------------------------------------
-// 配置
+// 閰嶇疆
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct SkillAttemptConfig {
     pub default_gap_ms: u32,
     pub poll_not_ready_ms: u32,
-    /// 发键前等待锁的最大时间（0 = 不等待，直接 SKIP）
+    /// Max lock wait before sending a key. Zero means skip when busy.
     pub lock_wait_timeout_ms: u32,
     pub lock_wait_poll_ms: u32,
-    /// START 阶段
+    /// START 闃舵
     pub start_timeout_ms: u32,
     pub start_poll_ms: u32,
     pub max_retries: u32,
     pub retry_gap_ms: u32,
-    /// COMPLETE 阶段
+    pub failure_policy: AttemptFailurePolicy,
+    /// COMPLETE 闃舵
     pub complete_policy: CompletePolicy,
     pub complete_poll_ms: u32,
+    pub complete_timeout_ms: Option<u32>,
     pub complete_max_wait_factor: f64,
-    /// 事件节流
+    pub cast_bar_roi: Option<CastBarRoiConfig>,
+    /// 浜嬩欢鑺傛祦
     pub sample_log_throttle_ms: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptFailurePolicy {
+    NextSlot,
+    HoldPhase,
+    NextPhase,
+}
+
+impl AttemptFailurePolicy {
+    pub fn advance(self) -> Advance {
+        match self {
+            Self::NextSlot => Advance::Advance,
+            Self::HoldPhase => Advance::Hold,
+            Self::NextPhase => Advance::NextPhase,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletePolicy {
-    /// 仅按读条时间等待，到时即成功
+    /// 浠呮寜璇绘潯鏃堕棿绛夊緟锛屽埌鏃跺嵆鎴愬姛
     AssumeSuccess,
-    /// 必须看到 complete_expr 为 True
+    /// 蹇呴』鐪嬪埌 complete_expr 涓?True
     RequireSignal,
-    /// 有信号时严格校验，超时后假定成功
+    /// 鏈変俊鍙锋椂涓ユ牸鏍￠獙锛岃秴鏃跺悗鍋囧畾鎴愬姛
     HybridAssume,
-    /// 超时后判定失败
+    /// Treat timeout as failure.
     HybridFail,
-    /// 技能像素"变黑"确认进入冷却
+    /// 鎶€鑳藉儚绱?鍙橀粦"纭杩涘叆鍐峰嵈
     CdBlack,
 }
 
@@ -176,16 +192,19 @@ impl Default for SkillAttemptConfig {
             start_poll_ms: 10,
             max_retries: 3,
             retry_gap_ms: 30,
+            failure_policy: AttemptFailurePolicy::NextSlot,
             complete_policy: CompletePolicy::AssumeSuccess,
             complete_poll_ms: 30,
+            complete_timeout_ms: None,
             complete_max_wait_factor: 1.5,
+            cast_bar_roi: None,
             sample_log_throttle_ms: 80,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// KeySender trait — 发键抽象
+// KeySender trait 鈥?鍙戦敭鎶借薄
 // ---------------------------------------------------------------------------
 
 pub trait KeySender: Send + Sync {
@@ -210,6 +229,7 @@ pub struct SkillAttemptExecutor<'a> {
     pub sampler: &'a dyn PixelSampler,
     pub metrics: Option<&'a dyn MetricProvider>,
     pub baseline: Option<&'a dyn BaselineProvider>,
+    pub cast_bar_roi: Option<&'a dyn CastBarRoiProvider>,
     pub cfg: SkillAttemptConfig,
 }
 
@@ -226,6 +246,7 @@ impl<'a> SkillAttemptExecutor<'a> {
             sampler,
             metrics: None,
             baseline: None,
+            cast_bar_roi: None,
             cfg,
         }
     }
@@ -236,11 +257,15 @@ impl<'a> SkillAttemptExecutor<'a> {
             skills: self.skills,
             sampler: self.sampler,
             metrics: self.metrics,
+            timers: None,
+            markers: None,
+            counters: None,
             baseline: self.baseline,
+            cast_bar_roi: self.cast_bar_roi,
         }
     }
 
-    /// 执行一次技能尝试（同步版本 — 调用方负责 sleep/wait）
+    /// Execute one skill attempt.
     pub fn exec_skill_node(
         &self,
         key_sender: &mut dyn KeySender,
@@ -262,7 +287,7 @@ impl<'a> SkillAttemptExecutor<'a> {
             return ExecutionResult::failed(Advance::Advance, 50, "skill_id_empty");
         }
 
-        // ---- 查找技能 ----
+        // ---- 鏌ユ壘鎶€鑳?----
         let skill = match self.skills.iter().find(|s| s.id.as_str() == sid) {
             Some(s) => s,
             None => return ExecutionResult::failed(Advance::Advance, 50, "skill_missing"),
@@ -296,7 +321,7 @@ impl<'a> SkillAttemptExecutor<'a> {
             return ExecutionResult::skipped_not_ready(self.cfg.poll_not_ready_ms, &reason);
         }
 
-        // ---- 发键 ----
+        // ---- 鍙戦敭 ----
         if !key_sender.send_key(&skill.trigger_key) {
             events(AttemptEvent::Failed {
                 skill_id: sid.to_string(),
@@ -333,19 +358,18 @@ impl<'a> SkillAttemptExecutor<'a> {
                 return ExecutionResult::stopped();
             }
 
-            // 检查 start 信号
+            // 妫€鏌?start 淇″彿
             if self.poll_expr_until(
                 start_e,
                 self.cfg.start_timeout_ms,
                 self.cfg.start_poll_ms,
                 stopped,
             ) {
-                break; // 施法已开始
+                break;
             }
 
             if retries_left > 0 {
                 retries_left -= 1;
-                // 重试：重新发键
                 if !key_sender.send_key(&skill.trigger_key) {
                     events(AttemptEvent::Failed {
                         skill_id: sid.to_string(),
@@ -360,7 +384,7 @@ impl<'a> SkillAttemptExecutor<'a> {
                 events(AttemptEvent::KeySentOk {
                     skill_id: sid.to_string(),
                 });
-                // 调用方负责 sleep(retry_gap_ms)
+                // 璋冪敤鏂硅礋璐?sleep(retry_gap_ms)
                 continue;
             }
 
@@ -391,14 +415,8 @@ impl<'a> SkillAttemptExecutor<'a> {
             skill_id: sid.to_string(),
         });
         let ok = match self.cfg.complete_policy {
-            CompletePolicy::AssumeSuccess => {
-                // 仅等待读条时间
-                true
-            }
-            CompletePolicy::CdBlack => {
-                // 轮询技能像素是否"变黑"（RGB 接近 0,0,0）
-                self.poll_cd_black(skill, readbar, stopped)
-            }
+            CompletePolicy::AssumeSuccess => true,
+            CompletePolicy::CdBlack => self.poll_cd_black(skill, readbar, stopped),
             _ => {
                 let complete_e = match request.complete_expr {
                     Some(e) => e,
@@ -479,7 +497,7 @@ impl<'a> SkillAttemptExecutor<'a> {
         }
     }
 
-    /// 轮询表达式直到为 True 或超时。stopped 回调在上层做 sleep/wait
+    /// 杞琛ㄨ揪寮忕洿鍒颁负 True 鎴栬秴鏃躲€俿topped 鍥炶皟鍦ㄤ笂灞傚仛 sleep/wait
     fn poll_expr_until(
         &self,
         expr: &Expr,
@@ -487,8 +505,6 @@ impl<'a> SkillAttemptExecutor<'a> {
         _poll_ms: u32,
         stopped: &dyn Fn() -> bool,
     ) -> bool {
-        // 简化实现：只做一次求值。真实实现由调用方循环调用并 sleep。
-        // 这里返回单次求值结果 — 引擎层负责轮询。
         if stopped() {
             return false;
         }
@@ -496,7 +512,7 @@ impl<'a> SkillAttemptExecutor<'a> {
         evaluate(expr, &ctx).is_true()
     }
 
-    /// CD_BLACK 模式：检查技能像素是否接近纯黑
+    /// Check whether the skill icon is close to black.
     fn poll_cd_black(&self, skill: &Skill, _readbar_ms: u32, stopped: &dyn Fn() -> bool) -> bool {
         if stopped() {
             return false;
@@ -511,13 +527,13 @@ impl<'a> SkillAttemptExecutor<'a> {
         ) {
             None => false,
             Some((r, g, b)) => {
-                let diff = r.max(g).max(b); // 与纯黑 (0,0,0) 的最大通道差
-                diff <= 5 // 5 以内视为"变黑"
+                let diff = r.max(g).max(b);
+                diff <= 5
             }
         }
     }
 
-    /// 从技能像素获取容差
+    /// Return the configured tolerance for a skill pixel.
     pub fn tol_from_skill_pixel(&self, skill_id: &str) -> u8 {
         self.skills
             .iter()
@@ -527,19 +543,17 @@ impl<'a> SkillAttemptExecutor<'a> {
     }
 }
 
-// ---- 默认表达式（编译时构建或测试用占位） ----
-// 实际使用时由引擎传入编译好的 Expr
+// ---- 榛樿琛ㄨ揪寮忥紙缂栬瘧鏃舵瀯寤烘垨娴嬭瘯鐢ㄥ崰浣嶏級 ----
+// 瀹為檯浣跨敤鏃剁敱寮曟搸浼犲叆缂栬瘧濂界殑 Expr
 
-/// 默认的 ready_expr: PixelMatchSkill(skill_id, tol=pixel.tolerance)
-/// 引擎层负责用实际 skill_id 和 tolerance 构造
+/// Default ready expression used when the engine does not provide one.
 pub static READY_DEFAULT: Expr = Expr::Const { value: true };
 
-/// 默认的 start_expr: Not(PixelMatchSkill)
-/// 引擎层负责构造
+/// Default start expression used when the engine does not provide one.
 pub static START_DEFAULT: Expr = Expr::Const { value: true };
 
 // ===========================================================================
-// 测试
+// 娴嬭瘯
 // ===========================================================================
 
 #[cfg(test)]
@@ -549,7 +563,7 @@ mod tests {
     use crate::models::point::Point;
     use crate::models::skill::{ColorRGB, PixelSpec, SampleConfig, Skill};
 
-    // ---- 测试替身 ----
+    // ---- 娴嬭瘯鏇胯韩 ----
 
     struct DummySampler {
         rgb: (u8, u8, u8),

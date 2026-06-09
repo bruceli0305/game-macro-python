@@ -1,12 +1,14 @@
-//! Profile 配置 CRUD 命令
-
+//! Profile configuration CRUD commands.
 use crate::ast::compiler::compile_expr_json;
 use crate::error::{AppError, AppResult, CommandResult};
+use crate::models::cycle::{
+    AssistInterruptPolicy, CycleConfig, PhaseFallbackTransition, RuntimeAction, SkillSlot,
+};
 use crate::models::profile::Profile;
 use crate::models::skill::{PixelSpec, SampleConfig};
 use crate::store::profile_store::ProfileStore;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,10 +112,10 @@ fn validate_profile_references(profile: &Profile) -> AppResult<()> {
     }
 
     let cast_bar_point_id = profile.base.cast_bar.point_id.trim();
-    if profile.base.cast_bar.mode != "timer" {
+    if profile.base.cast_bar.mode == "pixel" {
         if cast_bar_point_id.is_empty() {
             return Err(AppError::Config(
-                "base.cast_bar.point_id is required when cast bar mode is not timer".into(),
+                "base.cast_bar.point_id is required when cast bar mode is pixel".into(),
             ));
         }
         if !point_ids.contains(cast_bar_point_id) {
@@ -129,38 +131,42 @@ fn validate_profile_references(profile: &Profile) -> AppResult<()> {
 
     for (rotation_index, rotation) in profile.rotations.iter().enumerate() {
         validate_rotation_config(rotation_index, rotation.poll_interval_ms)?;
+        let state_refs = validate_state_schema(rotation_index, rotation)?;
+        let phase_names = validate_phase_names(rotation_index, rotation)?;
         for (phase_index, phase) in rotation.phases.iter().enumerate() {
+            validate_runtime_actions(
+                &format!("rotations[{rotation_index}].phases[{phase_index}].entry_actions"),
+                &phase.entry_actions,
+                &state_refs,
+            )?;
+            validate_phase_transitions(
+                rotation_index,
+                phase_index,
+                phase,
+                &phase_names,
+                &skill_ids,
+                &point_ids,
+                &state_refs,
+            )?;
             for (slot_index, slot) in phase.skills.iter().enumerate() {
-                let path = format!(
-                    "rotations[{rotation_index}].phases[{phase_index}].skills[{slot_index}]"
-                );
-                let skill_id = slot.skill_id.trim();
-                if !skill_id.is_empty() && !skill_ids.contains(skill_id) {
-                    return Err(AppError::Config(format!(
-                        "{path}.skill_id references missing skill '{skill_id}'"
-                    )));
-                }
-
-                validate_expr_refs(
-                    &slot.condition_expr,
-                    &format!("{path}.condition_expr"),
+                validate_skill_slot_refs(
+                    &format!(
+                        "rotations[{rotation_index}].phases[{phase_index}].skills[{slot_index}]"
+                    ),
+                    slot,
                     &skill_ids,
                     &point_ids,
-                )?;
-                validate_expr_refs(
-                    &slot.start_expr,
-                    &format!("{path}.start_expr"),
-                    &skill_ids,
-                    &point_ids,
-                )?;
-                validate_expr_refs(
-                    &slot.complete_expr,
-                    &format!("{path}.complete_expr"),
-                    &skill_ids,
-                    &point_ids,
+                    &state_refs,
                 )?;
             }
         }
+        validate_assist_lanes(
+            rotation_index,
+            rotation,
+            &skill_ids,
+            &point_ids,
+            &state_refs,
+        )?;
     }
 
     Ok(())
@@ -191,10 +197,10 @@ fn validate_base_config(profile: &Profile) -> AppResult<()> {
     }
 
     match base.cast_bar.mode.trim() {
-        "timer" | "pixel" => {}
+        "timer" | "pixel" | "roi" => {}
         mode => {
             return Err(AppError::Config(format!(
-                "base.cast_bar.mode must be timer or pixel, got '{mode}'"
+                "base.cast_bar.mode must be timer, pixel, or roi, got '{mode}'"
             )));
         }
     }
@@ -211,6 +217,7 @@ fn validate_base_config(profile: &Profile) -> AppResult<()> {
             "base.cast_bar.max_wait_factor must be between 0.1 and 10.0".into(),
         ));
     }
+    validate_cast_bar_roi_config(base.cast_bar.mode.trim(), &base.cast_bar.roi)?;
 
     if base.exec.toggle_hotkey.trim().is_empty() {
         return Err(AppError::Config(
@@ -241,11 +248,453 @@ fn validate_base_config(profile: &Profile) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_cast_bar_roi_config(
+    cast_bar_mode: &str,
+    roi: &crate::models::base::CastBarRoiConfig,
+) -> AppResult<()> {
+    if roi.enabled || cast_bar_mode == "roi" {
+        if roi.monitor.trim().is_empty() {
+            return Err(AppError::Config(
+                "base.cast_bar.roi.monitor must not be empty".into(),
+            ));
+        }
+        if roi.width == 0 || roi.width > 2000 {
+            return Err(AppError::Config(
+                "base.cast_bar.roi.width must be between 1 and 2000".into(),
+            ));
+        }
+        if roi.height == 0 || roi.height > 500 {
+            return Err(AppError::Config(
+                "base.cast_bar.roi.height must be between 1 and 500".into(),
+            ));
+        }
+    }
+    if !roi.min_changed_ratio.is_finite()
+        || roi.min_changed_ratio < 0.0
+        || roi.min_changed_ratio > 1.0
+    {
+        return Err(AppError::Config(
+            "base.cast_bar.roi.min_changed_ratio must be between 0 and 1".into(),
+        ));
+    }
+    if !roi.min_border_match_ratio.is_finite()
+        || roi.min_border_match_ratio < 0.0
+        || roi.min_border_match_ratio > 1.0
+    {
+        return Err(AppError::Config(
+            "base.cast_bar.roi.min_border_match_ratio must be between 0 and 1".into(),
+        ));
+    }
+    if roi.confirm_frames == 0 || roi.confirm_frames > 10 {
+        return Err(AppError::Config(
+            "base.cast_bar.roi.confirm_frames must be between 1 and 10".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_rotation_config(rotation_index: usize, poll_interval_ms: u32) -> AppResult<()> {
     if poll_interval_ms == 0 || poll_interval_ms > 10000 {
         return Err(AppError::Config(format!(
             "rotations[{rotation_index}].poll_interval_ms must be between 1 and 10000"
         )));
+    }
+    Ok(())
+}
+
+fn validate_phase_names(
+    rotation_index: usize,
+    rotation: &CycleConfig,
+) -> AppResult<HashSet<String>> {
+    let mut names = HashSet::new();
+    for (phase_index, phase) in rotation.phases.iter().enumerate() {
+        let name = phase.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !names.insert(name.to_string()) {
+            return Err(AppError::Config(format!(
+                "rotations[{rotation_index}].phases[{phase_index}].name duplicates phase '{name}'"
+            )));
+        }
+    }
+    Ok(names)
+}
+
+fn validate_phase_transitions(
+    rotation_index: usize,
+    phase_index: usize,
+    phase: &crate::models::cycle::CyclePhase,
+    phase_names: &HashSet<String>,
+    skill_ids: &HashSet<&str>,
+    point_ids: &HashSet<&str>,
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    let phase_path = format!("rotations[{rotation_index}].phases[{phase_index}]");
+    for (rule_index, rule) in phase.transition_rules.iter().enumerate() {
+        let rule_path = format!("{phase_path}.transition_rules[{rule_index}]");
+        if rule.target_phase.trim().is_empty() {
+            return Err(AppError::Config(format!(
+                "{rule_path}.target_phase must not be empty"
+            )));
+        }
+        if !phase_names.contains(rule.target_phase.trim()) {
+            return Err(AppError::Config(format!(
+                "{rule_path}.target_phase references missing phase '{}'",
+                rule.target_phase
+            )));
+        }
+        validate_expr_refs(
+            &rule.condition_expr,
+            &format!("{rule_path}.condition_expr"),
+            skill_ids,
+            point_ids,
+            state_refs,
+        )?;
+        if rule.condition_expr.is_none() {
+            return Err(AppError::Config(format!(
+                "{rule_path}.condition_expr must not be empty"
+            )));
+        }
+    }
+
+    if let Some(PhaseFallbackTransition::Phase { target_phase }) = &phase.fallback_transition {
+        if target_phase.trim().is_empty() {
+            return Err(AppError::Config(format!(
+                "{phase_path}.fallback_transition.target_phase must not be empty"
+            )));
+        }
+        if !phase_names.contains(target_phase.trim()) {
+            return Err(AppError::Config(format!(
+                "{phase_path}.fallback_transition.target_phase references missing phase '{target_phase}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_skill_slot_refs(
+    path: &str,
+    slot: &SkillSlot,
+    skill_ids: &HashSet<&str>,
+    point_ids: &HashSet<&str>,
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    let skill_id = slot.skill_id.trim();
+    if !skill_id.is_empty() && !skill_ids.contains(skill_id) {
+        return Err(AppError::Config(format!(
+            "{path}.skill_id references missing skill '{skill_id}'"
+        )));
+    }
+
+    validate_expr_refs(
+        &slot.condition_expr,
+        &format!("{path}.condition_expr"),
+        skill_ids,
+        point_ids,
+        state_refs,
+    )?;
+    validate_expr_refs(
+        &slot.start_expr,
+        &format!("{path}.start_expr"),
+        skill_ids,
+        point_ids,
+        state_refs,
+    )?;
+    validate_expr_refs(
+        &slot.complete_expr,
+        &format!("{path}.complete_expr"),
+        skill_ids,
+        point_ids,
+        state_refs,
+    )?;
+    validate_attempt_policy(&format!("{path}.attempt_policy"), &slot.attempt_policy)?;
+    validate_runtime_actions(
+        &format!("{path}.post_actions"),
+        &slot.post_actions,
+        state_refs,
+    )?;
+
+    Ok(())
+}
+
+fn validate_assist_lanes(
+    rotation_index: usize,
+    rotation: &CycleConfig,
+    skill_ids: &HashSet<&str>,
+    point_ids: &HashSet<&str>,
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    let mut lane_ids = HashSet::new();
+    for (lane_index, lane) in rotation.assist_lanes.iter().enumerate() {
+        let lane_path = format!("rotations[{rotation_index}].assist_lanes[{lane_index}]");
+        let lane_id = lane.id.trim();
+        if lane_id.is_empty() {
+            return Err(AppError::Config(format!(
+                "{lane_path}.id must not be empty"
+            )));
+        }
+        if !lane_ids.insert(lane_id) {
+            return Err(AppError::Config(format!(
+                "{lane_path}.id duplicates assist lane '{lane_id}'"
+            )));
+        }
+        if lane.name.trim().is_empty() {
+            return Err(AppError::Config(format!(
+                "{lane_path}.name must not be empty"
+            )));
+        }
+        if !(10..=600_000).contains(&lane.check_interval_ms) {
+            return Err(AppError::Config(format!(
+                "{lane_path}.check_interval_ms must be between 10 and 600000"
+            )));
+        }
+        match lane.interrupt_policy {
+            AssistInterruptPolicy::IdleOnly
+            | AssistInterruptPolicy::CompleteWait
+            | AssistInterruptPolicy::AnyWait => {}
+        }
+        for (slot_index, slot) in lane.skills.iter().enumerate() {
+            validate_skill_slot_refs(
+                &format!("{lane_path}.skills[{slot_index}]"),
+                slot,
+                skill_ids,
+                point_ids,
+                state_refs,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+struct StateRefs {
+    marker_values: HashMap<String, HashSet<String>>,
+    timer_ids: HashSet<String>,
+    counter_ids: HashSet<String>,
+}
+
+fn validate_state_schema(
+    rotation_index: usize,
+    rotation: &crate::models::cycle::CycleConfig,
+) -> AppResult<StateRefs> {
+    let mut marker_values = HashMap::new();
+    let mut timer_ids = HashSet::new();
+    let mut counter_ids = HashSet::new();
+    let Some(schema) = &rotation.state_schema else {
+        return Ok(StateRefs {
+            marker_values,
+            timer_ids,
+            counter_ids,
+        });
+    };
+    for (marker_index, marker) in schema.markers.iter().enumerate() {
+        let path = format!("rotations[{rotation_index}].state_schema.markers[{marker_index}]");
+        let marker_id = marker.id.trim();
+        if marker_id.is_empty() {
+            return Err(AppError::Config(format!("{path}.id must not be empty")));
+        }
+        if marker.name.trim().is_empty() {
+            return Err(AppError::Config(format!("{path}.name must not be empty")));
+        }
+        if marker.initial_value.trim().is_empty() {
+            return Err(AppError::Config(format!(
+                "{path}.initial_value must not be empty"
+            )));
+        }
+        let mut values = HashSet::new();
+        for value in &marker.allowed_values {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(AppError::Config(format!(
+                    "{path}.allowed_values must not contain empty values"
+                )));
+            }
+            if !values.insert(value.to_string()) {
+                return Err(AppError::Config(format!(
+                    "{path}.allowed_values contains duplicate value '{value}'"
+                )));
+            }
+        }
+        if !values.is_empty() && !values.contains(marker.initial_value.trim()) {
+            return Err(AppError::Config(format!(
+                "{path}.initial_value '{}' is not allowed",
+                marker.initial_value
+            )));
+        }
+        if marker_values
+            .insert(marker_id.to_string(), values)
+            .is_some()
+        {
+            return Err(AppError::Config(format!(
+                "duplicate marker id '{marker_id}' in rotations[{rotation_index}]"
+            )));
+        }
+    }
+    for (timer_index, timer) in schema.timers.iter().enumerate() {
+        let path = format!("rotations[{rotation_index}].state_schema.timers[{timer_index}]");
+        let timer_id = timer.id.trim();
+        if timer_id.is_empty() {
+            return Err(AppError::Config(format!("{path}.id must not be empty")));
+        }
+        if timer.name.trim().is_empty() {
+            return Err(AppError::Config(format!("{path}.name must not be empty")));
+        }
+        if !timer_ids.insert(timer_id.to_string()) {
+            return Err(AppError::Config(format!(
+                "duplicate timer id '{timer_id}' in rotations[{rotation_index}]"
+            )));
+        }
+    }
+    for (counter_index, counter) in schema.counters.iter().enumerate() {
+        let path = format!("rotations[{rotation_index}].state_schema.counters[{counter_index}]");
+        let counter_id = counter.id.trim();
+        if counter_id.is_empty() {
+            return Err(AppError::Config(format!("{path}.id must not be empty")));
+        }
+        if counter.name.trim().is_empty() {
+            return Err(AppError::Config(format!("{path}.name must not be empty")));
+        }
+        if !counter_ids.insert(counter_id.to_string()) {
+            return Err(AppError::Config(format!(
+                "duplicate counter id '{counter_id}' in rotations[{rotation_index}]"
+            )));
+        }
+    }
+    Ok(StateRefs {
+        marker_values,
+        timer_ids,
+        counter_ids,
+    })
+}
+
+fn validate_runtime_actions(
+    path: &str,
+    actions: &[RuntimeAction],
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    for (index, action) in actions.iter().enumerate() {
+        match action {
+            RuntimeAction::SetMarker { marker_id, value } => {
+                validate_marker_ref_value(
+                    &format!("{path}[{index}]"),
+                    marker_id,
+                    value,
+                    state_refs,
+                )?;
+            }
+            RuntimeAction::ClearMarker { marker_id } => {
+                let marker_id = marker_id.trim();
+                if marker_id.is_empty() {
+                    return Err(AppError::Config(format!(
+                        "{path}[{index}].marker_id is empty"
+                    )));
+                }
+                if !state_refs.marker_values.contains_key(marker_id) {
+                    return Err(AppError::Config(format!(
+                        "{path}[{index}] references missing marker '{marker_id}'"
+                    )));
+                }
+            }
+            RuntimeAction::RecordTimer { timer_id } | RuntimeAction::ResetTimer { timer_id } => {
+                let timer_id = timer_id.trim();
+                if timer_id.is_empty() {
+                    return Err(AppError::Config(format!(
+                        "{path}[{index}].timer_id is empty"
+                    )));
+                }
+                if !state_refs.timer_ids.contains(timer_id) {
+                    return Err(AppError::Config(format!(
+                        "{path}[{index}] references missing timer '{timer_id}'"
+                    )));
+                }
+            }
+            RuntimeAction::IncrementCounter { counter_id, .. }
+            | RuntimeAction::SetCounter { counter_id, .. }
+            | RuntimeAction::ResetCounter { counter_id } => {
+                let counter_id = counter_id.trim();
+                if counter_id.is_empty() {
+                    return Err(AppError::Config(format!(
+                        "{path}[{index}].counter_id is empty"
+                    )));
+                }
+                if !state_refs.counter_ids.contains(counter_id) {
+                    return Err(AppError::Config(format!(
+                        "{path}[{index}] references missing counter '{counter_id}'"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_marker_ref_value(
+    path: &str,
+    marker_id: &str,
+    value: &str,
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    let marker_id = marker_id.trim();
+    if marker_id.is_empty() {
+        return Err(AppError::Config(format!("{path}.marker_id is empty")));
+    }
+    let Some(allowed_values) = state_refs.marker_values.get(marker_id) else {
+        return Err(AppError::Config(format!(
+            "{path} references missing marker '{marker_id}'"
+        )));
+    };
+    if !allowed_values.is_empty() && !allowed_values.contains(value.trim()) {
+        return Err(AppError::Config(format!(
+            "{path}.value '{}' is not allowed for marker '{marker_id}'",
+            value
+        )));
+    }
+    Ok(())
+}
+
+fn validate_attempt_policy(
+    path: &str,
+    policy: &Option<crate::models::cycle::AttemptPolicy>,
+) -> AppResult<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    if policy.max_attempts == 0 || policy.max_attempts > 21 {
+        return Err(AppError::Config(format!(
+            "{path}.max_attempts must be between 1 and 21"
+        )));
+    }
+    if policy.start_timeout_ms == 0 || policy.start_timeout_ms > 600_000 {
+        return Err(AppError::Config(format!(
+            "{path}.start_timeout_ms must be between 1 and 600000"
+        )));
+    }
+    if policy.complete_timeout_ms > 600_000 {
+        return Err(AppError::Config(format!(
+            "{path}.complete_timeout_ms must be between 0 and 600000"
+        )));
+    }
+    if policy.retry_delay_ms > 60_000 {
+        return Err(AppError::Config(format!(
+            "{path}.retry_delay_ms must be between 0 and 60000"
+        )));
+    }
+    match policy.failure_policy.trim() {
+        "hold_phase" | "next_slot" | "next_phase" => {}
+        other => {
+            return Err(AppError::Config(format!(
+                "{path}.failure_policy has invalid value '{other}'"
+            )));
+        }
+    }
+    match policy.complete_fallback.trim() {
+        "fail" | "assume_success_after_timeout" => {}
+        other => {
+            return Err(AppError::Config(format!(
+                "{path}.complete_fallback has invalid value '{other}'"
+            )));
+        }
     }
     Ok(())
 }
@@ -271,6 +720,7 @@ fn validate_expr_refs(
     path: &str,
     skill_ids: &HashSet<&str>,
     point_ids: &HashSet<&str>,
+    state_refs: &StateRefs,
 ) -> AppResult<()> {
     let Some(expr) = expr else {
         return Ok(());
@@ -305,6 +755,23 @@ fn validate_expr_refs(
             )));
         }
     }
+    for timer_id in compiled.probes.timer_ids {
+        if !state_refs.timer_ids.contains(timer_id.as_str()) {
+            return Err(AppError::Config(format!(
+                "{path} references missing timer '{timer_id}'"
+            )));
+        }
+    }
+    for marker_ref in compiled.probes.marker_refs {
+        validate_marker_ref_value(path, &marker_ref.marker_id, &marker_ref.value, state_refs)?;
+    }
+    for counter_id in compiled.probes.counter_ids {
+        if !state_refs.counter_ids.contains(counter_id.as_str()) {
+            return Err(AppError::Config(format!(
+                "{path} references missing counter '{counter_id}'"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -327,7 +794,11 @@ fn app_data_dir() -> AppResult<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot};
+    use crate::models::cycle::{
+        AssistInterruptPolicy, AssistLaneConfig, AttemptPolicy, CycleConfig, CyclePhase,
+        CycleStateSchema, PhaseFallbackTransition, PhaseTransitionRule, RuntimeAction,
+        RuntimeCounterDef, RuntimeMarkerDef, RuntimeTimerDef, SkillSlot,
+    };
     use crate::models::point::Point;
     use crate::models::skill::{AmmoStagePixel, PixelSpec, SampleConfig, Skill};
     use crate::store::profile_store::default_profile;
@@ -341,9 +812,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![slot],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,
+            state_schema: None,
         }];
         profile
     }
@@ -387,12 +863,54 @@ mod tests {
             start_expr: None,
             complete_expr: None,
             override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
         });
 
         assert!(matches!(
             validate_profile_references(&profile),
             Err(AppError::Config(_))
         ));
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_invalid_assist_lane() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: None,
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+        profile.skills.skills.push(valid_skill("sk1"));
+        profile.rotations[0].assist_lanes = vec![AssistLaneConfig {
+            id: "assist".into(),
+            name: "Assist".into(),
+            enabled: true,
+            check_interval_ms: 5,
+            interrupt_policy: AssistInterruptPolicy::IdleOnly,
+            skills: vec![SkillSlot {
+                skill_id: "missing".into(),
+                priority: 1,
+                label: String::new(),
+                condition_expr: None,
+                start_expr: None,
+                complete_expr: None,
+                override_cast_ms: None,
+                protected_release: false,
+                attempt_policy: None,
+                post_actions: vec![],
+            }],
+        }];
+
+        let err = validate_profile_references(&profile).expect_err("assist lane must be invalid");
+        assert!(matches!(err, AppError::Config(_)));
     }
 
     #[test]
@@ -409,6 +927,9 @@ mod tests {
             start_expr: None,
             complete_expr: None,
             override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
         });
         profile.points.points.clear();
 
@@ -416,6 +937,310 @@ mod tests {
             validate_profile_references(&profile),
             Err(AppError::Config(_))
         ));
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_invalid_attempt_policy() {
+        let profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: None,
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: Some(AttemptPolicy {
+                max_attempts: 0,
+                start_timeout_ms: 0,
+                complete_timeout_ms: 0,
+                retry_delay_ms: 0,
+                failure_policy: "next_slot".into(),
+                complete_fallback: "assume_success_after_timeout".into(),
+            }),
+            post_actions: vec![],
+        });
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_missing_timer_expr_ref() {
+        let profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "timer_elapsed_ge",
+                "timer_id": "missing",
+                "ms": 1000
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_reference_validation_accepts_declared_timer_action_and_expr() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "timer_elapsed_ge",
+                "timer_id": "burst",
+                "ms": 1000
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![RuntimeAction::RecordTimer {
+                timer_id: "burst".into(),
+            }],
+        });
+        profile.rotations[0].state_schema = Some(CycleStateSchema {
+            markers: vec![],
+            timers: vec![RuntimeTimerDef {
+                id: "burst".into(),
+                name: "Burst".into(),
+                reset_on_cycle_start: false,
+            }],
+            counters: vec![],
+        });
+
+        assert!(validate_profile_references(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_missing_marker_expr_ref() {
+        let profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "marker_eq",
+                "marker_id": "missing",
+                "value": "main"
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_marker_value_outside_allowed_set() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "marker_eq",
+                "marker_id": "weapon",
+                "value": "unknown"
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+        profile.rotations[0].state_schema = Some(CycleStateSchema {
+            markers: vec![RuntimeMarkerDef {
+                id: "weapon".into(),
+                name: "Weapon".into(),
+                initial_value: "main".into(),
+                allowed_values: vec!["main".into(), "alt".into()],
+            }],
+            timers: vec![],
+            counters: vec![],
+        });
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_reference_validation_accepts_declared_marker_action_and_expr() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "marker_eq",
+                "marker_id": "weapon",
+                "value": "alt"
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![RuntimeAction::SetMarker {
+                marker_id: "weapon".into(),
+                value: "alt".into(),
+            }],
+        });
+        profile.rotations[0].state_schema = Some(CycleStateSchema {
+            markers: vec![RuntimeMarkerDef {
+                id: "weapon".into(),
+                name: "Weapon".into(),
+                initial_value: "main".into(),
+                allowed_values: vec!["main".into(), "alt".into()],
+            }],
+            timers: vec![],
+            counters: vec![],
+        });
+
+        assert!(validate_profile_references(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_missing_counter_expr_ref() {
+        let profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "counter_ge",
+                "counter_id": "missing",
+                "value": 1
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_reference_validation_accepts_declared_counter_action_and_expr() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: Some(json!({
+                "type": "counter_ge",
+                "counter_id": "main_wp2_count",
+                "value": 2
+            })),
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![RuntimeAction::IncrementCounter {
+                counter_id: "main_wp2_count".into(),
+                by: 1,
+            }],
+        });
+        profile.rotations[0].state_schema = Some(CycleStateSchema {
+            markers: vec![],
+            timers: vec![],
+            counters: vec![RuntimeCounterDef {
+                id: "main_wp2_count".into(),
+                name: "Main WP2 Count".into(),
+                initial_value: 0,
+                reset_on_phase_entry: false,
+                reset_on_cycle_start: true,
+            }],
+        });
+
+        assert!(validate_profile_references(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_missing_phase_transition_target() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: None,
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+        profile.rotations[0].phases[0].name = "P1".into();
+        profile.rotations[0].phases[0].transition_rules = vec![PhaseTransitionRule {
+            label: "missing".into(),
+            condition_expr: Some(json!({"type": "const", "value": true})),
+            target_phase: "Missing".into(),
+        }];
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_reference_validation_accepts_declared_phase_transition_target() {
+        let mut profile = profile_with_slot(SkillSlot {
+            skill_id: String::new(),
+            priority: 1,
+            label: String::new(),
+            condition_expr: None,
+            start_expr: None,
+            complete_expr: None,
+            override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        });
+        profile.rotations[0].phases[0].name = "P1".into();
+        profile.rotations[0].phases[0].transition_rules = vec![PhaseTransitionRule {
+            label: "to-p2".into(),
+            condition_expr: Some(json!({"type": "const", "value": true})),
+            target_phase: "P2".into(),
+        }];
+        profile.rotations[0].phases[0].fallback_transition = Some(PhaseFallbackTransition::Phase {
+            target_phase: "P2".into(),
+        });
+        profile.rotations[0].phases.push(CyclePhase {
+            name: "P2".into(),
+            skills: vec![],
+            complete_when: "any_fired".into(),
+            entry_actions: vec![],
+            transition_rules: vec![],
+            fallback_transition: None,
+        });
+
+        assert!(validate_profile_references(&profile).is_ok());
     }
 
     #[test]
@@ -460,6 +1285,32 @@ mod tests {
         profile.points.points = vec![valid_point("cast")];
 
         assert!(validate_profile_references(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_reference_validation_accepts_cast_bar_roi_without_point() {
+        let mut profile = default_profile("default");
+        profile.base.cast_bar.mode = "roi".into();
+        profile.base.cast_bar.point_id.clear();
+        profile.base.cast_bar.roi.enabled = true;
+        profile.base.cast_bar.roi.monitor = "primary".into();
+        profile.base.cast_bar.roi.width = 320;
+        profile.base.cast_bar.roi.height = 28;
+
+        assert!(validate_profile_references(&profile).is_ok());
+    }
+
+    #[test]
+    fn test_reference_validation_rejects_invalid_cast_bar_roi_dimensions() {
+        let mut profile = default_profile("default");
+        profile.base.cast_bar.roi.enabled = true;
+        profile.base.cast_bar.roi.width = 0;
+        profile.base.cast_bar.roi.height = 0;
+
+        assert!(matches!(
+            validate_profile_references(&profile),
+            Err(AppError::Config(_))
+        ));
     }
 
     #[test]

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::ast::evaluator::PixelSampler;
+use crate::ast::evaluator::{CastBarRoiProvider, PixelSampler};
 use crate::capture::capturer::DirectPixelSampler;
+use crate::capture::cast_bar_roi::ScreenCastBarRoiProvider;
 use crate::engine::cycle_executor::CycleExecutor;
 use crate::engine::runtime_state::{AttemptStage, RuntimeState};
 use crate::engine::skill_attempt::{KeySender, SkillAttemptConfig};
@@ -244,11 +245,16 @@ fn smoke_fixture_profile() -> Profile {
     }];
     profile.rotations = vec![CycleConfig {
         name: "IPC smoke rotation".into(),
+        assist_lanes: vec![],
         poll_interval_ms: 10,
         max_cycles: 1,
+        state_schema: None,
         phases: vec![CyclePhase {
             name: "P1".into(),
             complete_when: "any_fired".into(),
+            entry_actions: vec![],
+            transition_rules: vec![],
+            fallback_transition: None,
             skills: vec![SkillSlot {
                 skill_id: "smoke-skill".into(),
                 priority: 1,
@@ -261,6 +267,9 @@ fn smoke_fixture_profile() -> Profile {
                 start_expr: None,
                 complete_expr: None,
                 override_cast_ms: None,
+                protected_release: false,
+                attempt_policy: None,
+                post_actions: vec![],
             }],
         }],
     }];
@@ -279,6 +288,8 @@ fn smoke_fixture_pixel_overrides() -> Vec<PixelOverride> {
 }
 
 fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
+    let cast_bar_roi = (base.cast_bar.roi.enabled || base.cast_bar.mode.trim() == "roi")
+        .then_some(base.cast_bar.roi.clone());
     SkillAttemptConfig {
         default_gap_ms: base.exec.default_skill_gap_ms,
         poll_not_ready_ms: base.exec.poll_not_ready_ms,
@@ -286,6 +297,7 @@ fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
         retry_gap_ms: base.exec.retry_gap_ms,
         complete_poll_ms: base.cast_bar.poll_interval_ms,
         complete_max_wait_factor: base.cast_bar.max_wait_factor,
+        cast_bar_roi,
         ..SkillAttemptConfig::default()
     }
 }
@@ -547,7 +559,16 @@ async fn run_engine_loop(
     attempt_cfg: SkillAttemptConfig,
 ) {
     let sampler = DirectPixelSampler;
-    let mut executor = CycleExecutor::new(&config, &points, &skills, &sampler, attempt_cfg);
+    let roi_provider = attempt_cfg
+        .cast_bar_roi
+        .clone()
+        .map(ScreenCastBarRoiProvider::new);
+    let mut executor = CycleExecutor::new(&config, &points, &skills, &sampler, attempt_cfg)
+        .with_cast_bar_roi_provider(
+            roi_provider
+                .as_ref()
+                .map(|provider| provider as &dyn CastBarRoiProvider),
+        );
 
     let mut key_sender: Box<dyn KeySender> = match EnigoKeySender::new() {
         Ok(sender) => {
@@ -790,7 +811,16 @@ fn simulate_rotation_with_sampler(
     sampler: &dyn PixelSampler,
     attempt_cfg: SkillAttemptConfig,
 ) -> CommandResult<String> {
-    let mut executor = CycleExecutor::new(config, points, skills, sampler, attempt_cfg);
+    let roi_provider = attempt_cfg
+        .cast_bar_roi
+        .clone()
+        .map(ScreenCastBarRoiProvider::new);
+    let mut executor = CycleExecutor::new(config, points, skills, sampler, attempt_cfg)
+        .with_cast_bar_roi_provider(
+            roi_provider
+                .as_ref()
+                .map(|provider| provider as &dyn CastBarRoiProvider),
+        );
 
     struct NoopKeySender;
     impl KeySender for NoopKeySender {
@@ -895,8 +925,10 @@ mod tests {
         let config = CycleConfig {
             name: "default".into(),
             phases: vec![],
+            assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,
+            state_schema: None,
         };
         let mut runtime = RuntimeState::new();
         runtime.engine_started("default");
@@ -958,8 +990,14 @@ mod tests {
                 start_expr: None,
                 complete_expr: None,
                 override_cast_ms: None,
+                protected_release: false,
+                attempt_policy: None,
+                post_actions: vec![],
             }],
             complete_when: "any_fired".into(),
+            entry_actions: vec![],
+            transition_rules: vec![],
+            fallback_transition: None,
         }];
         profile
     }
@@ -1060,11 +1098,16 @@ mod tests {
     fn test_simulate_with_pixel_overrides_satisfies_point_condition() {
         let config = CycleConfig {
             name: "sim".into(),
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 1,
+            state_schema: None,
             phases: vec![CyclePhase {
                 name: "P1".into(),
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
                 skills: vec![SkillSlot {
                     skill_id: "skill-1".into(),
                     priority: 1,
@@ -1077,6 +1120,9 @@ mod tests {
                     start_expr: None,
                     complete_expr: None,
                     override_cast_ms: None,
+                    protected_release: false,
+                    attempt_policy: None,
+                    post_actions: vec![],
                 }],
             }],
         };
@@ -1124,11 +1170,16 @@ mod tests {
     fn test_simulate_with_pixel_overrides_reports_condition_reason() {
         let config = CycleConfig {
             name: "sim".into(),
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 1,
+            state_schema: None,
             phases: vec![CyclePhase {
                 name: "P1".into(),
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
                 skills: vec![SkillSlot {
                     skill_id: "skill-1".into(),
                     priority: 1,
@@ -1141,6 +1192,9 @@ mod tests {
                     start_expr: None,
                     complete_expr: None,
                     override_cast_ms: None,
+                    protected_release: false,
+                    attempt_policy: None,
+                    post_actions: vec![],
                 }],
             }],
         };

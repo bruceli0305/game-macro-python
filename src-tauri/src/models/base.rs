@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::skill::ColorRGB;
+
 /// 全局基础配置（对齐 python-legacy core/models/base.py）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BaseConfig {
@@ -43,6 +45,48 @@ pub struct CastBarConfig {
     pub tolerance: u8,
     pub poll_interval_ms: u32,
     pub max_wait_factor: f64,
+    #[serde(default)]
+    pub roi: CastBarRoiConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CastBarRoiConfig {
+    pub enabled: bool,
+    pub monitor: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub baseline_color: ColorRGB,
+    pub diff_threshold: u8,
+    pub min_changed_ratio: f64,
+    pub border_enabled: bool,
+    pub border_color: ColorRGB,
+    pub border_tolerance: u8,
+    pub min_border_match_ratio: f64,
+    pub confirm_frames: u32,
+}
+
+impl Default for CastBarRoiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            monitor: "primary".into(),
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            baseline_color: ColorRGB { r: 0, g: 0, b: 0 },
+            diff_threshold: 18,
+            min_changed_ratio: 0.08,
+            border_enabled: false,
+            border_color: ColorRGB { r: 0, g: 0, b: 0 },
+            border_tolerance: 24,
+            min_border_match_ratio: 0.2,
+            confirm_frames: 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

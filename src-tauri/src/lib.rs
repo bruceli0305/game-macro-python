@@ -95,6 +95,7 @@ pub fn run() {
             commands::capture_cmd::capture_sample,
             commands::capture_cmd::capture_at_cursor,
             commands::capture_cmd::capture_diagnostics,
+            commands::capture_cmd::capture_cast_bar_roi,
             commands::skill_cmd::gw2_skill_search,
         ])
         .build(tauri::generate_context!())

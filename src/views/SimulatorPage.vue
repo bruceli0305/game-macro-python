@@ -15,7 +15,14 @@ import {
 } from "../utils/desktop-ipc-smoke";
 import { createIpcSmokeProfile } from "../utils/ipc-smoke-profile";
 import { firstProfileError, validateProfileForRun } from "../utils/profile-validation";
-import { simulationDebugJson, summarizeSimulation } from "../utils/simulation-debug";
+import {
+  simulationDebugJson,
+  simulationEventLabel,
+  simulationOutcomeLabel,
+  simulationOutcomeTagType,
+  simulationReasonLabel,
+  summarizeSimulation,
+} from "../utils/simulation-debug";
 import type { DataTableColumns } from "naive-ui";
 import type { PixelSpec } from "../types/skill";
 import type { Profile } from "../types/profile";
@@ -84,16 +91,18 @@ const columns: DataTableColumns<SimEvent> = [
   },
   { title: "阶段", key: "phase", width: 80 },
   {
-    title: "事件", key: "event", width: 80,
-    render: (row) => row.event === "skip" ? "跳过" : "执行",
+    title: "事件", key: "event", width: 96,
+    render: (row) => simulationEventLabel(row.event),
   },
   { title: "技能", key: "skillName", width: 80 },
   {
-    title: "结果", key: "outcome", width: 60,
+    title: "结果", key: "outcome", width: 76,
     render: (row) =>
-      row.outcome === "Success"
-        ? h(NTag, { type: "success", size: "small" }, { default: () => "成功" })
-        : h(NTag, { type: "warning", size: "small" }, { default: () => row.outcome }),
+      h(
+        NTag,
+        { type: simulationOutcomeTagType(row.outcome), size: "small" },
+        { default: () => simulationOutcomeLabel(row.outcome) }
+      ),
   },
   {
     title: "耗时", key: "castMs", width: 80,
@@ -108,7 +117,7 @@ const columns: DataTableColumns<SimEvent> = [
     key: "reason",
     minWidth: 220,
     ellipsis: { tooltip: true },
-    render: (row) => reasonLabel(row.reason),
+    render: (row) => simulationReasonLabel(row.reason),
   },
 ];
 
@@ -117,31 +126,6 @@ const TIMELINE_PX = 1200;
 const maxTime = ref(0);
 const timelineBars = ref<{ gapPx: number; barPx: number; color: string; label: string; timeLabel: string }[]>([]);
 const timelineContainerMinWidth = ref("1200px");
-
-function reasonLabel(reason: string): string {
-  if (!reason) return "";
-  if (reason.startsWith("cooldown_until=")) return `冷却中 (${reason})`;
-  if (reason.startsWith("shots_per_cycle_exhausted=")) return `本轮次数已用完 (${reason})`;
-  if (reason.startsWith("condition_false:")) return `条件不满足 (${reason})`;
-  if (reason.startsWith("condition_unknown:")) return `条件未知 (${reason})`;
-  const labels: Record<string, string> = {
-    no_condition: "无条件",
-    condition_true: "条件满足",
-    skill_id_empty: "技能 ID 为空",
-    skill_missing: "技能不存在",
-    skill_disabled: "技能已禁用",
-    ammo_unavailable: "弹药不可用",
-    success: "成功",
-    hybrid_assume_no_expr: "无完成信号，按读条成功",
-    hybrid_assume_timeout: "完成信号超时，按策略成功",
-    complete_signal_missing: "完成信号缺失",
-    timeout: "超时",
-    no_cast_start: "未检测到施法开始",
-    send_key_failed: "发键失败",
-    send_key_failed_retry: "重试发键失败",
-  };
-  return labels[reason] ? `${labels[reason]} (${reason})` : reason;
-}
 
 function buildTimeline(evts: SimEvent[]) {
   if (evts.length === 0) return;
@@ -160,7 +144,7 @@ function buildTimeline(evts: SimEvent[]) {
       gapPx: Math.max(gap > 0 ? gap * scale : 0, 0),
       barPx: Math.max(dur * scale, 40),
       color: colors[colorIdx],
-      label: e.skillName || e.skillId,
+      label: e.skillName || e.skillId || simulationEventLabel(e.event),
       timeLabel: `${(e.timeMs / 1000).toFixed(1)}s`,
     });
     prevEnd = e.timeMs + dur;
@@ -502,7 +486,7 @@ onMounted(() => {
     </n-card>
 
     <n-card size="small">
-      <div v-if="events.length > 0" class="mb-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-7">
+      <div v-if="events.length > 0" class="mb-3 grid grid-cols-2 gap-2 text-xs md:grid-cols-4 xl:grid-cols-8">
         <div class="rounded border border-white/10 bg-white/[0.03] px-3 py-2">
           <div class="text-gray-500">事件</div>
           <div class="mt-1 text-base font-semibold text-gray-100">{{ summary.total }}</div>
@@ -514,6 +498,10 @@ onMounted(() => {
         <div class="rounded border border-white/10 bg-white/[0.03] px-3 py-2">
           <div class="text-gray-500">跳过</div>
           <div class="mt-1 text-base font-semibold text-amber-300">{{ summary.skipped }}</div>
+        </div>
+        <div class="rounded border border-white/10 bg-white/[0.03] px-3 py-2">
+          <div class="text-gray-500">跳转</div>
+          <div class="mt-1 text-base font-semibold text-blue-300">{{ summary.transitions }}</div>
         </div>
         <div class="rounded border border-white/10 bg-white/[0.03] px-3 py-2">
           <div class="text-gray-500">成功</div>
@@ -540,7 +528,7 @@ onMounted(() => {
           size="small"
           type="info"
         >
-          {{ reasonLabel(item.reason) }} × {{ item.count }}
+          {{ simulationReasonLabel(item.reason) }} × {{ item.count }}
         </n-tag>
       </div>
 

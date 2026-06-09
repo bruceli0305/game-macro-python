@@ -41,7 +41,13 @@ const conditionMeta = computed(() => {
   }
   switch (expr.type) {
     case "pixel_skill":
+    case "pixel_skill_not_match":
+    case "pixel_skill_black":
+    case "pixel_skill_not_black":
     case "pixel_point":
+    case "pixel_point_not_match":
+    case "pixel_point_black":
+    case "pixel_point_not_black":
     case "cast_bar_changed":
       return { icon: IconEye, color: "#2080f0", label: "像素匹配" };
     case "skill_metric_ge":
@@ -61,8 +67,20 @@ const conditionSummary = computed(() => {
   switch (expr.type) {
     case "pixel_skill":
       return `技能像素 ${expr.skill_id} tol=${expr.tolerance}`;
+    case "pixel_skill_not_match":
+      return `技能像素不匹配 ${expr.skill_id} tol=${expr.tolerance}`;
+    case "pixel_skill_black":
+      return `技能像素为黑 ${expr.skill_id} <=${expr.tolerance}`;
+    case "pixel_skill_not_black":
+      return `技能像素非黑 ${expr.skill_id} >${expr.tolerance}`;
     case "pixel_point":
       return `点位像素 ${expr.point_id} tol=${expr.tolerance}`;
+    case "pixel_point_not_match":
+      return `点位像素不匹配 ${expr.point_id} tol=${expr.tolerance}`;
+    case "pixel_point_black":
+      return `点位为黑 ${expr.point_id} <=${expr.tolerance}`;
+    case "pixel_point_not_black":
+      return `点位非黑 ${expr.point_id} >${expr.tolerance}`;
     case "skill_metric_ge":
       return `${expr.metric} >= ${expr.count}`;
     case "and":
@@ -83,6 +101,14 @@ const timingLabel = computed(() => {
   if (props.meta.cooldownMs > 0) parts.push(`冷却 ${props.meta.cooldownMs}ms`);
   if (props.meta.shotsPerCycle > 1) parts.push(`每轮 ${props.meta.shotsPerCycle} 次`);
   return parts.join(" / ");
+});
+
+const attemptPolicyLabel = computed(() => {
+  const guard = props.slot.protected_release ? " / 保护释放" : "";
+  const policy = props.slot.attempt_policy;
+  if (!policy) return `使用全局尝试策略${guard}`;
+  const fallback = policy.complete_fallback === "fail" ? "超时失败" : "超时成功";
+  return `尝试 ${policy.max_attempts} 次 / 开始 ${policy.start_timeout_ms}ms / ${fallback}${guard}`;
 });
 
 function onDblClick() {
@@ -131,6 +157,10 @@ function onDblClick() {
       <div class="skill-card-row flex items-center gap-1 min-w-0">
         <NIcon size="13"><IconClock /></NIcon>
         <span class="truncate">{{ timingLabel }}</span>
+      </div>
+      <div class="skill-card-row flex items-center gap-1 min-w-0">
+        <span class="inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full bg-emerald-300/80" />
+        <span class="truncate">{{ attemptPolicyLabel }}</span>
       </div>
     </div>
 

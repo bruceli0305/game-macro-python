@@ -2,7 +2,8 @@
 
 use crate::error::{AppError, AppResult};
 use crate::models::base::{
-    BaseConfig, CaptureConfig, CastBarConfig, ExecConfig, IoConfig, PickConfig, UiConfig,
+    BaseConfig, CaptureConfig, CastBarConfig, CastBarRoiConfig, ExecConfig, IoConfig, PickConfig,
+    UiConfig,
 };
 use crate::models::cycle::{CycleConfig, CyclePhase};
 use crate::models::point::PointsFile;
@@ -120,6 +121,7 @@ pub fn default_profile(name: &str) -> Profile {
                 tolerance: 15,
                 poll_interval_ms: 30,
                 max_wait_factor: 1.5,
+                roi: CastBarRoiConfig::default(),
             },
             exec: ExecConfig {
                 enabled: false,
@@ -144,9 +146,14 @@ pub fn default_profile(name: &str) -> Profile {
                 name: "Phase 1".into(),
                 skills: vec![],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,
+            state_schema: None,
         }],
     }
 }

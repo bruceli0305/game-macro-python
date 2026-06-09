@@ -63,11 +63,19 @@ pub struct EngineState {
 pub struct RuntimeState {
     pub engine: EngineState,
     pub skills: HashMap<String, SkillRuntimeState>,
+    pub markers: HashMap<String, String>,
+    pub timers: HashMap<String, u64>,
+    pub counters: HashMap<String, i64>,
+    pub now_ms: u64,
 }
 
 impl RuntimeState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_now_ms(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
     }
 
     fn ensure_skill(&mut self, skill_id: &str) -> &mut SkillRuntimeState {
@@ -174,6 +182,59 @@ impl RuntimeState {
             }
         }
     }
+
+    pub fn record_timer(&mut self, timer_id: &str, now_ms: u64) {
+        let tid = timer_id.trim();
+        if !tid.is_empty() {
+            self.timers.insert(tid.to_string(), now_ms);
+        }
+    }
+
+    pub fn reset_timer(&mut self, timer_id: &str) {
+        self.timers.remove(timer_id.trim());
+    }
+
+    pub fn elapsed_timer_ms(&self, timer_id: &str) -> Option<u64> {
+        let started_at = self.timers.get(timer_id.trim())?;
+        Some(self.now_ms.saturating_sub(*started_at))
+    }
+
+    pub fn set_marker(&mut self, marker_id: &str, value: &str) {
+        let mid = marker_id.trim();
+        if !mid.is_empty() {
+            self.markers.insert(mid.to_string(), value.to_string());
+        }
+    }
+
+    pub fn clear_marker(&mut self, marker_id: &str) {
+        self.markers.remove(marker_id.trim());
+    }
+
+    pub fn marker(&self, marker_id: &str) -> Option<&str> {
+        self.markers.get(marker_id.trim()).map(String::as_str)
+    }
+
+    pub fn set_counter(&mut self, counter_id: &str, value: i64) {
+        let cid = counter_id.trim();
+        if !cid.is_empty() {
+            self.counters.insert(cid.to_string(), value);
+        }
+    }
+
+    pub fn increment_counter(&mut self, counter_id: &str, by: i64) {
+        let cid = counter_id.trim();
+        if !cid.is_empty() {
+            *self.counters.entry(cid.to_string()).or_insert(0) += by;
+        }
+    }
+
+    pub fn reset_counter(&mut self, counter_id: &str) {
+        self.counters.remove(counter_id.trim());
+    }
+
+    pub fn counter(&self, counter_id: &str) -> Option<i64> {
+        self.counters.get(counter_id.trim()).copied()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +251,24 @@ impl crate::ast::evaluator::MetricProvider for RuntimeState {
             SkillMetric::CastStarted => Some(st.cast_started),
             SkillMetric::Fail => Some(st.fail),
         }
+    }
+}
+
+impl crate::ast::evaluator::TimerProvider for RuntimeState {
+    fn get_timer_elapsed_ms(&self, timer_id: &str) -> Option<u64> {
+        self.elapsed_timer_ms(timer_id)
+    }
+}
+
+impl crate::ast::evaluator::MarkerProvider for RuntimeState {
+    fn get_marker(&self, marker_id: &str) -> Option<&str> {
+        self.marker(marker_id)
+    }
+}
+
+impl crate::ast::evaluator::CounterProvider for RuntimeState {
+    fn get_counter(&self, counter_id: &str) -> Option<i64> {
+        self.counter(counter_id)
     }
 }
 
@@ -273,5 +352,50 @@ mod tests {
         assert_eq!(rt.get_metric("sk1", &SkillMetric::AttemptStarted), Some(1));
         assert_eq!(rt.get_metric("sk1", &SkillMetric::Fail), Some(0));
         assert_eq!(rt.get_metric("nonexistent", &SkillMetric::Success), None);
+    }
+
+    #[test]
+    fn test_timer_provider_elapsed() {
+        use crate::ast::evaluator::TimerProvider as _;
+
+        let mut rt = RuntimeState::new();
+        rt.record_timer("burst", 1_000);
+        rt.set_now_ms(3_500);
+
+        assert_eq!(rt.get_timer_elapsed_ms("burst"), Some(2_500));
+        assert_eq!(rt.get_timer_elapsed_ms("missing"), None);
+
+        rt.reset_timer("burst");
+        assert_eq!(rt.get_timer_elapsed_ms("burst"), None);
+    }
+
+    #[test]
+    fn test_marker_provider() {
+        use crate::ast::evaluator::MarkerProvider as _;
+
+        let mut rt = RuntimeState::new();
+        rt.set_marker("weapon", "main");
+
+        assert_eq!(rt.get_marker("weapon"), Some("main"));
+        rt.set_marker("weapon", "alt");
+        assert_eq!(rt.get_marker("weapon"), Some("alt"));
+
+        rt.clear_marker("weapon");
+        assert_eq!(rt.get_marker("weapon"), None);
+    }
+
+    #[test]
+    fn test_counter_provider() {
+        use crate::ast::evaluator::CounterProvider as _;
+
+        let mut rt = RuntimeState::new();
+        rt.set_counter("main_wp2_count", 1);
+        assert_eq!(rt.get_counter("main_wp2_count"), Some(1));
+
+        rt.increment_counter("main_wp2_count", 2);
+        assert_eq!(rt.get_counter("main_wp2_count"), Some(3));
+
+        rt.reset_counter("main_wp2_count");
+        assert_eq!(rt.get_counter("main_wp2_count"), None);
     }
 }

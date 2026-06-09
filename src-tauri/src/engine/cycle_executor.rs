@@ -8,13 +8,17 @@
 //! 5. Advance or reset phases after attempts finish.
 
 use crate::ast::compiler::compile_expr_json;
-use crate::ast::evaluator::{EvalContext, PixelSampler, evaluate};
+use crate::ast::evaluator::{CastBarRoiProvider, EvalContext, PixelSampler, evaluate};
 use crate::ast::nodes::Expr;
 use crate::engine::runtime_state::RuntimeState;
 use crate::engine::skill_attempt::{
-    Advance, AttemptEvent, CompletePolicy, ExecutionResult, KeySender, SkillAttemptConfig,
+    Advance, AttemptEvent, AttemptFailurePolicy, CompletePolicy, ExecutionResult, KeySender,
+    SkillAttemptConfig,
 };
-use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot};
+use crate::models::cycle::{
+    AssistInterruptPolicy, AssistLaneConfig, CycleConfig, CyclePhase, PhaseFallbackTransition,
+    PhaseTransitionRule, RuntimeAction, SkillSlot,
+};
 use crate::models::point::Point;
 use crate::models::skill::Skill;
 use std::collections::{HashMap, HashSet};
@@ -32,9 +36,11 @@ pub struct CycleExecState {
     pub fired_in_cycle: HashSet<String>,
     pub fired_count_in_cycle: HashMap<String, u32>,
     pub skill_ready_at_ms: HashMap<String, u64>,
+    pub assist_lane_next_check_ms: HashMap<String, u64>,
     pub total_executed: u32,
     pub last_skill_id: String,
     pub last_outcome: String,
+    pub phase_entry_applied: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,11 +78,13 @@ pub struct CycleExecutor<'a> {
     pub points: &'a [Point],
     pub skills: &'a [Skill],
     pub sampler: &'a dyn PixelSampler,
+    pub cast_bar_roi: Option<&'a dyn CastBarRoiProvider>,
     pub attempt_cfg: SkillAttemptConfig,
     pub state: CycleExecState,
     pub runtime: RuntimeState,
     pub log: Vec<CycleExecLogEntry>,
     pending_attempt: Option<PendingAttempt>,
+    suspended_main_attempt: Option<PendingAttempt>,
 
     // Compiled condition cache: skill_id -> condition expression.
     pub expr_cache: Vec<(String, Option<Expr>)>,
@@ -84,15 +92,30 @@ pub struct CycleExecutor<'a> {
 
 #[derive(Debug, Clone)]
 struct PendingAttempt {
-    phase_index: usize,
+    context: AttemptContext,
     skill_id: String,
+    post_actions: Vec<RuntimeAction>,
     readbar_ms: u32,
     start_expr: Expr,
     complete_expr: Option<Expr>,
+    protected_release: bool,
+    attempt_cfg: SkillAttemptConfig,
     stage: PendingAttemptStage,
     retries_left: u32,
     deadline_ms: u64,
     next_poll_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+enum AttemptContext {
+    Main {
+        phase_index: usize,
+    },
+    Assist {
+        lane_index: usize,
+        lane_id: String,
+        lane_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,18 +147,38 @@ impl<'a> CycleExecutor<'a> {
             })
             .collect();
 
+        let mut runtime = RuntimeState::new();
+        if let Some(schema) = &config.state_schema {
+            for marker in &schema.markers {
+                runtime.set_marker(&marker.id, &marker.initial_value);
+            }
+            for counter in &schema.counters {
+                runtime.set_counter(&counter.id, counter.initial_value);
+            }
+        }
+
         Self {
             config,
             points,
             skills,
             sampler,
+            cast_bar_roi: None,
             attempt_cfg,
             state: CycleExecState::default(),
-            runtime: RuntimeState::new(),
+            runtime,
             log: Vec::new(),
             pending_attempt: None,
+            suspended_main_attempt: None,
             expr_cache,
         }
+    }
+
+    pub fn with_cast_bar_roi_provider(
+        mut self,
+        provider: Option<&'a dyn CastBarRoiProvider>,
+    ) -> Self {
+        self.cast_bar_roi = provider;
+        self
     }
 
     /// Advance the cycle executor by one scheduler tick.
@@ -145,8 +188,15 @@ impl<'a> CycleExecutor<'a> {
         stopped: &dyn Fn() -> bool,
         now_ms: u64,
     ) -> bool {
+        self.runtime.set_now_ms(now_ms);
+
         if stopped() {
             if let Some(pending) = self.pending_attempt.take() {
+                self.apply_attempt_event(AttemptEvent::Stopped {
+                    skill_id: pending.skill_id,
+                });
+            }
+            if let Some(pending) = self.suspended_main_attempt.take() {
                 self.apply_attempt_event(AttemptEvent::Stopped {
                     skill_id: pending.skill_id,
                 });
@@ -154,12 +204,24 @@ impl<'a> CycleExecutor<'a> {
             return false;
         }
 
-        if now_ms < self.state.next_ready_ms {
-            return false;
+        if let Some(pending) = self.pending_attempt.take() {
+            if matches!(pending.context, AttemptContext::Main { .. })
+                && !pending.protected_release
+                && self.suspended_main_attempt.is_none()
+                && self.try_assist_lanes(key_sender, stopped, now_ms, Some(pending.stage))
+            {
+                if self.pending_attempt.is_some() {
+                    self.suspended_main_attempt = Some(pending);
+                } else {
+                    self.pending_attempt = Some(pending);
+                }
+                return true;
+            }
+            return self.advance_pending_attempt(key_sender, stopped, now_ms, pending);
         }
 
-        if let Some(pending) = self.pending_attempt.take() {
-            return self.advance_pending_attempt(key_sender, stopped, now_ms, pending);
+        if now_ms < self.state.next_ready_ms {
+            return false;
         }
 
         let phases = &self.config.phases;
@@ -177,6 +239,7 @@ impl<'a> CycleExecutor<'a> {
         }
 
         let phase = &phases[phase_idx];
+        self.enter_phase_if_needed(phase_idx, phase, now_ms);
         let mut sorted_slots: Vec<&SkillSlot> = phase.skills.iter().collect();
         sorted_slots.sort_by_key(|slot| slot.priority);
 
@@ -210,16 +273,29 @@ impl<'a> CycleExecutor<'a> {
                 continue;
             }
 
-            if let Some(execution) =
-                self.begin_skill_attempt(key_sender, slot, stopped, now_ms, phase_idx)
-            {
-                self.finish_skill_attempt(phase_idx, phase, sid, execution, now_ms);
+            if let Some(execution) = self.begin_skill_attempt(
+                key_sender,
+                slot,
+                stopped,
+                now_ms,
+                AttemptContext::Main {
+                    phase_index: phase_idx,
+                },
+            ) {
+                self.finish_skill_attempt(
+                    phase_idx,
+                    phase,
+                    &slot.post_actions,
+                    sid,
+                    execution,
+                    now_ms,
+                );
             }
 
             return true;
         }
 
-        false
+        self.try_assist_lanes(key_sender, stopped, now_ms, None)
     }
 
     fn check_skill_ready(&self, slot: &SkillSlot, now_ms: u64) -> (bool, String) {
@@ -247,19 +323,22 @@ impl<'a> CycleExecutor<'a> {
             return (false, "ammo_unavailable".into());
         }
 
-        let expr = self
-            .expr_cache
-            .iter()
-            .find(|(id, _)| id.as_str() == sid)
-            .and_then(|(_, e)| e.as_ref());
+        let expr = slot
+            .condition_expr
+            .as_ref()
+            .and_then(|value| compile_expr_json(value, "$.condition_expr").expr);
 
-        if let Some(e) = expr {
+        if let Some(e) = expr.as_ref() {
             let ctx = EvalContext {
                 points: self.points,
                 skills: self.skills,
                 sampler: self.sampler,
                 metrics: Some(&self.runtime),
+                timers: Some(&self.runtime),
+                markers: Some(&self.runtime),
+                counters: Some(&self.runtime),
                 baseline: None,
+                cast_bar_roi: self.cast_bar_roi,
             };
             let result = evaluate(e, &ctx);
             match &result {
@@ -276,19 +355,154 @@ impl<'a> CycleExecutor<'a> {
         }
     }
 
+    fn try_assist_lanes(
+        &mut self,
+        key_sender: &mut dyn KeySender,
+        stopped: &dyn Fn() -> bool,
+        now_ms: u64,
+        main_stage: Option<PendingAttemptStage>,
+    ) -> bool {
+        for (lane_index, lane) in self.config.assist_lanes.iter().enumerate() {
+            if !lane.enabled || lane.skills.is_empty() {
+                continue;
+            }
+            if !Self::assist_policy_allows(lane.interrupt_policy, main_stage) {
+                continue;
+            }
+
+            let lane_key = Self::assist_lane_key(lane_index, lane);
+            if let Some(next_check_ms) = self.state.assist_lane_next_check_ms.get(&lane_key) {
+                if now_ms < *next_check_ms {
+                    continue;
+                }
+            }
+
+            let mut sorted_slots: Vec<&SkillSlot> = lane.skills.iter().collect();
+            sorted_slots.sort_by_key(|slot| slot.priority);
+            let mut lane_checked = false;
+
+            for slot in sorted_slots {
+                let sid = slot.skill_id.trim();
+                if sid.is_empty() {
+                    continue;
+                }
+                lane_checked = true;
+                self.runtime.mark_node_exec(sid);
+
+                let (ready, cond_reason) = self.check_skill_ready(slot, now_ms);
+                if !ready {
+                    self.runtime.mark_ready_false(sid);
+                    let phase_name = format!("assist:{}", lane.name);
+                    self.log_event(CycleLogEvent {
+                        ts_ms: now_ms,
+                        phase_index: self.state.phase_index,
+                        phase_name: &phase_name,
+                        event: "assist_skip",
+                        skill_id: sid,
+                        outcome: "NOT_READY",
+                        reason: &cond_reason,
+                    });
+                    continue;
+                }
+
+                self.mark_assist_lane_checked(&lane_key, lane.check_interval_ms, now_ms);
+                let context = AttemptContext::Assist {
+                    lane_index,
+                    lane_id: lane.id.clone(),
+                    lane_name: lane.name.clone(),
+                };
+                if let Some(execution) =
+                    self.begin_skill_attempt(key_sender, slot, stopped, now_ms, context.clone())
+                {
+                    self.finish_assist_attempt(
+                        &context,
+                        &slot.post_actions,
+                        sid,
+                        execution,
+                        now_ms,
+                    );
+                }
+                return true;
+            }
+
+            if lane_checked {
+                self.mark_assist_lane_checked(&lane_key, lane.check_interval_ms, now_ms);
+            }
+        }
+
+        false
+    }
+
+    fn assist_policy_allows(
+        policy: AssistInterruptPolicy,
+        main_stage: Option<PendingAttemptStage>,
+    ) -> bool {
+        match main_stage {
+            None => true,
+            Some(PendingAttemptStage::CompleteWait) => matches!(
+                policy,
+                AssistInterruptPolicy::CompleteWait | AssistInterruptPolicy::AnyWait
+            ),
+            Some(PendingAttemptStage::StartWait | PendingAttemptStage::RetryDelay) => {
+                matches!(policy, AssistInterruptPolicy::AnyWait)
+            }
+        }
+    }
+
+    fn assist_lane_key(lane_index: usize, lane: &AssistLaneConfig) -> String {
+        let id = lane.id.trim();
+        if id.is_empty() {
+            format!("assist_lane_{lane_index}")
+        } else {
+            id.to_string()
+        }
+    }
+
+    fn mark_assist_lane_checked(&mut self, lane_key: &str, check_interval_ms: u32, now_ms: u64) {
+        self.state.assist_lane_next_check_ms.insert(
+            lane_key.to_string(),
+            now_ms.saturating_add(u64::from(check_interval_ms.max(1))),
+        );
+    }
+
+    fn slot_attempt_cfg(&self, slot: &SkillSlot) -> SkillAttemptConfig {
+        let mut cfg = self.attempt_cfg.clone();
+        let Some(policy) = &slot.attempt_policy else {
+            return cfg;
+        };
+
+        cfg.max_retries = policy.max_attempts.saturating_sub(1);
+        cfg.start_timeout_ms = policy.start_timeout_ms;
+        cfg.retry_gap_ms = policy.retry_delay_ms;
+        cfg.complete_timeout_ms =
+            (policy.complete_timeout_ms > 0).then_some(policy.complete_timeout_ms);
+        cfg.failure_policy = match policy.failure_policy.trim() {
+            "hold_phase" => AttemptFailurePolicy::HoldPhase,
+            "next_phase" => AttemptFailurePolicy::NextPhase,
+            _ => AttemptFailurePolicy::NextSlot,
+        };
+        cfg.complete_policy = match policy.complete_fallback.trim() {
+            "fail" => CompletePolicy::HybridFail,
+            "assume_success_after_timeout" => CompletePolicy::HybridAssume,
+            _ => cfg.complete_policy,
+        };
+        cfg
+    }
+
     fn begin_skill_attempt(
         &mut self,
         key_sender: &mut dyn KeySender,
         slot: &SkillSlot,
         stopped: &dyn Fn() -> bool,
         now_ms: u64,
-        phase_index: usize,
+        context: AttemptContext,
     ) -> Option<ExecutionResult> {
         let sid = slot.skill_id.trim().to_string();
+        let attempt_cfg = self.slot_attempt_cfg(slot);
         let Some(skill) = self.skills.iter().find(|skill| skill.id.as_str() == sid) else {
             return Some(ExecutionResult::failed(
                 Advance::Advance,
-                self.attempt_cfg.poll_not_ready_ms,
+                attempt_cfg.poll_not_ready_ms,
                 "skill_missing",
             ));
         };
@@ -310,8 +524,8 @@ impl<'a> CycleExecutor<'a> {
                 reason: "send_key_failed".into(),
             });
             return Some(ExecutionResult::failed(
-                Advance::Advance,
-                self.attempt_cfg.poll_not_ready_ms,
+                attempt_cfg.failure_policy.advance(),
+                attempt_cfg.poll_not_ready_ms,
                 "send_key_failed",
             ));
         }
@@ -321,8 +535,9 @@ impl<'a> CycleExecutor<'a> {
         });
 
         self.pending_attempt = Some(PendingAttempt {
-            phase_index,
+            context,
             skill_id: sid,
+            post_actions: slot.post_actions.clone(),
             readbar_ms: slot.override_cast_ms.unwrap_or(skill.cast.readbar_ms),
             start_expr: slot
                 .start_expr
@@ -333,9 +548,11 @@ impl<'a> CycleExecutor<'a> {
                 .complete_expr
                 .as_ref()
                 .and_then(|value| compile_expr_json(value, "$.complete_expr").expr),
+            protected_release: slot.protected_release,
+            attempt_cfg: attempt_cfg.clone(),
             stage: PendingAttemptStage::StartWait,
-            retries_left: self.attempt_cfg.max_retries,
-            deadline_ms: now_ms.saturating_add(u64::from(self.attempt_cfg.start_timeout_ms)),
+            retries_left: attempt_cfg.max_retries,
+            deadline_ms: now_ms.saturating_add(u64::from(attempt_cfg.start_timeout_ms)),
             next_poll_ms: now_ms,
         });
 
@@ -376,15 +593,32 @@ impl<'a> CycleExecutor<'a> {
 
         match result {
             Some(execution) => {
-                let phase = self.config.phases.get(pending.phase_index).cloned();
-                if let Some(phase) = phase {
-                    self.finish_skill_attempt(
-                        pending.phase_index,
-                        &phase,
-                        &pending.skill_id,
-                        execution,
-                        now_ms,
-                    );
+                match pending.context.clone() {
+                    AttemptContext::Main { phase_index } => {
+                        let phase = self.config.phases.get(phase_index).cloned();
+                        if let Some(phase) = phase {
+                            self.finish_skill_attempt(
+                                phase_index,
+                                &phase,
+                                &pending.post_actions,
+                                &pending.skill_id,
+                                execution,
+                                now_ms,
+                            );
+                        }
+                    }
+                    AttemptContext::Assist { .. } => {
+                        self.finish_assist_attempt(
+                            &pending.context,
+                            &pending.post_actions,
+                            &pending.skill_id,
+                            execution,
+                            now_ms,
+                        );
+                        if let Some(main_pending) = self.suspended_main_attempt.take() {
+                            self.pending_attempt = Some(main_pending);
+                        }
+                    }
                 }
                 true
             }
@@ -410,7 +644,8 @@ impl<'a> CycleExecutor<'a> {
                 skill_id: pending.skill_id.clone(),
             });
             pending.stage = PendingAttemptStage::CompleteWait;
-            pending.deadline_ms = self.complete_deadline_ms(now_ms, pending.readbar_ms);
+            pending.deadline_ms =
+                self.complete_deadline_ms(&pending.attempt_cfg, now_ms, pending.readbar_ms);
             pending.next_poll_ms = now_ms;
             return self.advance_complete_wait(now_ms, pending);
         }
@@ -422,18 +657,19 @@ impl<'a> CycleExecutor<'a> {
                     reason: "no_cast_start".into(),
                 });
                 return Some(ExecutionResult::failed(
-                    Advance::Advance,
-                    self.attempt_cfg.poll_not_ready_ms,
+                    pending.attempt_cfg.failure_policy.advance(),
+                    pending.attempt_cfg.poll_not_ready_ms,
                     "no_cast_start",
                 ));
             }
             pending.stage = PendingAttemptStage::RetryDelay;
-            pending.next_poll_ms = now_ms.saturating_add(u64::from(self.attempt_cfg.retry_gap_ms));
+            pending.next_poll_ms =
+                now_ms.saturating_add(u64::from(pending.attempt_cfg.retry_gap_ms));
             return None;
         }
 
         pending.next_poll_ms = now_ms
-            .saturating_add(u64::from(self.attempt_cfg.start_poll_ms.max(1)))
+            .saturating_add(u64::from(pending.attempt_cfg.start_poll_ms.max(1)))
             .min(pending.deadline_ms);
         let _ = key_sender;
         None
@@ -456,8 +692,8 @@ impl<'a> CycleExecutor<'a> {
                     reason: "send_key_failed_retry".into(),
                 });
                 return Some(ExecutionResult::failed(
-                    Advance::Advance,
-                    self.attempt_cfg.poll_not_ready_ms,
+                    pending.attempt_cfg.failure_policy.advance(),
+                    pending.attempt_cfg.poll_not_ready_ms,
                     "send_key_failed_retry",
                 ));
             }
@@ -467,14 +703,14 @@ impl<'a> CycleExecutor<'a> {
             pending.retries_left = pending.retries_left.saturating_sub(1);
             pending.stage = PendingAttemptStage::StartWait;
             pending.deadline_ms =
-                now_ms.saturating_add(u64::from(self.attempt_cfg.start_timeout_ms));
+                now_ms.saturating_add(u64::from(pending.attempt_cfg.start_timeout_ms));
             pending.next_poll_ms = now_ms;
             return self.advance_start_wait(key_sender, now_ms, pending);
         }
 
         Some(ExecutionResult::failed(
-            Advance::Advance,
-            self.attempt_cfg.poll_not_ready_ms,
+            pending.attempt_cfg.failure_policy.advance(),
+            pending.attempt_cfg.poll_not_ready_ms,
             "skill_missing",
         ))
     }
@@ -484,14 +720,14 @@ impl<'a> CycleExecutor<'a> {
         now_ms: u64,
         pending: &mut PendingAttempt,
     ) -> Option<ExecutionResult> {
-        match self.attempt_cfg.complete_policy {
+        match pending.attempt_cfg.complete_policy {
             CompletePolicy::AssumeSuccess => {
                 if pending.readbar_ms == 0 || now_ms >= pending.deadline_ms {
                     self.apply_attempt_event(AttemptEvent::Succeeded {
                         skill_id: pending.skill_id.clone(),
                     });
                     return Some(ExecutionResult::success(
-                        self.attempt_cfg.default_gap_ms,
+                        pending.attempt_cfg.default_gap_ms,
                         "success",
                     ));
                 }
@@ -504,7 +740,7 @@ impl<'a> CycleExecutor<'a> {
                         skill_id: pending.skill_id.clone(),
                     });
                     return Some(ExecutionResult::success(
-                        self.attempt_cfg.default_gap_ms,
+                        pending.attempt_cfg.default_gap_ms,
                         "success",
                     ));
                 }
@@ -514,8 +750,8 @@ impl<'a> CycleExecutor<'a> {
                         reason: "timeout".into(),
                     });
                     return Some(ExecutionResult::failed(
-                        Advance::Advance,
-                        self.attempt_cfg.poll_not_ready_ms,
+                        pending.attempt_cfg.failure_policy.advance(),
+                        pending.attempt_cfg.poll_not_ready_ms,
                         "timeout",
                     ));
                 }
@@ -526,7 +762,7 @@ impl<'a> CycleExecutor<'a> {
                         skill_id: pending.skill_id.clone(),
                     });
                     return Some(ExecutionResult::success(
-                        self.attempt_cfg.default_gap_ms,
+                        pending.attempt_cfg.default_gap_ms,
                         "hybrid_assume_no_expr",
                     ));
                 }
@@ -540,8 +776,8 @@ impl<'a> CycleExecutor<'a> {
                         reason: "complete_signal_missing".into(),
                     });
                     return Some(ExecutionResult::failed(
-                        Advance::Advance,
-                        self.attempt_cfg.poll_not_ready_ms,
+                        pending.attempt_cfg.failure_policy.advance(),
+                        pending.attempt_cfg.poll_not_ready_ms,
                         "complete_signal_missing",
                     ));
                 };
@@ -551,18 +787,18 @@ impl<'a> CycleExecutor<'a> {
                         skill_id: pending.skill_id.clone(),
                     });
                     return Some(ExecutionResult::success(
-                        self.attempt_cfg.default_gap_ms,
+                        pending.attempt_cfg.default_gap_ms,
                         "success",
                     ));
                 }
 
                 if now_ms >= pending.deadline_ms {
-                    if self.attempt_cfg.complete_policy == CompletePolicy::HybridAssume {
+                    if pending.attempt_cfg.complete_policy == CompletePolicy::HybridAssume {
                         self.apply_attempt_event(AttemptEvent::Succeeded {
                             skill_id: pending.skill_id.clone(),
                         });
                         return Some(ExecutionResult::success(
-                            self.attempt_cfg.default_gap_ms,
+                            pending.attempt_cfg.default_gap_ms,
                             "hybrid_assume_timeout",
                         ));
                     }
@@ -571,8 +807,8 @@ impl<'a> CycleExecutor<'a> {
                         reason: "timeout".into(),
                     });
                     return Some(ExecutionResult::failed(
-                        Advance::Advance,
-                        self.attempt_cfg.poll_not_ready_ms,
+                        pending.attempt_cfg.failure_policy.advance(),
+                        pending.attempt_cfg.poll_not_ready_ms,
                         "timeout",
                     ));
                 }
@@ -580,7 +816,7 @@ impl<'a> CycleExecutor<'a> {
         }
 
         pending.next_poll_ms = now_ms
-            .saturating_add(u64::from(self.attempt_cfg.complete_poll_ms.max(1)))
+            .saturating_add(u64::from(pending.attempt_cfg.complete_poll_ms.max(1)))
             .min(pending.deadline_ms);
         None
     }
@@ -589,24 +825,31 @@ impl<'a> CycleExecutor<'a> {
         &mut self,
         phase_idx: usize,
         phase: &CyclePhase,
+        post_actions: &[RuntimeAction],
         skill_id: &str,
         execution: ExecutionResult,
         now_ms: u64,
     ) {
         let outcome = format!("{:?}", execution.outcome);
         self.state.next_ready_ms = now_ms.saturating_add(u64::from(execution.next_delay_ms));
-        self.state.fired_in_phase.insert(skill_id.to_string());
-        self.state.fired_in_cycle.insert(skill_id.to_string());
-        *self
-            .state
-            .fired_count_in_cycle
-            .entry(skill_id.to_string())
-            .or_insert(0) += 1;
-        if let Some(cooldown_ms) = self.skill_cooldown_ms(skill_id) {
-            self.state.skill_ready_at_ms.insert(
-                skill_id.to_string(),
-                now_ms.saturating_add(u64::from(cooldown_ms)),
-            );
+        let should_advance_slot = execution.outcome
+            == crate::engine::skill_attempt::Outcome::Success
+            || execution.advance == Advance::Advance
+            || execution.advance == Advance::NextPhase;
+        if should_advance_slot {
+            self.state.fired_in_phase.insert(skill_id.to_string());
+            self.state.fired_in_cycle.insert(skill_id.to_string());
+            *self
+                .state
+                .fired_count_in_cycle
+                .entry(skill_id.to_string())
+                .or_insert(0) += 1;
+            if let Some(cooldown_ms) = self.skill_cooldown_ms(skill_id) {
+                self.state.skill_ready_at_ms.insert(
+                    skill_id.to_string(),
+                    now_ms.saturating_add(u64::from(cooldown_ms)),
+                );
+            }
         }
         self.state.total_executed += 1;
         self.state.last_skill_id = skill_id.to_string();
@@ -622,21 +865,92 @@ impl<'a> CycleExecutor<'a> {
             reason: &execution.reason,
         });
 
-        if self.is_phase_complete(phase) {
-            self.on_phase_complete(phase_idx, phase);
+        if execution.outcome == crate::engine::skill_attempt::Outcome::Success {
+            self.apply_runtime_actions(post_actions, now_ms, phase_idx, &phase.name, skill_id);
+        }
+
+        if execution.advance == Advance::NextPhase || self.is_phase_complete(phase) {
+            self.on_phase_complete(phase_idx, phase, now_ms);
             if self.state.phase_index >= self.config.phases.len() {
                 self.on_cycle_reset();
             }
         }
     }
 
-    fn complete_deadline_ms(&self, now_ms: u64, readbar_ms: u32) -> u64 {
+    fn finish_assist_attempt(
+        &mut self,
+        context: &AttemptContext,
+        post_actions: &[RuntimeAction],
+        skill_id: &str,
+        execution: ExecutionResult,
+        now_ms: u64,
+    ) {
+        let AttemptContext::Assist {
+            lane_index,
+            lane_id,
+            lane_name,
+        } = context
+        else {
+            return;
+        };
+        let outcome = format!("{:?}", execution.outcome);
+        self.state.next_ready_ms = now_ms.saturating_add(u64::from(execution.next_delay_ms));
+        let should_count = execution.outcome == crate::engine::skill_attempt::Outcome::Success
+            || execution.advance == Advance::Advance
+            || execution.advance == Advance::NextPhase;
+        if should_count {
+            self.state.fired_in_cycle.insert(skill_id.to_string());
+            *self
+                .state
+                .fired_count_in_cycle
+                .entry(skill_id.to_string())
+                .or_insert(0) += 1;
+            if let Some(cooldown_ms) = self.skill_cooldown_ms(skill_id) {
+                self.state.skill_ready_at_ms.insert(
+                    skill_id.to_string(),
+                    now_ms.saturating_add(u64::from(cooldown_ms)),
+                );
+            }
+        }
+        self.state.total_executed += 1;
+        self.state.last_skill_id = skill_id.to_string();
+        self.state.last_outcome = outcome.clone();
+
+        let phase_name = if lane_name.trim().is_empty() {
+            format!("assist:{lane_id}")
+        } else {
+            format!("assist:{lane_name}")
+        };
+        self.log_event(CycleLogEvent {
+            ts_ms: now_ms,
+            phase_index: *lane_index,
+            phase_name: &phase_name,
+            event: "assist_execute",
+            skill_id,
+            outcome: &outcome,
+            reason: &execution.reason,
+        });
+
+        if execution.outcome == crate::engine::skill_attempt::Outcome::Success {
+            self.apply_runtime_actions(post_actions, now_ms, *lane_index, &phase_name, skill_id);
+        }
+    }
+
+    fn complete_deadline_ms(
+        &self,
+        attempt_cfg: &SkillAttemptConfig,
+        now_ms: u64,
+        readbar_ms: u32,
+    ) -> u64 {
+        if let Some(timeout_ms) = attempt_cfg.complete_timeout_ms {
+            return now_ms.saturating_add(u64::from(timeout_ms));
+        }
         if readbar_ms == 0 {
             return now_ms;
         }
-        let wait_ms = match self.attempt_cfg.complete_policy {
+        let wait_ms = match attempt_cfg.complete_policy {
             CompletePolicy::AssumeSuccess => readbar_ms,
-            _ => (readbar_ms as f64 * self.attempt_cfg.complete_max_wait_factor).max(1.0) as u32,
+            _ => (readbar_ms as f64 * attempt_cfg.complete_max_wait_factor).max(1.0) as u32,
         };
         now_ms.saturating_add(u64::from(wait_ms))
     }
@@ -647,9 +961,73 @@ impl<'a> CycleExecutor<'a> {
             skills: self.skills,
             sampler: self.sampler,
             metrics: Some(&self.runtime),
+            timers: Some(&self.runtime),
+            markers: Some(&self.runtime),
+            counters: Some(&self.runtime),
             baseline: None,
+            cast_bar_roi: self.cast_bar_roi,
         };
         evaluate(expr, &ctx).is_true()
+    }
+
+    fn enter_phase_if_needed(&mut self, phase_idx: usize, phase: &CyclePhase, now_ms: u64) {
+        if self.state.phase_entry_applied {
+            return;
+        }
+        self.state.phase_entry_applied = true;
+        self.reset_phase_entry_counters();
+        self.apply_runtime_actions(&phase.entry_actions, now_ms, phase_idx, &phase.name, "");
+    }
+
+    fn apply_runtime_actions(
+        &mut self,
+        actions: &[RuntimeAction],
+        now_ms: u64,
+        phase_idx: usize,
+        phase_name: &str,
+        skill_id: &str,
+    ) {
+        for action in actions {
+            let reason = match action {
+                RuntimeAction::SetMarker { marker_id, value } => {
+                    self.runtime.set_marker(marker_id, value);
+                    format!("set_marker:{marker_id}={value}")
+                }
+                RuntimeAction::ClearMarker { marker_id } => {
+                    self.runtime.clear_marker(marker_id);
+                    format!("clear_marker:{marker_id}")
+                }
+                RuntimeAction::RecordTimer { timer_id } => {
+                    self.runtime.record_timer(timer_id, now_ms);
+                    format!("record_timer:{timer_id}")
+                }
+                RuntimeAction::ResetTimer { timer_id } => {
+                    self.runtime.reset_timer(timer_id);
+                    format!("reset_timer:{timer_id}")
+                }
+                RuntimeAction::IncrementCounter { counter_id, by } => {
+                    self.runtime.increment_counter(counter_id, *by);
+                    format!("increment_counter:{counter_id}+={by}")
+                }
+                RuntimeAction::SetCounter { counter_id, value } => {
+                    self.runtime.set_counter(counter_id, *value);
+                    format!("set_counter:{counter_id}={value}")
+                }
+                RuntimeAction::ResetCounter { counter_id } => {
+                    self.reset_counter_to_initial(counter_id);
+                    format!("reset_counter:{counter_id}")
+                }
+            };
+            self.log_event(CycleLogEvent {
+                ts_ms: now_ms,
+                phase_index: phase_idx,
+                phase_name,
+                event: "runtime_action",
+                skill_id,
+                outcome: "Applied",
+                reason: &reason,
+            });
+        }
     }
 
     fn skill_pixel_is_black(&self, skill_id: &str) -> bool {
@@ -778,10 +1156,83 @@ impl<'a> CycleExecutor<'a> {
         }
     }
 
-    fn on_phase_complete(&mut self, phase_idx: usize, _phase: &CyclePhase) {
-        self.state.phase_index = phase_idx + 1;
+    fn on_phase_complete(&mut self, phase_idx: usize, phase: &CyclePhase, now_ms: u64) {
+        let (next_phase_index, reason) = self.resolve_phase_transition(phase_idx, phase);
+        self.log_event(CycleLogEvent {
+            ts_ms: now_ms,
+            phase_index: phase_idx,
+            phase_name: &phase.name,
+            event: "phase_transition",
+            skill_id: "",
+            outcome: "Applied",
+            reason: &reason,
+        });
+        self.state.phase_index = next_phase_index;
         self.state.fired_in_phase.clear();
+        self.state.phase_entry_applied = false;
         // Outer tick code records phase-level logs.
+    }
+
+    fn resolve_phase_transition(&self, phase_idx: usize, phase: &CyclePhase) -> (usize, String) {
+        for rule in &phase.transition_rules {
+            if self.transition_rule_matches(rule) {
+                if let Some(target_index) = self.find_phase_index(&rule.target_phase) {
+                    let label = rule.label.trim();
+                    let rule_name = if label.is_empty() { "unnamed" } else { label };
+                    return (
+                        target_index,
+                        format!("rule:{rule_name}->{}", rule.target_phase.trim()),
+                    );
+                }
+                return (
+                    phase_idx.saturating_add(1),
+                    format!("rule_target_missing:{}", rule.target_phase.trim()),
+                );
+            }
+        }
+
+        match phase.fallback_transition.as_ref() {
+            Some(PhaseFallbackTransition::Stay) => (phase_idx, "fallback:stay".into()),
+            Some(PhaseFallbackTransition::Next) | None => {
+                (phase_idx.saturating_add(1), "fallback:next".into())
+            }
+            Some(PhaseFallbackTransition::Phase { target_phase }) => self
+                .find_phase_index(target_phase)
+                .map(|target_index| {
+                    (
+                        target_index,
+                        format!("fallback:phase->{}", target_phase.trim()),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        phase_idx.saturating_add(1),
+                        format!("fallback_target_missing:{}", target_phase.trim()),
+                    )
+                }),
+        }
+    }
+
+    fn transition_rule_matches(&self, rule: &PhaseTransitionRule) -> bool {
+        let Some(expr_json) = &rule.condition_expr else {
+            return false;
+        };
+        let compiled = compile_expr_json(expr_json, "$");
+        let Some(expr) = compiled.expr else {
+            return false;
+        };
+        self.evaluate_expr(&expr)
+    }
+
+    fn find_phase_index(&self, target_phase: &str) -> Option<usize> {
+        let target_phase = target_phase.trim();
+        if target_phase.is_empty() {
+            return None;
+        }
+        self.config
+            .phases
+            .iter()
+            .position(|phase| phase.name.trim() == target_phase)
     }
 
     fn on_cycle_reset(&mut self) {
@@ -790,7 +1241,51 @@ impl<'a> CycleExecutor<'a> {
         self.state.fired_in_phase.clear();
         self.state.fired_in_cycle.clear();
         self.state.fired_count_in_cycle.clear();
+        self.state.phase_entry_applied = false;
+        if let Some(schema) = &self.config.state_schema {
+            for timer in &schema.timers {
+                if timer.reset_on_cycle_start {
+                    self.runtime.reset_timer(&timer.id);
+                }
+            }
+            for counter in &schema.counters {
+                if counter.reset_on_cycle_start {
+                    self.runtime.set_counter(&counter.id, counter.initial_value);
+                }
+            }
+        }
         // Runtime metrics are cumulative and are not reset per cycle.
+    }
+
+    fn reset_phase_entry_counters(&mut self) {
+        let Some(schema) = &self.config.state_schema else {
+            return;
+        };
+        for counter in &schema.counters {
+            if counter.reset_on_phase_entry {
+                self.runtime.set_counter(&counter.id, counter.initial_value);
+            }
+        }
+    }
+
+    fn reset_counter_to_initial(&mut self, counter_id: &str) {
+        let counter_id = counter_id.trim();
+        if counter_id.is_empty() {
+            return;
+        }
+        let initial_value = self
+            .config
+            .state_schema
+            .as_ref()
+            .and_then(|schema| {
+                schema
+                    .counters
+                    .iter()
+                    .find(|counter| counter.id == counter_id)
+            })
+            .map(|counter| counter.initial_value)
+            .unwrap_or(0);
+        self.runtime.set_counter(counter_id, initial_value);
     }
 
     fn log_event(&mut self, event: CycleLogEvent<'_>) {
@@ -833,14 +1328,17 @@ fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
 }
 
 // ===========================================================================
-// 娴嬭瘯
-// ===========================================================================
+// 婵炴潙顑堥惁?// ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::evaluator::PixelSampler;
-    use crate::models::cycle::{CyclePhase, SkillSlot};
+    use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiState, PixelSampler};
+    use crate::models::cycle::{
+        AssistInterruptPolicy, AssistLaneConfig, AttemptPolicy, CyclePhase, CycleStateSchema,
+        PhaseFallbackTransition, PhaseTransitionRule, RuntimeAction, RuntimeCounterDef,
+        RuntimeMarkerDef, RuntimeTimerDef, SkillSlot,
+    };
     use crate::models::skill::{AmmoStagePixel, ColorRGB, PixelSpec, SampleConfig, Skill};
     use serde_json::json;
 
@@ -868,6 +1366,16 @@ mod tests {
         fn send_key(&mut self, key: &str) -> bool {
             self.keys.push(key.into());
             !self.fail
+        }
+    }
+
+    struct DummyCastBarRoiProvider {
+        state: Option<CastBarRoiState>,
+    }
+
+    impl CastBarRoiProvider for DummyCastBarRoiProvider {
+        fn get_cast_bar_roi_state(&self) -> Option<CastBarRoiState> {
+            self.state
         }
     }
 
@@ -913,6 +1421,20 @@ mod tests {
             start_expr: None,
             complete_expr: None,
             override_cast_ms: None,
+            protected_release: false,
+            attempt_policy: None,
+            post_actions: vec![],
+        }
+    }
+
+    fn make_assist_lane(policy: AssistInterruptPolicy, skills: Vec<SkillSlot>) -> AssistLaneConfig {
+        AssistLaneConfig {
+            id: "assist".into(),
+            name: "Assist".into(),
+            enabled: true,
+            check_interval_ms: 50,
+            interrupt_policy: policy,
+            skills,
         }
     }
 
@@ -938,6 +1460,206 @@ mod tests {
     }
 
     #[test]
+    fn test_assist_lane_executes_when_main_has_no_ready_slot() {
+        let config = CycleConfig {
+            name: "assist_idle".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![SkillSlot {
+                    condition_expr: Some(json!({ "type": "const", "value": false })),
+                    ..make_slot("main", 1)
+                }],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![make_assist_lane(
+                AssistInterruptPolicy::IdleOnly,
+                vec![make_slot("assist", 1)],
+            )],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("main", "M"), make_skill("assist", "A")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+
+        assert_eq!(ks.keys, vec!["A"]);
+        assert!(exec.log.iter().any(|entry| entry.event == "assist_execute"
+            && entry.skill_id == "assist"
+            && entry.phase_name == "assist:Assist"));
+        assert!(!exec.state.fired_in_phase.contains("assist"));
+    }
+
+    #[test]
+    fn test_assist_idle_only_does_not_interrupt_main_complete_wait() {
+        let mut main_skill = make_skill("main", "M");
+        main_skill.cast.readbar_ms = 100;
+        let config = CycleConfig {
+            name: "assist_no_interrupt".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![make_slot("main", 1)],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![make_assist_lane(
+                AssistInterruptPolicy::IdleOnly,
+                vec![make_slot("assist", 1)],
+            )],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![main_skill, make_skill("assist", "A")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert!(!exec.tick(&mut ks, &|| false, 10));
+
+        assert_eq!(ks.keys, vec!["M"]);
+        assert!(!exec.log.iter().any(|entry| entry.event == "assist_execute"));
+    }
+
+    #[test]
+    fn test_assist_complete_wait_can_run_during_main_complete_wait() {
+        let mut main_skill = make_skill("main", "M");
+        main_skill.cast.readbar_ms = 100;
+        let config = CycleConfig {
+            name: "assist_complete_wait".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![make_slot("main", 1)],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![make_assist_lane(
+                AssistInterruptPolicy::CompleteWait,
+                vec![make_slot("assist", 1)],
+            )],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![main_skill, make_skill("assist", "A")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert!(exec.tick(&mut ks, &|| false, 10));
+        assert!(exec.tick(&mut ks, &|| false, 100));
+
+        assert_eq!(ks.keys, vec!["M", "A"]);
+        assert_eq!(exec.state.total_executed, 2);
+        assert!(
+            exec.log
+                .iter()
+                .any(|entry| entry.event == "assist_execute" && entry.skill_id == "assist")
+        );
+        assert!(exec.log.iter().any(|entry| entry.event == "execute"
+            && entry.skill_id == "main"
+            && entry.outcome == "Success"));
+    }
+
+    #[test]
+    fn test_protected_release_blocks_assist_complete_wait_interrupt() {
+        let mut main_skill = make_skill("main", "M");
+        main_skill.cast.readbar_ms = 100;
+        let mut main_slot = make_slot("main", 1);
+        main_slot.protected_release = true;
+        let config = CycleConfig {
+            name: "assist_protected".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![main_slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![make_assist_lane(
+                AssistInterruptPolicy::CompleteWait,
+                vec![make_slot("assist", 1)],
+            )],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![main_skill, make_skill("assist", "A")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert!(!exec.tick(&mut ks, &|| false, 10));
+        assert!(exec.tick(&mut ks, &|| false, 100));
+
+        assert_eq!(ks.keys, vec!["M"]);
+        assert_eq!(exec.state.total_executed, 1);
+        assert!(!exec.log.iter().any(|entry| entry.event == "assist_execute"));
+    }
+
+    #[test]
     fn test_single_phase_single_skill() {
         let config = CycleConfig {
             name: "test".into(),
@@ -945,9 +1667,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("sk1", "f1")];
@@ -995,9 +1722,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("skB", 2), make_slot("skA", 1)],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("skA", "A"), make_skill("skB", "B")];
@@ -1016,7 +1748,7 @@ mod tests {
             fail: false,
         };
 
-        // tick 1: 搴旇鎵ц skA (priority 1)
+        // tick 1: 閹煎瓨妫侀姘跺箥瑜戦、?skA (priority 1)
         let acted = exec.tick(&mut ks, &|| false, 0);
         assert!(acted);
         assert_eq!(ks.keys, vec!["A"]);
@@ -1030,9 +1762,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("sk1", "f1")];
@@ -1070,11 +1807,19 @@ mod tests {
                     start_expr: None,
                     complete_expr: None,
                     override_cast_ms: None,
+                    protected_release: false,
+                    attempt_policy: None,
+                    post_actions: vec![],
                 }],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("sk1", "f1")];
@@ -1106,15 +1851,23 @@ mod tests {
                     name: "P1".into(),
                     skills: vec![make_slot("skA", 1), make_slot("skB", 2)],
                     complete_when: "all_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
                 },
                 CyclePhase {
                     name: "P2".into(),
                     skills: vec![make_slot("skC", 1)],
                     complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
                 },
             ],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![
@@ -1139,15 +1892,15 @@ mod tests {
 
         // tick 1: skA (priority 1)
         assert!(exec.tick(&mut ks, &|| false, 0));
-        assert_eq!(exec.state.phase_index, 0); // 杩樺湪 P1 (all_fired 鏈叏閮ㄥ畬鎴?
+        assert_eq!(exec.state.phase_index, 0); // Still in P1 because all_fired is not complete.
 
-        // tick 2: skB (priority 2, skA 宸插畬鎴?
+        // tick 2: skB (priority 2, skA has already fired).
         assert!(exec.tick(&mut ks, &|| false, 50));
-        assert_eq!(exec.state.phase_index, 1); // P1 瀹屾垚 鈫?P2
+        assert_eq!(exec.state.phase_index, 1); // P1 completes and advances to P2.
 
         // tick 3: skC (P2)
         assert!(exec.tick(&mut ks, &|| false, 100));
-        // P2 瀹屾垚 鈫?cycle reset 鈫?鍥炲埌 P1
+        // P2 completes and the cycle resets to P1.
         assert_eq!(exec.state.cycle_count, 1);
     }
 
@@ -1159,9 +1912,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("sk1", "f1")];
@@ -1198,9 +1956,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let mut skill = make_skill("sk1", "f1");
@@ -1251,9 +2014,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![slot],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("sk1", "f1")];
@@ -1292,6 +2060,468 @@ mod tests {
     }
 
     #[test]
+    fn test_start_expr_accepts_cast_bar_roi_changed() {
+        let mut slot = make_slot("sk1", 1);
+        slot.start_expr = Some(json!({"type": "cast_bar_roi_changed"}));
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let roi = DummyCastBarRoiProvider {
+            state: Some(CastBarRoiState {
+                changed_from_baseline: true,
+                border_visible: false,
+                gone: false,
+                changed_ratio: 0.4,
+                border_match_ratio: 0.0,
+            }),
+        };
+        let cfg = SkillAttemptConfig {
+            max_retries: 0,
+            start_timeout_ms: 20,
+            start_poll_ms: 10,
+            ..Default::default()
+        };
+        let mut exec = CycleExecutor::new(&config, &points, &skills, &sampler, cfg)
+            .with_cast_bar_roi_provider(Some(&roi));
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(ks.keys, vec!["f1"]);
+        let runtime = exec.runtime.skills.get("sk1").unwrap();
+        assert_eq!(runtime.cast_started, 1);
+        assert_eq!(runtime.fail, 0);
+    }
+
+    #[test]
+    fn test_slot_attempt_policy_max_attempts_one_sends_one_key() {
+        let mut slot = make_slot("sk1", 1);
+        slot.start_expr = Some(json!({"type": "const", "value": false}));
+        slot.attempt_policy = Some(AttemptPolicy {
+            max_attempts: 1,
+            start_timeout_ms: 20,
+            complete_timeout_ms: 0,
+            retry_delay_ms: 5,
+            failure_policy: "next_slot".into(),
+            complete_fallback: "assume_success_after_timeout".into(),
+        });
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let cfg = SkillAttemptConfig {
+            max_retries: 10,
+            start_timeout_ms: 1000,
+            start_poll_ms: 10,
+            ..Default::default()
+        };
+        let mut exec = CycleExecutor::new(&config, &points, &skills, &sampler, cfg);
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(ks.keys, vec!["f1"]);
+        assert!(!exec.tick(&mut ks, &|| false, 10));
+        assert_eq!(ks.keys, vec!["f1"]);
+        assert!(exec.tick(&mut ks, &|| false, 20));
+        assert_eq!(ks.keys, vec!["f1"]);
+        assert_eq!(exec.state.last_outcome, "Failed");
+        let runtime = exec.runtime.skills.get("sk1").unwrap();
+        assert_eq!(runtime.key_sent_ok, 1);
+        assert_eq!(runtime.fail_by_reason.get("no_cast_start"), Some(&1));
+    }
+
+    #[test]
+    fn test_slot_attempt_policy_complete_timeout_overrides_readbar() {
+        let mut slot = make_slot("sk1", 1);
+        slot.complete_expr = Some(json!({"type": "const", "value": false}));
+        slot.attempt_policy = Some(AttemptPolicy {
+            max_attempts: 1,
+            start_timeout_ms: 20,
+            complete_timeout_ms: 25,
+            retry_delay_ms: 0,
+            failure_policy: "next_slot".into(),
+            complete_fallback: "fail".into(),
+        });
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let mut skill = make_skill("sk1", "f1");
+        skill.cast.readbar_ms = 1000;
+        let skills = vec![skill];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.state.next_ready_ms, 25);
+        assert_eq!(exec.state.total_executed, 0);
+        assert!(exec.tick(&mut ks, &|| false, 25));
+        assert_eq!(exec.state.last_outcome, "Failed");
+        assert_eq!(exec.state.next_ready_ms, 75);
+        let runtime = exec.runtime.skills.get("sk1").unwrap();
+        assert_eq!(runtime.key_sent_ok, 1);
+        assert_eq!(runtime.fail_by_reason.get("timeout"), Some(&1));
+    }
+
+    #[test]
+    fn test_timer_post_action_gates_next_phase_skill() {
+        let mut first = make_slot("sk1", 1);
+        first.post_actions = vec![RuntimeAction::RecordTimer {
+            timer_id: "burst".into(),
+        }];
+
+        let mut second = make_slot("sk2", 1);
+        second.condition_expr = Some(json!({
+            "type": "timer_elapsed_ge",
+            "timer_id": "burst",
+            "ms": 100
+        }));
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![first],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![second],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: Some(CycleStateSchema {
+                markers: vec![],
+                timers: vec![RuntimeTimerDef {
+                    id: "burst".into(),
+                    name: "Burst timer".into(),
+                    reset_on_cycle_start: false,
+                }],
+                counters: vec![],
+            }),
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1"), make_skill("sk2", "f2")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(ks.keys, vec!["f1"]);
+        assert_eq!(exec.runtime.timers.get("burst"), Some(&0));
+        assert_eq!(exec.state.phase_index, 1);
+
+        assert!(!exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(ks.keys, vec!["f1"]);
+
+        assert!(exec.tick(&mut ks, &|| false, 100));
+        assert_eq!(ks.keys, vec!["f1", "f2"]);
+    }
+
+    #[test]
+    fn test_marker_post_action_gates_next_phase_skill() {
+        let mut first = make_slot("sk1", 1);
+        first.post_actions = vec![RuntimeAction::SetMarker {
+            marker_id: "weapon".into(),
+            value: "alt".into(),
+        }];
+
+        let mut second = make_slot("sk2", 1);
+        second.condition_expr = Some(json!({
+            "type": "marker_eq",
+            "marker_id": "weapon",
+            "value": "alt"
+        }));
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![first],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![second],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: Some(CycleStateSchema {
+                markers: vec![RuntimeMarkerDef {
+                    id: "weapon".into(),
+                    name: "Weapon".into(),
+                    initial_value: "main".into(),
+                    allowed_values: vec!["main".into(), "alt".into()],
+                }],
+                timers: vec![],
+                counters: vec![],
+            }),
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1"), make_skill("sk2", "f2")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert_eq!(exec.runtime.marker("weapon"), Some("main"));
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.runtime.marker("weapon"), Some("alt"));
+        assert_eq!(exec.state.phase_index, 1);
+        assert!(exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(ks.keys, vec!["f1", "f2"]);
+    }
+
+    #[test]
+    fn test_counter_post_action_gates_next_phase_skill() {
+        let mut first = make_slot("sk1", 1);
+        first.post_actions = vec![RuntimeAction::IncrementCounter {
+            counter_id: "main_wp2_count".into(),
+            by: 1,
+        }];
+
+        let mut second = make_slot("sk2", 1);
+        second.condition_expr = Some(json!({
+            "type": "counter_ge",
+            "counter_id": "main_wp2_count",
+            "value": 1
+        }));
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![first],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![second],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: Some(CycleStateSchema {
+                markers: vec![],
+                timers: vec![],
+                counters: vec![RuntimeCounterDef {
+                    id: "main_wp2_count".into(),
+                    name: "Main WP2 Count".into(),
+                    initial_value: 0,
+                    reset_on_phase_entry: false,
+                    reset_on_cycle_start: true,
+                }],
+            }),
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1"), make_skill("sk2", "f2")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert_eq!(exec.runtime.counter("main_wp2_count"), Some(0));
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.runtime.counter("main_wp2_count"), Some(1));
+        assert_eq!(exec.state.phase_index, 1);
+        assert!(exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(ks.keys, vec!["f1", "f2"]);
+    }
+
+    #[test]
+    fn test_phase_transition_rule_jumps_to_named_phase() {
+        let config = CycleConfig {
+            name: "transition".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![make_slot("sk1", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![PhaseTransitionRule {
+                        label: "jump".into(),
+                        condition_expr: Some(json!({"type": "const", "value": true})),
+                        target_phase: "P3".into(),
+                    }],
+                    fallback_transition: Some(PhaseFallbackTransition::Next),
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![make_slot("sk2", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P3".into(),
+                    skills: vec![make_slot("sk3", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            assist_lanes: vec![],
+            poll_interval_ms: 100,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![
+            make_skill("sk1", "f1"),
+            make_skill("sk2", "f2"),
+            make_skill("sk3", "f3"),
+        ];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.state.phase_index, 2);
+        assert!(
+            exec.log
+                .iter()
+                .any(|entry| entry.event == "phase_transition" && entry.reason == "rule:jump->P3")
+        );
+        assert!(exec.tick(&mut ks, &|| false, 1_000));
+        assert_eq!(ks.keys, vec!["f1", "f3"]);
+    }
+
+    #[test]
     fn test_complete_expr_require_signal_times_out() {
         let mut slot = make_slot("sk1", 1);
         slot.complete_expr = Some(json!({"type": "const", "value": false}));
@@ -1301,9 +2531,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![slot],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let mut skill = make_skill("sk1", "f1");
@@ -1354,9 +2589,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![slot],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let mut skill = make_skill("sk1", "f1");
@@ -1400,11 +2640,19 @@ mod tests {
                     start_expr: None,
                     complete_expr: None,
                     override_cast_ms: None,
+                    protected_release: false,
+                    attempt_policy: None,
+                    post_actions: vec![],
                 }],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let skills = vec![make_skill("sk1", "f1")];
@@ -1439,9 +2687,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "always".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let mut skill = make_skill("sk1", "f1");
@@ -1478,9 +2731,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "all_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let mut skill = make_skill("sk1", "f1");
@@ -1517,9 +2775,14 @@ mod tests {
                 name: "P1".into(),
                 skills: vec![make_slot("sk1", 1)],
                 complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
             }],
+            assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
+            state_schema: None,
         };
         let points = vec![];
         let mut skill = make_skill("sk1", "f1");
