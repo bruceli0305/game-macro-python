@@ -1,21 +1,29 @@
-//! 鎶€鑳藉皾璇曠姸鎬佹満
+//! Skill attempt state machine.
 //!
-//! 瀵归綈 python-legacy/rotation_editor/core/runtime/executor/skill_attempt.py
+//! Aligned with python-legacy/rotation_editor/core/runtime/executor/skill_attempt.py.
 //!
-//! 鐘舵€佽浆绉?
+//! State transitions:
 //! ```text
-//! READY_CHECK 鈹€鈹€false鈹€鈹€鈫?SKIPPED_NOT_READY
-//!      鈹?true
-//!      鈻?//! Lock acquire 鈹€鈹€busy鈹€鈹€鈫?SKIPPED_LOCK_BUSY (or WAIT_LOCK)
-//!      鈹?ok
-//!      鈻?//! PREPARING 鈫?send_key
-//!      鈹?ok                      鈹?fail
-//!      鈻?                        鈻?//! START_WAIT (poll start_expr)  FAILED(send_key_failed)
-//!      鈹?true          鈹?timeout
-//!      鈻?              鈻?//! CASTING          FAILED(no_cast_start) or retry
-//!      鈹?//! COMPLETE_WAIT (poll complete_expr or timer)
-//!      鈹?true          鈹?timeout(HYBRID_ASSUME鈫抰rue)
-//!      鈻?              鈻?//!   SUCCESS         FAILED(timeout)
+//! READY_CHECK --false--> SKIPPED_NOT_READY
+//!      |
+//!      true
+//!      v
+//! Lock acquire --busy--> SKIPPED_LOCK_BUSY (or WAIT_LOCK)
+//!      |
+//!      ok
+//!      v
+//! PREPARING -> send_key
+//!      | ok                         | fail
+//!      v                            v
+//! START_WAIT (poll start_expr)      FAILED(send_key_failed)
+//!      | true        | timeout
+//!      v             v
+//! CASTING            FAILED(no_cast_start) or retry
+//!      |
+//! COMPLETE_WAIT (poll complete_expr or timer)
+//!      | true        | timeout(HYBRID_ASSUME -> true)
+//!      v             v
+//! SUCCESS            FAILED(timeout)
 //! ```
 
 use crate::ast::evaluator::{
@@ -28,7 +36,8 @@ use crate::models::point::Point;
 use crate::models::skill::Skill;
 
 // ---------------------------------------------------------------------------
-// ExecutionResult 鈥?缁熶竴杩斿洖鍊?// ---------------------------------------------------------------------------
+// ExecutionResult: unified return value.
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionResult {
@@ -169,15 +178,15 @@ impl AttemptFailurePolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletePolicy {
-    /// 浠呮寜璇绘潯鏃堕棿绛夊緟锛屽埌鏃跺嵆鎴愬姛
+    /// Wait only for readbar timing; success is assumed when time elapses.
     AssumeSuccess,
-    /// 蹇呴』鐪嬪埌 complete_expr 涓?True
+    /// Require complete_expr to evaluate to true.
     RequireSignal,
-    /// 鏈変俊鍙锋椂涓ユ牸鏍￠獙锛岃秴鏃跺悗鍋囧畾鎴愬姛
+    /// Validate strictly when a signal exists; assume success after timeout.
     HybridAssume,
     /// Treat timeout as failure.
     HybridFail,
-    /// 鎶€鑳藉儚绱?鍙橀粦"纭杩涘叆鍐峰嵈
+    /// Confirm the skill entered cooldown when its pixel turns dark.
     CdBlack,
 }
 
@@ -204,7 +213,7 @@ impl Default for SkillAttemptConfig {
 }
 
 // ---------------------------------------------------------------------------
-// KeySender trait 鈥?鍙戦敭鎶借薄
+// KeySender trait: key sending abstraction.
 // ---------------------------------------------------------------------------
 
 pub trait KeySender: Send + Sync {
@@ -287,7 +296,7 @@ impl<'a> SkillAttemptExecutor<'a> {
             return ExecutionResult::failed(Advance::Advance, 50, "skill_id_empty");
         }
 
-        // ---- 鏌ユ壘鎶€鑳?----
+        // ---- Find skill ----
         let skill = match self.skills.iter().find(|s| s.id.as_str() == sid) {
             Some(s) => s,
             None => return ExecutionResult::failed(Advance::Advance, 50, "skill_missing"),
@@ -358,7 +367,7 @@ impl<'a> SkillAttemptExecutor<'a> {
                 return ExecutionResult::stopped();
             }
 
-            // 妫€鏌?start 淇″彿
+            // Check start signal.
             if self.poll_expr_until(
                 start_e,
                 self.cfg.start_timeout_ms,
@@ -497,7 +506,7 @@ impl<'a> SkillAttemptExecutor<'a> {
         }
     }
 
-    /// 杞琛ㄨ揪寮忕洿鍒颁负 True 鎴栬秴鏃躲€俿topped 鍥炶皟鍦ㄤ笂灞傚仛 sleep/wait
+    /// Poll an expression until it is true or timed out. The outer layer owns sleep/wait.
     fn poll_expr_until(
         &self,
         expr: &Expr,
@@ -543,8 +552,8 @@ impl<'a> SkillAttemptExecutor<'a> {
     }
 }
 
-// ---- 榛樿琛ㄨ揪寮忥紙缂栬瘧鏃舵瀯寤烘垨娴嬭瘯鐢ㄥ崰浣嶏級 ----
-// 瀹為檯浣跨敤鏃剁敱寮曟搸浼犲叆缂栬瘧濂界殑 Expr
+// ---- Default expressions used as compile-time/test placeholders ----
+// Production execution passes precompiled Expr values from the engine.
 
 /// Default ready expression used when the engine does not provide one.
 pub static READY_DEFAULT: Expr = Expr::Const { value: true };
@@ -553,7 +562,7 @@ pub static READY_DEFAULT: Expr = Expr::Const { value: true };
 pub static START_DEFAULT: Expr = Expr::Const { value: true };
 
 // ===========================================================================
-// 娴嬭瘯
+// Tests.
 // ===========================================================================
 
 #[cfg(test)]
@@ -563,7 +572,7 @@ mod tests {
     use crate::models::point::Point;
     use crate::models::skill::{ColorRGB, PixelSpec, SampleConfig, Skill};
 
-    // ---- 娴嬭瘯鏇胯韩 ----
+    // ---- Test doubles ----
 
     struct DummySampler {
         rgb: (u8, u8, u8),

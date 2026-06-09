@@ -174,7 +174,24 @@ interface EngineRuntimePayload {
   phase_index: number;
   phase_name: string;
   uptime_ms: number;
+  cast_bar_roi: CastBarRoiRuntimePayload | null;
   skills: SkillRuntimePayload[];
+}
+
+interface CastBarRoiRuntimePayload {
+  enabled: boolean;
+  sample_count: number;
+  cache_hit_count: number;
+  failed_sample_count: number;
+  last_latency_us: number;
+  avg_latency_us: number;
+  max_latency_us: number;
+  last_changed_ratio: number;
+  last_border_match_ratio: number;
+  last_changed_from_baseline: boolean;
+  last_border_visible: boolean;
+  last_gone: boolean;
+  last_error: string;
 }
 
 interface SkillRuntimePayload {
@@ -203,6 +220,7 @@ function toRuntimeSnapshot(payload: EngineRuntimePayload): EngineRuntimeSnapshot
     phaseIndex: payload.phase_index,
     phaseName: payload.phase_name,
     uptimeMs: payload.uptime_ms,
+    castBarRoi: payload.cast_bar_roi ? toCastBarRoiStats(payload.cast_bar_roi) : null,
     skills: payload.skills.map((skill) => ({
       skillId: skill.skill_id,
       skillName: skill.skill_name,
@@ -218,6 +236,24 @@ function toRuntimeSnapshot(payload: EngineRuntimePayload): EngineRuntimeSnapshot
       fail: skill.fail,
       lastAttemptMs: payload.uptime_ms,
     })),
+  };
+}
+
+function toCastBarRoiStats(payload: CastBarRoiRuntimePayload) {
+  return {
+    enabled: payload.enabled,
+    sampleCount: payload.sample_count,
+    cacheHitCount: payload.cache_hit_count,
+    failedSampleCount: payload.failed_sample_count,
+    lastLatencyUs: payload.last_latency_us,
+    avgLatencyUs: payload.avg_latency_us,
+    maxLatencyUs: payload.max_latency_us,
+    lastChangedRatio: payload.last_changed_ratio,
+    lastBorderMatchRatio: payload.last_border_match_ratio,
+    lastChangedFromBaseline: payload.last_changed_from_baseline,
+    lastBorderVisible: payload.last_border_visible,
+    lastGone: payload.last_gone,
+    lastError: payload.last_error,
   };
 }
 

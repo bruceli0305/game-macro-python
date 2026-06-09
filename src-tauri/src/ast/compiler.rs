@@ -548,7 +548,7 @@ fn semantic_validate(expr: &Expr, path: &str, diags: &mut Vec<Diagnostic>) {
                 diags.push(Diagnostic::error(
                     "expr.timer_id.empty",
                     path,
-                    "timer_id 涓嶈兘涓虹┖",
+                    "timer_id 不能为空",
                 ));
             }
         }

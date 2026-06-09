@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::ast::evaluator::{CastBarRoiProvider, PixelSampler};
+use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiStats, PixelSampler};
 use crate::capture::capturer::DirectPixelSampler;
 use crate::capture::cast_bar_roi::ScreenCastBarRoiProvider;
 use crate::engine::cycle_executor::CycleExecutor;
@@ -64,7 +64,36 @@ struct EngineRuntimePayload {
     phase_index: usize,
     phase_name: String,
     uptime_ms: u64,
+    cast_bar_roi: Option<CastBarRoiRuntimePayload>,
     skills: Vec<SkillRuntimePayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CastBarRoiRuntimePayload {
+    enabled: bool,
+    sample_count: u64,
+    cache_hit_count: u64,
+    failed_sample_count: u64,
+    last_latency_us: u64,
+    avg_latency_us: u64,
+    max_latency_us: u64,
+    last_changed_ratio: f64,
+    last_border_match_ratio: f64,
+    last_changed_from_baseline: bool,
+    last_border_visible: bool,
+    last_gone: bool,
+    last_error: String,
+}
+
+struct RuntimePayloadInput<'a> {
+    runtime: &'a RuntimeState,
+    config: &'a CycleConfig,
+    skills: &'a [Skill],
+    total_executed: u32,
+    cycle_count: u32,
+    phase_index: usize,
+    uptime_ms: u64,
+    cast_bar_roi: Option<CastBarRoiStats>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -288,8 +317,14 @@ fn smoke_fixture_pixel_overrides() -> Vec<PixelOverride> {
 }
 
 fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
-    let cast_bar_roi = (base.cast_bar.roi.enabled || base.cast_bar.mode.trim() == "roi")
-        .then_some(base.cast_bar.roi.clone());
+    let cast_bar_roi =
+        (base.cast_bar.roi.enabled || base.cast_bar.mode.trim() == "roi").then(|| {
+            let mut roi = base.cast_bar.roi.clone();
+            if base.cast_bar.mode.trim() == "roi" {
+                roi.enabled = true;
+            }
+            roi
+        });
     SkillAttemptConfig {
         default_gap_ms: base.exec.default_skill_gap_ms,
         poll_not_ready_ms: base.exec.poll_not_ready_ms,
@@ -473,27 +508,26 @@ fn stage_label(stage: AttemptStage) -> &'static str {
     }
 }
 
-fn runtime_payload(
-    runtime: &RuntimeState,
-    config: &CycleConfig,
-    skills: &[Skill],
-    total_executed: u32,
-    cycle_count: u32,
-    phase_index: usize,
-    uptime_ms: u64,
-) -> EngineRuntimePayload {
-    let phase_name = config
+fn runtime_payload(input: RuntimePayloadInput<'_>) -> EngineRuntimePayload {
+    let phase_name = input
+        .config
         .phases
-        .get(phase_index.min(config.phases.len().saturating_sub(1)))
+        .get(
+            input
+                .phase_index
+                .min(input.config.phases.len().saturating_sub(1)),
+        )
         .map(|phase| phase.name.as_str())
         .unwrap_or("complete")
         .to_string();
 
-    let mut skill_payloads: Vec<_> = runtime
+    let mut skill_payloads: Vec<_> = input
+        .runtime
         .skills
         .values()
         .map(|state| {
-            let skill_name = skills
+            let skill_name = input
+                .skills
                 .iter()
                 .find(|skill| skill.id == state.skill_id)
                 .map(|skill| skill.name.as_str())
@@ -518,15 +552,16 @@ fn runtime_payload(
     skill_payloads.sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
 
     EngineRuntimePayload {
-        running: runtime.engine.running,
-        paused: runtime.engine.paused,
-        preset_id: runtime.engine.preset_id.clone(),
-        stop_reason: runtime.engine.stop_reason.clone(),
-        total_executed,
-        cycle_count,
-        phase_index,
+        running: input.runtime.engine.running,
+        paused: input.runtime.engine.paused,
+        preset_id: input.runtime.engine.preset_id.clone(),
+        stop_reason: input.runtime.engine.stop_reason.clone(),
+        total_executed: input.total_executed,
+        cycle_count: input.cycle_count,
+        phase_index: input.phase_index,
         phase_name,
-        uptime_ms,
+        uptime_ms: input.uptime_ms,
+        cast_bar_roi: input.cast_bar_roi.map(CastBarRoiRuntimePayload::from),
         skills: skill_payloads,
     }
 }
@@ -538,16 +573,39 @@ fn emit_runtime_snapshot(
     skills: &[Skill],
     uptime_ms: u64,
 ) {
-    let payload = runtime_payload(
-        &executor.runtime,
+    let payload = runtime_payload(RuntimePayloadInput {
+        runtime: &executor.runtime,
         config,
         skills,
-        executor.state.total_executed,
-        executor.state.cycle_count,
-        executor.state.phase_index,
+        total_executed: executor.state.total_executed,
+        cycle_count: executor.state.cycle_count,
+        phase_index: executor.state.phase_index,
         uptime_ms,
-    );
+        cast_bar_roi: executor
+            .cast_bar_roi
+            .and_then(CastBarRoiProvider::get_cast_bar_roi_stats),
+    });
     let _ = app.emit("engine:runtime", payload);
+}
+
+impl From<CastBarRoiStats> for CastBarRoiRuntimePayload {
+    fn from(stats: CastBarRoiStats) -> Self {
+        Self {
+            enabled: stats.enabled,
+            sample_count: stats.sample_count,
+            cache_hit_count: stats.cache_hit_count,
+            failed_sample_count: stats.failed_sample_count,
+            last_latency_us: stats.last_latency_us,
+            avg_latency_us: stats.avg_latency_us,
+            max_latency_us: stats.max_latency_us,
+            last_changed_ratio: stats.last_changed_ratio,
+            last_border_match_ratio: stats.last_border_match_ratio,
+            last_changed_from_baseline: stats.last_changed_from_baseline,
+            last_border_visible: stats.last_border_visible,
+            last_gone: stats.last_gone,
+            last_error: stats.last_error,
+        }
+    }
 }
 
 async fn run_engine_loop(
@@ -935,7 +993,30 @@ mod tests {
         runtime.mark_attempt_started("skill-1");
         runtime.mark_success("skill-1");
 
-        let payload = runtime_payload(&runtime, &config, &[], 1, 2, 0, 123);
+        let payload = runtime_payload(RuntimePayloadInput {
+            runtime: &runtime,
+            config: &config,
+            skills: &[],
+            total_executed: 1,
+            cycle_count: 2,
+            phase_index: 0,
+            uptime_ms: 123,
+            cast_bar_roi: Some(CastBarRoiStats {
+                enabled: true,
+                sample_count: 3,
+                cache_hit_count: 2,
+                failed_sample_count: 1,
+                last_latency_us: 1200,
+                avg_latency_us: 900,
+                max_latency_us: 1500,
+                last_changed_ratio: 0.25,
+                last_border_match_ratio: 0.5,
+                last_changed_from_baseline: true,
+                last_border_visible: false,
+                last_gone: false,
+                last_error: String::new(),
+            }),
+        });
 
         assert!(payload.running);
         assert_eq!(payload.total_executed, 1);
@@ -946,6 +1027,10 @@ mod tests {
         assert_eq!(payload.skills[0].state, "SUCCESS");
         assert_eq!(payload.skills[0].attempt_started, 1);
         assert_eq!(payload.skills[0].success, 1);
+        let roi = payload.cast_bar_roi.unwrap();
+        assert_eq!(roi.sample_count, 3);
+        assert_eq!(roi.cache_hit_count, 2);
+        assert_eq!(roi.avg_latency_us, 900);
     }
 
     fn test_skill(id: &str, key: &str, enabled: bool) -> Skill {
@@ -1092,6 +1177,22 @@ mod tests {
         assert_eq!(cfg.retry_gap_ms, 33);
         assert_eq!(cfg.complete_poll_ms, 44);
         assert_eq!(cfg.complete_max_wait_factor, 2.0);
+    }
+
+    #[test]
+    fn test_attempt_config_enables_roi_when_mode_is_roi() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.base.cast_bar.mode = "roi".into();
+        profile.base.cast_bar.roi.enabled = false;
+        profile.base.cast_bar.roi.width = 320;
+        profile.base.cast_bar.roi.height = 28;
+
+        let cfg = attempt_config_from_base(&profile.base);
+
+        let roi = cfg.cast_bar_roi.unwrap();
+        assert!(roi.enabled);
+        assert_eq!(roi.width, 320);
+        assert_eq!(roi.height, 28);
     }
 
     #[test]

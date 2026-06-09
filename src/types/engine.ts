@@ -34,7 +34,24 @@ export interface EngineRuntimeSnapshot {
   phaseIndex: number;
   phaseName: string;
   uptimeMs: number;
+  castBarRoi: CastBarRoiRuntimeStats | null;
   skills: SkillRuntimeState[];
+}
+
+export interface CastBarRoiRuntimeStats {
+  enabled: boolean;
+  sampleCount: number;
+  cacheHitCount: number;
+  failedSampleCount: number;
+  lastLatencyUs: number;
+  avgLatencyUs: number;
+  maxLatencyUs: number;
+  lastChangedRatio: number;
+  lastBorderMatchRatio: number;
+  lastChangedFromBaseline: boolean;
+  lastBorderVisible: boolean;
+  lastGone: boolean;
+  lastError: string;
 }
 
 export interface ExecLogEntry {

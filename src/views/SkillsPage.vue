@@ -274,7 +274,7 @@ async function loadSkills() {
     const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
     skills.value = profile.skills.skills;
   } catch {
-    console.log("未找到已保存的 profile，使用空列表");
+    skills.value = [];
   }
 }
 

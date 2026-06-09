@@ -108,7 +108,6 @@ export function useHotkeys() {
       });
       if (registered) {
         registeredToggleHotkey.value = hotkeys.toggle;
-        console.log(`engine toggle hotkey registered: ${hotkeys.toggle}`);
       }
     } catch (error) {
       console.warn(`${hotkeys.toggle} registration failed:`, error);
@@ -122,7 +121,6 @@ export function useHotkeys() {
       });
       if (registered) {
         registeredPickHotkey.value = hotkeys.pick;
-        console.log(`color capture hotkey registered: ${hotkeys.pick}`);
       }
     } catch (error) {
       console.warn(`${hotkeys.pick} registration failed:`, error);

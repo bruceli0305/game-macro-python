@@ -20,6 +20,21 @@ describe("engine store runtime snapshot", () => {
       phaseIndex: 1,
       phaseName: "Burst",
       uptimeMs: 1200,
+      castBarRoi: {
+        enabled: true,
+        sampleCount: 5,
+        cacheHitCount: 3,
+        failedSampleCount: 1,
+        lastLatencyUs: 1400,
+        avgLatencyUs: 1000,
+        maxLatencyUs: 1800,
+        lastChangedRatio: 0.25,
+        lastBorderMatchRatio: 0.5,
+        lastChangedFromBaseline: true,
+        lastBorderVisible: false,
+        lastGone: false,
+        lastError: "",
+      },
       skills: [
         {
           skillId: "skill-b",
@@ -60,6 +75,8 @@ describe("engine store runtime snapshot", () => {
     expect(store.currentPhase).toBe(1);
     expect(store.cycleCount).toBe(2);
     expect(store.totalExecuted).toBe(3);
+    expect(store.castBarRoi?.sampleCount).toBe(5);
+    expect(store.castBarRoi?.cacheHitCount).toBe(3);
     expect(store.skillRows.map((skill) => skill.skillId)).toEqual(["skill-a", "skill-b"]);
     expect(store.skills.get("skill-b")?.fail).toBe(1);
   });

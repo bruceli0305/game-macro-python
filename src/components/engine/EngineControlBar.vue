@@ -34,6 +34,24 @@ const backendPreflightDetail = computed(() => {
   return report.error || "backend preflight failed";
 });
 
+const castBarRoiDetail = computed(() => {
+  const stats = store.castBarRoi;
+  if (!stats) return "";
+  const lastMs = (stats.lastLatencyUs / 1000).toFixed(1);
+  const avgMs = (stats.avgLatencyUs / 1000).toFixed(1);
+  const maxMs = (stats.maxLatencyUs / 1000).toFixed(1);
+  const cache = stats.sampleCount > 0
+    ? `${stats.cacheHitCount}/${stats.sampleCount + stats.cacheHitCount}`
+    : `${stats.cacheHitCount}/0`;
+  const signal = stats.lastGone
+    ? "消失"
+    : stats.lastChangedFromBaseline || stats.lastBorderVisible
+      ? "可见"
+      : "未命中";
+  const error = stats.lastError ? ` · ${stats.lastError}` : "";
+  return `ROI ${signal} · last ${lastMs}ms · avg ${avgMs}ms · max ${maxMs}ms · cache ${cache}${error}`;
+});
+
 function hasTauriRuntime(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -125,6 +143,13 @@ async function runBackendPreflight() {
 
     <span v-if="store.isRunning" class="text-xs text-gray-400">
       Phase {{ store.currentPhase + 1 }} · 循环 {{ store.cycleCount }}
+    </span>
+    <span
+      v-if="store.isRunning && castBarRoiDetail"
+      class="max-w-[360px] truncate text-xs text-gray-400"
+      :title="castBarRoiDetail"
+    >
+      {{ castBarRoiDetail }}
     </span>
     <span
       v-if="backendPreflight || backendPreflightSkipped"

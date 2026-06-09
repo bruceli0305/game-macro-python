@@ -10,6 +10,7 @@ export const useEngineStore = defineStore("engine", () => {
   const totalExecuted = ref(0);
   const phaseName = ref("");
   const uptimeMs = ref(0);
+  const castBarRoi = ref<EngineRuntimeSnapshot["castBarRoi"]>(null);
   const skills = ref<Map<string, SkillRuntimeState>>(new Map());
   const execLog = ref<ExecLogEntry[]>([]);
   const maxLogEntries = 500;
@@ -49,6 +50,7 @@ export const useEngineStore = defineStore("engine", () => {
     currentPhase.value = snapshot.phaseIndex;
     phaseName.value = snapshot.phaseName;
     uptimeMs.value = snapshot.uptimeMs;
+    castBarRoi.value = snapshot.castBarRoi;
     skills.value = new Map(snapshot.skills.map((skill) => [skill.skillId, skill]));
   }
 
@@ -71,6 +73,7 @@ export const useEngineStore = defineStore("engine", () => {
     totalExecuted.value = 0;
     phaseName.value = "";
     uptimeMs.value = 0;
+    castBarRoi.value = null;
     skills.value.clear();
     execLog.value = [];
   }
@@ -85,7 +88,7 @@ export const useEngineStore = defineStore("engine", () => {
   );
 
   return {
-    isRunning, isPaused, cycleCount, currentPhase, totalExecuted, phaseName, uptimeMs, skills, execLog,
+    isRunning, isPaused, cycleCount, currentPhase, totalExecuted, phaseName, uptimeMs, castBarRoi, skills, execLog,
     setRunning, setPaused, updateSkillState, applyRuntimeSnapshot, appendLog, clearLog, reset,
     phaseLabel, skillRows,
   };

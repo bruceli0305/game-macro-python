@@ -33,6 +33,17 @@
   - 释放开始：施法条 ROI 变化、Castbar Clarity 边框出现。
   - 释放完成：施法条 ROI 消失。
 - 通用 `ConditionBuilder` 已支持直接选择三种 ROI 条件。
+- ROI Provider 已增加 tick 级缓存：
+  - `CycleExecutor.tick()` 会在每轮开始调用 `begin_tick(now_ms)`。
+  - 同一 tick 内多个 ROI AST 条件共享同一次采样结果。
+  - 采样失败也会被缓存，避免同一 tick 内重复失败截图。
+- ROI 采样已增加延迟统计并随 `engine:runtime` 推送：
+  - 采样次数。
+  - 缓存命中次数。
+  - 失败次数。
+  - 最近 / 平均 / 最大采样耗时。
+  - 最近变化比例、边框命中比例和可见/消失状态。
+- 运行控制栏会显示 ROI 采样状态和延迟摘要，便于后续比较 30ms、50ms、80ms 轮询表现。
 
 ## Files Changed
 
@@ -59,6 +70,11 @@
 - `src/views/CycleEditorPage.vue`
 - `src/components/editor/ConditionBuilder.vue`
 - `src/components/editor/SkillEditModal.vue`
+- `src/components/engine/EngineControlBar.vue`
+- `src/composables/useEngine.ts`
+- `src/stores/engine.ts`
+- `src/types/engine.ts`
+- `src/__tests__/engine-store.test.ts`
 - `src/__tests__/profile-validation.test.ts`
 - `src/__tests__/detection-templates.test.ts`
 
@@ -70,6 +86,8 @@ ROI 方案选择屏幕截图检测：利用 Castbar Clarity 强化后的可见�
 
 ROI 条件选择放进 AST，而不是写死在技能槽逻辑里。这样开始检测、完成检测、普通条件和后续复杂组合都能复用同一套表达式。
 
+ROI 缓存放在 Provider 内部，而不是 AST evaluator 内部。AST 仍保持纯求值，只通过 trait 获取状态；采样时机和缓存策略由运行时 provider 负责。
+
 ## Logs / Tests
 
 - `pnpm.cmd exec vue-tsc --noEmit`
@@ -77,22 +95,24 @@ ROI 条件选择放进 AST，而不是写死在技能槽逻辑里。这样开始
 - `pnpm.cmd build`
 - `cargo check --all-targets`
 - `cargo fmt --all -- --check`
-- `cargo test`：165 passed
+- `cargo test`：167 passed
 - `cargo clippy --all-targets -- -D warnings`
 - `git diff --check`：通过，仅有 CRLF 提示
 - Browser smoke：
   - `/settings` 显示“启用施法条 ROI 检测”“鼠标设为左上角”“测试 ROI”等配置项。
   - `/cycle-editor` 显示“技能槽”“运行控制”，关键区域无已知乱码。
   - 构建产物包含“施法条 ROI 变化”“Castbar Clarity 边框出现”“施法条 ROI 消失”三个模板文案。
+  - `/cycle-editor` 可正常加载运行控制栏。
 
 ## Risks
 
 - ROI 坐标需要用户手动校准，后续应提供拖框式选择体验。
 - 不同分辨率、UI 缩放、Castbar Clarity 边框设置会影响阈值，需要继续做实机采样。
-- ROI Provider 当前每次求值会即时截屏；后续如果多个条件同 tick 组合，应考虑按 tick 缓存 ROI 采样结果，避免重复截图。
+- 当前统计为运行时聚合摘要，尚未保存到日志文件或历史曲线。
+- tick 缓存以 `now_ms` 为边界；如果外部调用 provider 但没有调用 `begin_tick`，仍可能复用上一轮缓存。
 
 ## Next Step
 
-1. 做 ROI 检测延迟统计，比较 30ms、50ms、80ms 轮询下的稳定性和 CPU 占用。
-2. 为 ROI Provider 增加 tick 级采样缓存，避免同一轮多条件重复截图。
+1. 实机比较 30ms、50ms、80ms 轮询下的稳定性、延迟和 CPU 占用。
+2. 把 ROI 延迟统计扩展为历史曲线或日志采样，便于长时间观察抖动。
 3. 增加拖框式 ROI 选择体验，降低手工填坐标成本。

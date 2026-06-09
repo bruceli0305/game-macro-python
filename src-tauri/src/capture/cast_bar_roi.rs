@@ -1,8 +1,9 @@
 use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiState};
+use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiState, CastBarRoiStats};
 use crate::capture::capturer::CaptureManager;
 use crate::models::base::CastBarRoiConfig;
 use crate::models::skill::ColorRGB;
@@ -47,6 +48,10 @@ struct CastBarRoiTracker {
     changed_frames: u32,
     border_frames: u32,
     gone_frames: u32,
+    cache_tick_ms: Option<u64>,
+    cached_state: Option<CastBarRoiState>,
+    cached_unavailable: bool,
+    stats: CastBarRoiStats,
 }
 
 pub struct ScreenCastBarRoiProvider {
@@ -61,34 +66,115 @@ impl ScreenCastBarRoiProvider {
             tracker: Mutex::new(CastBarRoiTracker::default()),
         }
     }
-}
 
-impl CastBarRoiProvider for ScreenCastBarRoiProvider {
-    fn get_cast_bar_roi_state(&self) -> Option<CastBarRoiState> {
-        if !self.config.enabled || self.config.width == 0 || self.config.height == 0 {
-            return None;
+    fn cached_state_for_tick(&self) -> Option<Option<CastBarRoiState>> {
+        let mut tracker = self.tracker.lock().ok()?;
+        if tracker.cached_unavailable || tracker.cached_state.is_some() {
+            tracker.stats.cache_hit_count += 1;
+            return Some(tracker.cached_state);
+        }
+        None
+    }
+
+    fn sample_state(&self) -> (Option<CastBarRoiState>, u64, String) {
+        let started = Instant::now();
+        let result = self.sample_state_inner();
+        let latency_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        match result {
+            Ok(state) => (Some(state), latency_us, String::new()),
+            Err(error) => (None, latency_us, error),
+        }
+    }
+
+    fn sample_state_inner(&self) -> Result<CastBarRoiState, String> {
+        if !self.config.enabled {
+            return Err("cast bar ROI disabled".into());
+        }
+        if self.config.width == 0 || self.config.height == 0 {
+            return Err("cast bar ROI has empty dimensions".into());
         }
 
-        let capture = CaptureManager::new().ok()?;
+        let capture = CaptureManager::new()?;
         let request = CastBarRoiRequest::from(&self.config);
-        let sample = sample_cast_bar_roi(&capture, &request).ok()?;
+        let sample = sample_cast_bar_roi(&capture, &request)?;
         let visible_raw = sample.changed_from_baseline || sample.border_visible;
         let gone_raw = !visible_raw;
 
-        let mut tracker = self.tracker.lock().ok()?;
+        let mut tracker = self
+            .tracker
+            .lock()
+            .map_err(|_| "cast bar ROI tracker lock poisoned".to_string())?;
         tracker.changed_frames =
             next_frame_count(tracker.changed_frames, sample.changed_from_baseline);
         tracker.border_frames = next_frame_count(tracker.border_frames, sample.border_visible);
         tracker.gone_frames = next_frame_count(tracker.gone_frames, gone_raw);
 
         let confirm_frames = self.config.confirm_frames.max(1);
-        Some(CastBarRoiState {
+        Ok(CastBarRoiState {
             changed_from_baseline: tracker.changed_frames >= confirm_frames,
             border_visible: tracker.border_frames >= confirm_frames,
             gone: tracker.gone_frames >= confirm_frames,
             changed_ratio: sample.changed_ratio,
             border_match_ratio: sample.border_match_ratio,
         })
+    }
+
+    fn store_tick_result(&self, state: Option<CastBarRoiState>, latency_us: u64, error: String) {
+        let Ok(mut tracker) = self.tracker.lock() else {
+            return;
+        };
+        tracker.cached_state = state;
+        tracker.cached_unavailable = state.is_none();
+        tracker.stats.enabled = self.config.enabled;
+        tracker.stats.sample_count += 1;
+        tracker.stats.last_latency_us = latency_us;
+        tracker.stats.max_latency_us = tracker.stats.max_latency_us.max(latency_us);
+        let total_latency = tracker
+            .stats
+            .avg_latency_us
+            .saturating_mul(tracker.stats.sample_count.saturating_sub(1))
+            .saturating_add(latency_us);
+        tracker.stats.avg_latency_us = total_latency / tracker.stats.sample_count.max(1);
+        tracker.stats.last_error = error;
+
+        if let Some(state) = state {
+            tracker.stats.last_changed_ratio = state.changed_ratio;
+            tracker.stats.last_border_match_ratio = state.border_match_ratio;
+            tracker.stats.last_changed_from_baseline = state.changed_from_baseline;
+            tracker.stats.last_border_visible = state.border_visible;
+            tracker.stats.last_gone = state.gone;
+        } else {
+            tracker.stats.failed_sample_count += 1;
+        }
+    }
+}
+
+impl CastBarRoiProvider for ScreenCastBarRoiProvider {
+    fn begin_tick(&self, tick_ms: u64) {
+        let Ok(mut tracker) = self.tracker.lock() else {
+            return;
+        };
+        if tracker.cache_tick_ms == Some(tick_ms) {
+            return;
+        }
+        tracker.cache_tick_ms = Some(tick_ms);
+        tracker.cached_state = None;
+        tracker.cached_unavailable = false;
+    }
+
+    fn get_cast_bar_roi_state(&self) -> Option<CastBarRoiState> {
+        if let Some(cached_state) = self.cached_state_for_tick() {
+            return cached_state;
+        }
+
+        let (state, latency_us, error) = self.sample_state();
+        self.store_tick_result(state, latency_us, error);
+        state
+    }
+
+    fn get_cast_bar_roi_stats(&self) -> Option<CastBarRoiStats> {
+        let tracker = self.tracker.lock().ok()?;
+        Some(tracker.stats.clone())
     }
 }
 
@@ -330,5 +416,28 @@ mod tests {
 
         assert!(!sample.border_visible);
         assert_eq!(sample.border_match_ratio, 1.0);
+    }
+
+    #[test]
+    fn test_provider_caches_unavailable_result_within_tick() {
+        let provider = ScreenCastBarRoiProvider::new(CastBarRoiConfig {
+            enabled: false,
+            ..Default::default()
+        });
+
+        provider.begin_tick(100);
+        assert!(provider.get_cast_bar_roi_state().is_none());
+        assert!(provider.get_cast_bar_roi_state().is_none());
+        let stats = provider.get_cast_bar_roi_stats().unwrap();
+        assert_eq!(stats.sample_count, 1);
+        assert_eq!(stats.cache_hit_count, 1);
+        assert_eq!(stats.failed_sample_count, 1);
+
+        provider.begin_tick(110);
+        assert!(provider.get_cast_bar_roi_state().is_none());
+        let stats = provider.get_cast_bar_roi_stats().unwrap();
+        assert_eq!(stats.sample_count, 2);
+        assert_eq!(stats.cache_hit_count, 1);
+        assert_eq!(stats.failed_sample_count, 2);
     }
 }

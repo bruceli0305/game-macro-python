@@ -43,8 +43,29 @@ pub struct CastBarRoiState {
     pub border_match_ratio: f64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CastBarRoiStats {
+    pub enabled: bool,
+    pub sample_count: u64,
+    pub cache_hit_count: u64,
+    pub failed_sample_count: u64,
+    pub last_latency_us: u64,
+    pub avg_latency_us: u64,
+    pub max_latency_us: u64,
+    pub last_changed_ratio: f64,
+    pub last_border_match_ratio: f64,
+    pub last_changed_from_baseline: bool,
+    pub last_border_visible: bool,
+    pub last_gone: bool,
+    pub last_error: String,
+}
+
 pub trait CastBarRoiProvider: Send + Sync {
+    fn begin_tick(&self, _tick_ms: u64) {}
     fn get_cast_bar_roi_state(&self) -> Option<CastBarRoiState>;
+    fn get_cast_bar_roi_stats(&self) -> Option<CastBarRoiStats> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +168,7 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext) -> TriBool {
 }
 
 // ---------------------------------------------------------------------------
-// Kleene 閫昏緫
+// Kleene logic.
 // ---------------------------------------------------------------------------
 
 fn eval_and(children: &[Expr], ctx: &EvalContext) -> TriBool {
@@ -183,7 +204,8 @@ fn eval_not(child: &Expr, ctx: &EvalContext) -> TriBool {
 }
 
 // ---------------------------------------------------------------------------
-// 鍘熷瓙姹傚€?// ---------------------------------------------------------------------------
+// Atomic evaluation.
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 enum PixelPredicate {
@@ -336,7 +358,7 @@ fn eval_cast_bar_changed(point_id: &str, tolerance: u8, ctx: &EvalContext) -> Tr
         None => TriBool::Unknown("sample_failed".into()),
         Some(cur_rgb) => {
             let diff = rgb_diff_max(cur_rgb, base_rgb);
-            // "changed" = 褰撳墠涓?baseline 鐨勫樊寮?> tolerance
+            // "changed" means current color differs from baseline beyond tolerance.
             if diff > tol {
                 TriBool::True
             } else {
@@ -516,7 +538,7 @@ fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
 }
 
 // ===========================================================================
-// 娴嬭瘯
+// Tests.
 // ===========================================================================
 
 #[cfg(test)]
@@ -527,7 +549,7 @@ mod tests {
     use crate::models::skill::{ColorRGB, PixelSpec, SampleConfig, Skill};
     use std::collections::HashMap;
 
-    // ---- 娴嬭瘯鏇胯韩 ----
+    // ---- Test doubles ----
 
     struct FixedSampler {
         rgb: (u8, u8, u8),
@@ -662,7 +684,7 @@ mod tests {
         (points, skills, sampler)
     }
 
-    // ---- Kleene 閫昏緫鐪熷€艰〃娴嬭瘯 ----
+    // ---- Kleene truth table tests ----
 
     #[test]
     fn test_const_true() {
@@ -828,7 +850,7 @@ mod tests {
         assert!(evaluate(&expr, &ctx).is_false());
     }
 
-    // ---- PixelMatchPoint 瀹瑰樊娴嬭瘯 ----
+    // ---- PixelMatchPoint tolerance tests ----
 
     #[test]
     fn test_pixel_point_match_exact() {
@@ -918,7 +940,7 @@ mod tests {
         assert!(evaluate(&expr, &ctx).is_unknown());
     }
 
-    // ---- PixelMatchSkill 瀹瑰樊娴嬭瘯 ----
+    // ---- PixelMatchSkill tolerance tests ----
 
     #[test]
     fn test_pixel_skill_match() {
@@ -1256,7 +1278,7 @@ mod tests {
             point_id: "pt1".into(),
             tolerance: 10,
         };
-        // diff = max(100,0,100) = 100 > 10 鈫?True
+        // diff = max(100,0,100) = 100 > 10 -> True
         assert!(evaluate(&expr, &ctx).is_true());
     }
 
@@ -1282,7 +1304,7 @@ mod tests {
             point_id: "pt1".into(),
             tolerance: 10,
         };
-        // diff = max(5,0,5) = 5 <= 10 鈫?False
+        // diff = max(5,0,5) = 5 <= 10 -> False
         assert!(evaluate(&expr, &ctx).is_false());
     }
 

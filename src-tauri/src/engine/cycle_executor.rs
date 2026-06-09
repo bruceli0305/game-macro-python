@@ -189,6 +189,9 @@ impl<'a> CycleExecutor<'a> {
         now_ms: u64,
     ) -> bool {
         self.runtime.set_now_ms(now_ms);
+        if let Some(provider) = self.cast_bar_roi {
+            provider.begin_tick(now_ms);
+        }
 
         if stopped() {
             if let Some(pending) = self.pending_attempt.take() {
@@ -1328,7 +1331,8 @@ fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
 }
 
 // ===========================================================================
-// 婵炴潙顑堥惁?// ===========================================================================
+// Tests.
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1748,7 +1752,7 @@ mod tests {
             fail: false,
         };
 
-        // tick 1: 閹煎瓨妫侀姘跺箥瑜戦、?skA (priority 1)
+        // tick 1: the executor should pick skA first because it has priority 1.
         let acted = exec.tick(&mut ks, &|| false, 0);
         assert!(acted);
         assert_eq!(ks.keys, vec!["A"]);
