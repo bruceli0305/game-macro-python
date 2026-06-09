@@ -254,284 +254,317 @@
           "id": "weaver_auto_1",
           "name": "Auto Attack",
           "key": "1",
-          "x": 624,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 628,
+          "y": 1028,
+          "color": "0xFFEFAA",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_pistol_2",
           "name": "Fire Pistol 2",
           "key": "2",
-          "x": 685,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 688,
+          "y": 1028,
+          "color": "0xDA711B",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_earth_pistol_2",
           "name": "Earth Pistol 2",
           "key": "2",
-          "x": 685,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 688,
+          "y": 1028,
+          "color": "0xF6ECAF",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_dual_3",
           "name": "Dual Fire Attack 3",
           "key": "3",
-          "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 756,
+          "y": 1035,
+          "color": "0xFF8F4C",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_earth_dual_3",
           "name": "Dual Earth Attack 3",
           "key": "3",
-          "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 756,
+          "y": 1015,
+          "color": "0xD0BF7A",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_earth_dual_3",
           "name": "Fire/Earth Dual Attack 3",
           "key": "3",
           "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "y": 1035,
+          "color": "0xC86418",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_earth_fire_dual_3",
           "name": "Earth/Fire Dual Attack 3",
           "key": "3",
           "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "y": 1035,
+          "color": "0xC86418",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_air_earth_dual_3",
           "name": "Air/Earth Dual Attack 3",
           "key": "3",
           "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "y": 1015,
+          "color": "0xD3C388",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_air_dual_3",
           "name": "Fire/Air Dual Attack 3",
           "key": "3",
           "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "y": 1020,
+          "color": "0xDB8B4C",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_water_earth_dual_3",
           "name": "Water/Earth Dual Attack 3",
           "key": "3",
-          "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 756,
+          "y": 1028,
+          "color": "0xB4E8EF",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_water_dual_3",
           "name": "Fire/Water Dual Attack 3",
           "key": "3",
           "x": 744,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "y": 1020,
+          "color": "0xDB8B4C",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_dagger_4_ring_of_fire",
           "name": "Ring of Fire",
           "key": "4",
-          "x": 807,
-          "y": 1012,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5691."
+          "x": 811,
+          "y": 1015,
+          "color": "0xFFFFB1",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_fire_dagger_5_fire_grab",
           "name": "Fire Grab",
           "key": "5",
-          "x": 869,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5557."
+          "x": 870,
+          "y": 1015,
+          "color": "0xD7BB42",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_earth_dagger_4_earthquake",
           "name": "Earthquake",
           "key": "4",
-          "x": 807,
-          "y": 1012,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5690."
+          "x": 805,
+          "y": 1015,
+          "color": "0xC76F2B",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_earth_dagger_5_churning_earth",
           "name": "Churning Earth",
           "key": "5",
-          "x": 869,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5522."
+          "x": 864,
+          "y": 1038,
+          "color": "0xFDED5D",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
           "id": "weaver_signet_fire",
           "name": "Signet of Fire",
-          "key": "8",
-          "x": 1159,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5542."
+          "key": "C",
+          "x": 1164,
+          "y": 1028,
+          "color": "0xE0C548",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Key sampled from the utility slot labeled C."
         },
         {
           "id": "weaver_signet_earth",
           "name": "Signet of Earth",
-          "key": "9",
-          "x": 1221,
-          "y": 1010,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5571."
+          "key": "V",
+          "x": 1214,
+          "y": 1015,
+          "color": "0xF4C14E",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Key sampled from the utility slot labeled V."
         },
         {
           "id": "weaver_primordial_stance",
           "name": "Primordial Stance",
-          "key": "7",
-          "x": 1099,
-          "y": 1011,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 40183. Align the key with your utility slot."
+          "key": "X",
+          "x": 1097,
+          "y": 1028,
+          "color": "0xE1C132",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Key sampled from the utility slot labeled X."
         },
         {
           "id": "weaver_weave_self",
           "name": "Weave Self",
-          "key": "0",
-          "x": 1282,
-          "y": 1010,
-          "color": "0xFFFFFF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 43638."
+          "key": "Tab",
+          "x": 1277,
+          "y": 1015,
+          "color": "0xFFCDA2",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Key sampled from the elite slot labeled Tab."
         },
         {
           "id": "weaver_attune_fire",
           "name": "Fire Attunement",
-          "key": "F1",
-          "x": 624,
-          "y": 940,
-          "color": "0xFF5A2F",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "key": "Q",
+          "x": 628,
+          "y": 946,
+          "color": "0x833E07",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. F1 profession skill is bound to Q in the sampled UI."
         },
         {
           "id": "weaver_attune_water",
           "name": "Water Attunement",
-          "key": "F2",
-          "x": 665,
-          "y": 942,
-          "color": "0x5AA7FF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "key": "E",
+          "x": 675,
+          "y": 946,
+          "color": "0x9EC6E9",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. F2 profession skill is bound to E in the sampled UI."
         },
         {
           "id": "weaver_attune_air",
           "name": "Air Attunement",
-          "key": "F3",
-          "x": 708,
-          "y": 943,
-          "color": "0xD8F2FF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "key": "R",
+          "x": 722,
+          "y": 946,
+          "color": "0x948D95",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. F3 profession skill is bound to R in the sampled UI."
         },
         {
           "id": "weaver_attune_earth",
           "name": "Earth Attunement",
-          "key": "F4",
-          "x": 749,
-          "y": 943,
-          "color": "0xAA7A3A",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "key": "T",
+          "x": 768,
+          "y": 946,
+          "color": "0x57412C",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. F4 profession skill is bound to T in the sampled UI."
         }
       ],
       "points": [
         {
           "id": "attune_fire_primary",
           "name": "Primary Fire Attunement",
-          "x": 624,
-          "y": 940,
-          "color": "0xFF5A2F",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 650,
+          "y": 972,
+          "color": "0xDA5E10",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Primary attunement samples the left segment of the Weaver state bar, not the F1 icon center."
         },
         {
           "id": "attune_water_primary",
           "name": "Primary Water Attunement",
-          "x": 665,
-          "y": 942,
-          "color": "0x5AA7FF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 650,
+          "y": 972,
+          "color": "0x3B9FE1",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Primary attunement samples the left segment of the Weaver state bar, not the F2 icon center."
         },
         {
           "id": "attune_air_primary",
           "name": "Primary Air Attunement",
-          "x": 708,
-          "y": 943,
-          "color": "0xD8F2FF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 650,
+          "y": 972,
+          "color": "0x672DCA",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Primary attunement samples the left segment of the Weaver state bar, not the F3 icon center."
         },
         {
           "id": "attune_earth_primary",
           "name": "Primary Earth Attunement",
-          "x": 749,
-          "y": 943,
-          "color": "0xAA7A3A",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 650,
+          "y": 972,
+          "color": "0xA7870F",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Primary attunement samples the left segment of the Weaver state bar, not the F4 icon center."
         },
         {
           "id": "attune_fire_secondary",
           "name": "Secondary Fire Attunement",
-          "x": 624,
-          "y": 956,
-          "color": "0xFF5A2F",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 800,
+          "y": 972,
+          "color": "0xEA8A30",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Secondary attunement samples the right tail of the Weaver state bar, not the F1 icon center."
         },
         {
           "id": "attune_water_secondary",
           "name": "Secondary Water Attunement",
-          "x": 665,
-          "y": 958,
-          "color": "0x5AA7FF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 800,
+          "y": 972,
+          "color": "0x7FB5F0",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Secondary attunement samples the right tail of the Weaver state bar, not the F2 icon center."
         },
         {
           "id": "attune_air_secondary",
           "name": "Secondary Air Attunement",
-          "x": 708,
-          "y": 959,
-          "color": "0xD8F2FF",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 800,
+          "y": 972,
+          "color": "0x9A5CDA",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Secondary attunement samples the right tail of the Weaver state bar, not the F3 icon center."
         },
         {
           "id": "attune_earth_secondary",
           "name": "Secondary Earth Attunement",
-          "x": 749,
-          "y": 959,
-          "color": "0xAA7A3A",
-          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+          "x": 800,
+          "y": 972,
+          "color": "0xC6A735",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes. Secondary attunement samples the right tail of the Weaver state bar, not the F4 icon center."
         },
         {
           "id": "weaver_cast_confirm_roi",
           "name": "Cast Confirm ROI Anchor",
-          "x": 960,
-          "y": 895,
-          "color": "0x000000",
-          "note": "Optional cast-bar/ROI anchor. Use ROI conditions when cast-bar sampling is calibrated."
+          "x": 850,
+          "y": 815,
+          "color": "0xBCBCBC",
+          "note": "Sampled cast-bar ROI from img/???.png at 1920x1080. ROI covers x=850,y=815,width=219,height=19; verify after moving camera/UI."
         }
-      ]
+      ],
+      "base": {
+        "cast_bar": {
+          "mode": "roi",
+          "point_id": "",
+          "tolerance": 15,
+          "poll_interval_ms": 30,
+          "max_wait_factor": 1.5,
+          "roi": {
+            "enabled": true,
+            "monitor": "primary",
+            "x": 850,
+            "y": 815,
+            "width": 219,
+            "height": 19,
+            "baseline_color": {
+              "r": 76,
+              "g": 52,
+              "b": 36
+            },
+            "diff_threshold": 28,
+            "min_changed_ratio": 0.08,
+            "border_enabled": true,
+            "border_color": {
+              "r": 188,
+              "g": 188,
+              "b": 188
+            },
+            "border_tolerance": 48,
+            "min_border_match_ratio": 0.08,
+            "confirm_frames": 2
+          }
+        }
+      }
     }
   ]
 }

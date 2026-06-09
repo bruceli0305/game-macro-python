@@ -42,8 +42,16 @@ interface RoleProfileSeed {
   label: string;
   description: string;
   rotation_id: CyclePresetId;
+  base?: BaseSeed;
   skills: SkillSeed[];
   points: PointSeed[];
+}
+
+interface BaseSeed {
+  cast_bar?: Partial<Profile["base"]["cast_bar"]> & {
+    roi?: Partial<Profile["base"]["cast_bar"]["roi"]>;
+  };
+  exec?: Partial<Profile["base"]["exec"]>;
 }
 
 interface RoleProfileSeedFile {
@@ -79,10 +87,33 @@ export function buildRoleProfileTemplate(id: RoleProfileTemplateId): Profile {
   profile.meta.profile_name = seed.label;
   profile.meta.description = seed.description;
   profile.rotations = [buildCyclePreset(seed.rotation_id)];
+  applyBaseSeed(profile, seed.base);
   profile.skills = { schema_version: 2, skills: seed.skills.map(skill) };
   profile.points = { schema_version: 3, points: seed.points.map(point) };
 
   return profile;
+}
+
+function applyBaseSeed(profile: Profile, seed?: BaseSeed): void {
+  if (!seed) return;
+
+  if (seed.cast_bar) {
+    profile.base.cast_bar = {
+      ...profile.base.cast_bar,
+      ...seed.cast_bar,
+      roi: {
+        ...profile.base.cast_bar.roi,
+        ...seed.cast_bar.roi,
+      },
+    };
+  }
+
+  if (seed.exec) {
+    profile.base.exec = {
+      ...profile.base.exec,
+      ...seed.exec,
+    };
+  }
 }
 
 function roleSeedById(id: RoleProfileTemplateId): RoleProfileSeed {
