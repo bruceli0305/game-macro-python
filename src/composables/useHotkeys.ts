@@ -4,7 +4,7 @@ import { ref } from "vue";
 import { isRegistered, register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { useEngine } from "./useEngine";
 import { useEnginePreflight } from "./useEnginePreflight";
-import { DEFAULT_PROFILE_NAME, useProfile } from "./useProfile";
+import { useProfile } from "./useProfile";
 
 type AppMessageType = "success" | "error" | "warning" | "info";
 
@@ -42,13 +42,13 @@ function normalizeHotkey(value: string | undefined, fallback: string): string {
 export function useHotkeys() {
   const { start, stop, store } = useEngine();
   const { validateEngineStart } = useEnginePreflight();
-  const { loadOrCreateProfile } = useProfile();
+  const { loadActiveProfile } = useProfile();
   const lastToggle = ref(0);
   const registeredToggleHotkey = ref<string | null>(null);
   const registeredPickHotkey = ref<string | null>(null);
 
   async function configuredHotkeys() {
-    const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const profile = await loadActiveProfile();
     return {
       toggle: normalizeHotkey(profile.base.exec.toggle_hotkey, DEFAULT_TOGGLE_HOTKEY),
       pick: normalizeHotkey(profile.base.pick.confirm_hotkey, DEFAULT_PICK_HOTKEY),

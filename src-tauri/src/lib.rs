@@ -90,6 +90,8 @@ pub fn run() {
             commands::engine_cmd::simulate_profile_rotation_with_pixels,
             commands::engine_cmd::simulate_ipc_smoke_fixture,
             commands::profile_cmd::profile_list,
+            commands::profile_cmd::profile_get_active,
+            commands::profile_cmd::profile_set_active,
             commands::profile_cmd::profile_load,
             commands::profile_cmd::profile_save,
             commands::capture_cmd::capture_sample,

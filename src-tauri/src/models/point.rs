@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::skill::{ColorRGB, SampleConfig};
 
-/// 取色点位（对齐 python-legacy core/models/point.py）
+/// 取色点位
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Point {
     pub id: String,

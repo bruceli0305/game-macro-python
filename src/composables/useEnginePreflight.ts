@@ -1,11 +1,11 @@
-import { DEFAULT_PROFILE_NAME, useProfile } from "./useProfile";
+import { useProfile } from "./useProfile";
 import { firstProfileError, validateProfileForEngineStart } from "../utils/profile-validation";
 
 export function useEnginePreflight() {
-  const { loadOrCreateProfile } = useProfile();
+  const { loadActiveProfile } = useProfile();
 
   async function validateEngineStart(): Promise<string | null> {
-    const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const profile = await loadActiveProfile();
     return firstProfileError(validateProfileForEngineStart(profile));
   }
 

@@ -4,7 +4,6 @@ import { NCard, NButton, NSpace, NDataTable, NInput, NInputNumber, NTag, useMess
 import { IconTrash, IconDeviceFloppy, IconPointer, IconRefresh } from "@tabler/icons-vue";
 import { useCapture, type CaptureDiagnosticsResult } from "../composables/useCapture";
 import {
-  DEFAULT_PROFILE_NAME,
   useProfile,
   withProfilePoints,
 } from "../composables/useProfile";
@@ -25,7 +24,7 @@ const diagnosticsStatus = ref<"idle" | "passed" | "failed" | "skipped">("idle");
 const diagnosticsMessage = ref("");
 const lastCapture = ref(0);
 const { captureAtCursor, captureDiagnostics, store: pickerStore } = useCapture();
-const { loadOrCreateProfile, saveProfile } = useProfile();
+const { loadActiveProfile, saveActiveProfile } = useProfile();
 const message = useMessage();
 
 function hasTauriRuntime(): boolean {
@@ -205,7 +204,7 @@ const columns: DataTableColumns<Point> = [
 
 async function loadPoints() {
   try {
-    const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const profile = await loadActiveProfile();
     points.value = profile.points.points;
   } catch { /* 首次使用 */ }
 }
@@ -218,14 +217,14 @@ async function savePoints() {
       return;
     }
     const normalizedPoints = points.value.map(normalizePointDraft);
-    const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const profile = await loadActiveProfile();
     const next = withProfilePoints(profile, JSON.parse(JSON.stringify(normalizedPoints)) as Point[]);
     const error = firstProfileError(validateProfileForSave(next));
     if (error) {
       message.error(error);
       return;
     }
-    await saveProfile(DEFAULT_PROFILE_NAME, next);
+    await saveActiveProfile(next);
     points.value = normalizedPoints;
     message.success("点位配置已保存");
   } catch (e) {
@@ -234,8 +233,18 @@ async function savePoints() {
   }
 }
 
-onMounted(() => loadPoints());
-onUnmounted(() => stopPicking());
+function onActiveProfileChanged() {
+  void loadPoints();
+}
+
+onMounted(() => {
+  window.addEventListener("profile:active-changed", onActiveProfileChanged);
+  void loadPoints();
+});
+onUnmounted(() => {
+  window.removeEventListener("profile:active-changed", onActiveProfileChanged);
+  stopPicking();
+});
 </script>
 
 <template>

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// AST 条件表达式节点（对齐 python-legacy ast/nodes.py）
+/// AST 条件表达式节点
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Expr {

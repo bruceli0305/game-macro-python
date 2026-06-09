@@ -172,6 +172,75 @@ describe("profile validation", () => {
     );
   });
 
+  it("validates observer lane config before save", () => {
+    const profile = createDefaultProfile();
+    profile.rotations = [
+      {
+        name: "cycle",
+        poll_interval_ms: 100,
+        max_cycles: 0,
+        phases: [
+          {
+            name: "phase",
+            complete_when: "any_fired",
+            skills: [],
+          },
+        ],
+        state_schema: {
+          markers: [],
+          timers: [{ id: "cast_seen", name: "Cast seen", reset_on_cycle_start: true }],
+          counters: [],
+        },
+        observer_lanes: [
+          {
+            id: "observer",
+            name: "Observer",
+            enabled: true,
+            check_interval_ms: 5,
+            actions: [
+              {
+                id: "",
+                label: "",
+                priority: 1,
+                condition_expr: { type: "pixel_point", point_id: "missing", tolerance: 10 },
+                actions: [],
+              },
+            ],
+          },
+          {
+            id: "observer",
+            name: "",
+            enabled: true,
+            check_interval_ms: 250,
+            actions: [
+              {
+                id: "record_cast",
+                label: "Record cast",
+                priority: 1,
+                condition_expr: null,
+                actions: [{ type: "record_timer", timer_id: "missing_timer" }],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const issues = validateProfileForSave(profile);
+    expect(issues.map((item) => item.path)).toEqual(
+      expect.arrayContaining([
+        "rotations[0].observer_lanes[0].check_interval_ms",
+        "rotations[0].observer_lanes[0].actions[0].id",
+        "rotations[0].observer_lanes[0].actions[0].label",
+        "rotations[0].observer_lanes[0].actions[0].condition_expr",
+        "rotations[0].observer_lanes[0].actions[0].actions",
+        "rotations[0].observer_lanes[1].id",
+        "rotations[0].observer_lanes[1].name",
+        "rotations[0].observer_lanes[1].actions[0].actions[0].timer_id",
+      ])
+    );
+  });
+
   it("allows a complete executable profile to run", () => {
     const profile = createDefaultProfile();
     profile.skills.skills = [skill("sk1")];

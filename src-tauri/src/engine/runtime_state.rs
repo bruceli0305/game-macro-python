@@ -1,6 +1,6 @@
 //! 运行时聚合指标 + MetricProvider + 基础状态
 //!
-//! 对齐 python-legacy/rotation_editor/core/runtime/state/store.py
+//! CycleExecutor 运行时状态存储
 
 use crate::ast::nodes::SkillMetric;
 use std::collections::HashMap;

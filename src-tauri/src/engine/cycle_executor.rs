@@ -16,8 +16,8 @@ use crate::engine::skill_attempt::{
     SkillAttemptConfig,
 };
 use crate::models::cycle::{
-    AssistInterruptPolicy, AssistLaneConfig, CycleConfig, CyclePhase, PhaseFallbackTransition,
-    PhaseTransitionRule, RuntimeAction, SkillSlot,
+    AssistInterruptPolicy, AssistLaneConfig, CycleConfig, CyclePhase, ObserverActionSlot,
+    ObserverLaneConfig, PhaseFallbackTransition, RuntimeAction, SkillSlot,
 };
 use crate::models::point::Point;
 use crate::models::skill::Skill;
@@ -36,6 +36,7 @@ pub struct CycleExecState {
     pub fired_in_cycle: HashSet<String>,
     pub fired_count_in_cycle: HashMap<String, u32>,
     pub skill_ready_at_ms: HashMap<String, u64>,
+    pub observer_lane_next_check_ms: HashMap<String, u64>,
     pub assist_lane_next_check_ms: HashMap<String, u64>,
     pub total_executed: u32,
     pub last_skill_id: String,
@@ -86,8 +87,16 @@ pub struct CycleExecutor<'a> {
     pending_attempt: Option<PendingAttempt>,
     suspended_main_attempt: Option<PendingAttempt>,
 
-    // Compiled condition cache: skill_id -> condition expression.
-    pub expr_cache: Vec<(String, Option<Expr>)>,
+    slot_expr_cache: HashMap<usize, CompiledSlotExprs>,
+    observer_action_expr_cache: HashMap<usize, Option<Expr>>,
+    transition_rule_expr_cache: Vec<Vec<Option<Expr>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompiledSlotExprs {
+    condition_expr: Option<Expr>,
+    start_expr: Option<Expr>,
+    complete_expr: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,19 +142,9 @@ impl<'a> CycleExecutor<'a> {
         sampler: &'a dyn PixelSampler,
         attempt_cfg: SkillAttemptConfig,
     ) -> Self {
-        // Precompile all slot condition expressions.
-        let expr_cache: Vec<_> = config
-            .phases
-            .iter()
-            .flat_map(|p| p.skills.iter())
-            .map(|slot| {
-                let expr = slot
-                    .condition_expr
-                    .as_ref()
-                    .and_then(|v| compile_expr_json(v, "$").expr);
-                (slot.skill_id.clone(), expr)
-            })
-            .collect();
+        let slot_expr_cache = build_slot_expr_cache(config);
+        let observer_action_expr_cache = build_observer_action_expr_cache(config);
+        let transition_rule_expr_cache = build_transition_rule_expr_cache(config);
 
         let mut runtime = RuntimeState::new();
         if let Some(schema) = &config.state_schema {
@@ -169,7 +168,9 @@ impl<'a> CycleExecutor<'a> {
             log: Vec::new(),
             pending_attempt: None,
             suspended_main_attempt: None,
-            expr_cache,
+            slot_expr_cache,
+            observer_action_expr_cache,
+            transition_rule_expr_cache,
         }
     }
 
@@ -189,6 +190,7 @@ impl<'a> CycleExecutor<'a> {
         now_ms: u64,
     ) -> bool {
         self.runtime.set_now_ms(now_ms);
+        self.sampler.begin_tick(now_ms);
         if let Some(provider) = self.cast_bar_roi {
             provider.begin_tick(now_ms);
         }
@@ -206,6 +208,8 @@ impl<'a> CycleExecutor<'a> {
             }
             return false;
         }
+
+        self.try_observer_lanes(now_ms);
 
         if let Some(pending) = self.pending_attempt.take() {
             if matches!(pending.context, AttemptContext::Main { .. })
@@ -326,12 +330,11 @@ impl<'a> CycleExecutor<'a> {
             return (false, "ammo_unavailable".into());
         }
 
-        let expr = slot
-            .condition_expr
-            .as_ref()
-            .and_then(|value| compile_expr_json(value, "$.condition_expr").expr);
-
-        if let Some(e) = expr.as_ref() {
+        if let Some(e) = self
+            .slot_expr_cache
+            .get(&slot_cache_key(slot))
+            .and_then(|exprs| exprs.condition_expr.as_ref())
+        {
             let ctx = EvalContext {
                 points: self.points,
                 skills: self.skills,
@@ -436,6 +439,129 @@ impl<'a> CycleExecutor<'a> {
         false
     }
 
+    fn try_observer_lanes(&mut self, now_ms: u64) {
+        for (lane_index, lane) in self.config.observer_lanes.iter().enumerate() {
+            if !lane.enabled || lane.actions.is_empty() {
+                continue;
+            }
+
+            let lane_key = Self::observer_lane_key(lane_index, lane);
+            if let Some(next_check_ms) = self.state.observer_lane_next_check_ms.get(&lane_key) {
+                if now_ms < *next_check_ms {
+                    continue;
+                }
+            }
+
+            let mut sorted_slots: Vec<&ObserverActionSlot> = lane.actions.iter().collect();
+            sorted_slots.sort_by_key(|slot| slot.priority);
+            let mut lane_checked = false;
+            let phase_name = Self::observer_phase_name(lane);
+
+            for slot in sorted_slots {
+                let action_id = slot.id.trim();
+                if action_id.is_empty() {
+                    continue;
+                }
+                lane_checked = true;
+                self.runtime.mark_node_exec(action_id);
+
+                let (ready, cond_reason) = self.check_observer_action_ready(slot);
+                if !ready {
+                    self.runtime.mark_ready_false(action_id);
+                    self.log_event(CycleLogEvent {
+                        ts_ms: now_ms,
+                        phase_index: self.state.phase_index,
+                        phase_name: &phase_name,
+                        event: "observer_skip",
+                        skill_id: action_id,
+                        outcome: "NOT_READY",
+                        reason: &cond_reason,
+                    });
+                    continue;
+                }
+
+                self.log_event(CycleLogEvent {
+                    ts_ms: now_ms,
+                    phase_index: self.state.phase_index,
+                    phase_name: &phase_name,
+                    event: "observer_action",
+                    skill_id: action_id,
+                    outcome: "APPLIED",
+                    reason: &cond_reason,
+                });
+                let actions = slot.actions.clone();
+                self.apply_runtime_actions(
+                    &actions,
+                    now_ms,
+                    self.state.phase_index,
+                    &phase_name,
+                    action_id,
+                );
+            }
+
+            if lane_checked {
+                self.mark_observer_lane_checked(&lane_key, lane.check_interval_ms, now_ms);
+            }
+        }
+    }
+
+    fn check_observer_action_ready(&self, slot: &ObserverActionSlot) -> (bool, String) {
+        if let Some(expr) = self
+            .observer_action_expr_cache
+            .get(&observer_action_cache_key(slot))
+            .and_then(|expr| expr.as_ref())
+        {
+            let ctx = EvalContext {
+                points: self.points,
+                skills: self.skills,
+                sampler: self.sampler,
+                metrics: Some(&self.runtime),
+                timers: Some(&self.runtime),
+                markers: Some(&self.runtime),
+                counters: Some(&self.runtime),
+                baseline: None,
+                cast_bar_roi: self.cast_bar_roi,
+            };
+            let result = evaluate(expr, &ctx);
+            match &result {
+                crate::ast::evaluator::TriBool::True => (true, "condition_true".into()),
+                crate::ast::evaluator::TriBool::False(reason) => {
+                    (false, format!("condition_false: {reason}"))
+                }
+                crate::ast::evaluator::TriBool::Unknown(reason) => {
+                    (false, format!("condition_unknown: {reason}"))
+                }
+            }
+        } else {
+            (true, "no_condition".into())
+        }
+    }
+
+    fn observer_lane_key(lane_index: usize, lane: &ObserverLaneConfig) -> String {
+        let id = lane.id.trim();
+        if id.is_empty() {
+            format!("observer_lane_{lane_index}")
+        } else {
+            id.to_string()
+        }
+    }
+
+    fn observer_phase_name(lane: &ObserverLaneConfig) -> String {
+        let name = lane.name.trim();
+        if name.is_empty() {
+            format!("observer:{}", lane.id)
+        } else {
+            format!("observer:{name}")
+        }
+    }
+
+    fn mark_observer_lane_checked(&mut self, lane_key: &str, check_interval_ms: u32, now_ms: u64) {
+        self.state.observer_lane_next_check_ms.insert(
+            lane_key.to_string(),
+            now_ms.saturating_add(u64::from(check_interval_ms.max(1))),
+        );
+    }
+
     fn assist_policy_allows(
         policy: AssistInterruptPolicy,
         main_stage: Option<PendingAttemptStage>,
@@ -537,20 +663,16 @@ impl<'a> CycleExecutor<'a> {
             skill_id: sid.clone(),
         });
 
+        let slot_exprs = self.slot_expr_cache.get(&slot_cache_key(slot));
         self.pending_attempt = Some(PendingAttempt {
             context,
             skill_id: sid,
             post_actions: slot.post_actions.clone(),
             readbar_ms: slot.override_cast_ms.unwrap_or(skill.cast.readbar_ms),
-            start_expr: slot
-                .start_expr
-                .as_ref()
-                .and_then(|value| compile_expr_json(value, "$.start_expr").expr)
+            start_expr: slot_exprs
+                .and_then(|exprs| exprs.start_expr.clone())
                 .unwrap_or(Expr::Const { value: true }),
-            complete_expr: slot
-                .complete_expr
-                .as_ref()
-                .and_then(|value| compile_expr_json(value, "$.complete_expr").expr),
+            complete_expr: slot_exprs.and_then(|exprs| exprs.complete_expr.clone()),
             protected_release: slot.protected_release,
             attempt_cfg: attempt_cfg.clone(),
             stage: PendingAttemptStage::StartWait,
@@ -1177,8 +1299,8 @@ impl<'a> CycleExecutor<'a> {
     }
 
     fn resolve_phase_transition(&self, phase_idx: usize, phase: &CyclePhase) -> (usize, String) {
-        for rule in &phase.transition_rules {
-            if self.transition_rule_matches(rule) {
+        for (rule_index, rule) in phase.transition_rules.iter().enumerate() {
+            if self.transition_rule_matches(phase_idx, rule_index) {
                 if let Some(target_index) = self.find_phase_index(&rule.target_phase) {
                     let label = rule.label.trim();
                     let rule_name = if label.is_empty() { "unnamed" } else { label };
@@ -1216,15 +1338,12 @@ impl<'a> CycleExecutor<'a> {
         }
     }
 
-    fn transition_rule_matches(&self, rule: &PhaseTransitionRule) -> bool {
-        let Some(expr_json) = &rule.condition_expr else {
-            return false;
-        };
-        let compiled = compile_expr_json(expr_json, "$");
-        let Some(expr) = compiled.expr else {
-            return false;
-        };
-        self.evaluate_expr(&expr)
+    fn transition_rule_matches(&self, phase_idx: usize, rule_index: usize) -> bool {
+        self.transition_rule_expr_cache
+            .get(phase_idx)
+            .and_then(|rules| rules.get(rule_index))
+            .and_then(Option::as_ref)
+            .is_some_and(|expr| self.evaluate_expr(expr))
     }
 
     fn find_phase_index(&self, target_phase: &str) -> Option<usize> {
@@ -1323,6 +1442,79 @@ impl<'a> CycleExecutor<'a> {
     }
 }
 
+fn build_slot_expr_cache(config: &CycleConfig) -> HashMap<usize, CompiledSlotExprs> {
+    let mut cache = HashMap::new();
+    for phase in &config.phases {
+        for slot in &phase.skills {
+            cache.insert(slot_cache_key(slot), compile_slot_exprs(slot));
+        }
+    }
+    for lane in &config.assist_lanes {
+        for slot in &lane.skills {
+            cache.insert(slot_cache_key(slot), compile_slot_exprs(slot));
+        }
+    }
+    cache
+}
+
+fn build_observer_action_expr_cache(config: &CycleConfig) -> HashMap<usize, Option<Expr>> {
+    let mut cache = HashMap::new();
+    for lane in &config.observer_lanes {
+        for slot in &lane.actions {
+            cache.insert(
+                observer_action_cache_key(slot),
+                slot.condition_expr
+                    .as_ref()
+                    .and_then(|value| compile_expr_json(value, "$.condition_expr").expr),
+            );
+        }
+    }
+    cache
+}
+
+fn compile_slot_exprs(slot: &SkillSlot) -> CompiledSlotExprs {
+    CompiledSlotExprs {
+        condition_expr: slot
+            .condition_expr
+            .as_ref()
+            .and_then(|value| compile_expr_json(value, "$.condition_expr").expr),
+        start_expr: slot
+            .start_expr
+            .as_ref()
+            .and_then(|value| compile_expr_json(value, "$.start_expr").expr),
+        complete_expr: slot
+            .complete_expr
+            .as_ref()
+            .and_then(|value| compile_expr_json(value, "$.complete_expr").expr),
+    }
+}
+
+fn build_transition_rule_expr_cache(config: &CycleConfig) -> Vec<Vec<Option<Expr>>> {
+    config
+        .phases
+        .iter()
+        .map(|phase| {
+            phase
+                .transition_rules
+                .iter()
+                .map(|rule| {
+                    rule.condition_expr
+                        .as_ref()
+                        .and_then(|value| compile_expr_json(value, "$.condition_expr").expr)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn slot_cache_key(slot: &SkillSlot) -> usize {
+    slot as *const SkillSlot as usize
+}
+
+fn observer_action_cache_key(slot: &ObserverActionSlot) -> usize {
+    slot as *const ObserverActionSlot as usize
+}
+
 fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
     let dr = (a.0 as i16 - b.0 as i16).unsigned_abs() as u8;
     let dg = (a.1 as i16 - b.1 as i16).unsigned_abs() as u8;
@@ -1340,8 +1532,8 @@ mod tests {
     use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiState, PixelSampler};
     use crate::models::cycle::{
         AssistInterruptPolicy, AssistLaneConfig, AttemptPolicy, CyclePhase, CycleStateSchema,
-        PhaseFallbackTransition, PhaseTransitionRule, RuntimeAction, RuntimeCounterDef,
-        RuntimeMarkerDef, RuntimeTimerDef, SkillSlot,
+        ObserverActionSlot, ObserverLaneConfig, PhaseFallbackTransition, PhaseTransitionRule,
+        RuntimeAction, RuntimeCounterDef, RuntimeMarkerDef, RuntimeTimerDef, SkillSlot,
     };
     use crate::models::skill::{AmmoStagePixel, ColorRGB, PixelSpec, SampleConfig, Skill};
     use serde_json::json;
@@ -1464,6 +1656,326 @@ mod tests {
     }
 
     #[test]
+    fn test_precompiled_expr_cache_covers_phase_observer_assist_and_transition() {
+        let mut main_slot = make_slot("sk1", 1);
+        main_slot.condition_expr = Some(json!({"type": "const", "value": true}));
+        main_slot.start_expr = Some(json!({"type": "const", "value": true}));
+        main_slot.complete_expr = Some(json!({"type": "const", "value": true}));
+
+        let mut assist_slot = make_slot("sk2", 1);
+        assist_slot.condition_expr = Some(json!({"type": "const", "value": true}));
+
+        let observer_slot = ObserverActionSlot {
+            id: "watch_cast".into(),
+            label: "Watch cast".into(),
+            priority: 1,
+            condition_expr: Some(json!({"type": "const", "value": true})),
+            actions: vec![RuntimeAction::RecordTimer {
+                timer_id: "cast_seen".into(),
+            }],
+        };
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![main_slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![PhaseTransitionRule {
+                    label: "jump".into(),
+                    condition_expr: Some(json!({"type": "const", "value": true})),
+                    target_phase: "P1".into(),
+                }],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![ObserverLaneConfig {
+                id: "observer".into(),
+                name: "Observer".into(),
+                enabled: true,
+                check_interval_ms: 50,
+                actions: vec![observer_slot],
+            }],
+            assist_lanes: vec![make_assist_lane(
+                AssistInterruptPolicy::IdleOnly,
+                vec![assist_slot],
+            )],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1"), make_skill("sk2", "f2")];
+        let sampler = DummySampler { rgb: (0, 0, 0) };
+
+        let exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+
+        assert_eq!(exec.slot_expr_cache.len(), 2);
+        assert_eq!(exec.transition_rule_expr_cache.len(), 1);
+        let main_exprs = exec
+            .slot_expr_cache
+            .get(&slot_cache_key(&config.phases[0].skills[0]))
+            .expect("main slot expressions cached");
+        assert!(main_exprs.condition_expr.is_some());
+        assert!(main_exprs.start_expr.is_some());
+        assert!(main_exprs.complete_expr.is_some());
+        let assist_exprs = exec
+            .slot_expr_cache
+            .get(&slot_cache_key(&config.assist_lanes[0].skills[0]))
+            .expect("assist slot expressions cached");
+        assert!(assist_exprs.condition_expr.is_some());
+        let observer_expr = exec
+            .observer_action_expr_cache
+            .get(&observer_action_cache_key(
+                &config.observer_lanes[0].actions[0],
+            ))
+            .expect("observer action expression cached");
+        assert!(observer_expr.is_some());
+    }
+
+    #[test]
+    fn test_observer_action_records_timer_without_sending_key() {
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![],
+            observer_lanes: vec![ObserverLaneConfig {
+                id: "observer".into(),
+                name: "Observer".into(),
+                enabled: true,
+                check_interval_ms: 50,
+                actions: vec![ObserverActionSlot {
+                    id: "cast_seen".into(),
+                    label: "Cast seen".into(),
+                    priority: 1,
+                    condition_expr: Some(json!({"type": "const", "value": true})),
+                    actions: vec![RuntimeAction::RecordTimer {
+                        timer_id: "cast_timer".into(),
+                    }],
+                }],
+            }],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: Some(CycleStateSchema {
+                markers: vec![],
+                timers: vec![RuntimeTimerDef {
+                    id: "cast_timer".into(),
+                    name: "Cast timer".into(),
+                    reset_on_cycle_start: false,
+                }],
+                counters: vec![],
+            }),
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1")];
+        let sampler = DummySampler { rgb: (0, 0, 0) };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(!exec.tick(&mut ks, &|| false, 25));
+        assert!(ks.keys.is_empty());
+        assert_eq!(exec.runtime.timers.get("cast_timer"), Some(&25));
+        assert!(
+            exec.log
+                .iter()
+                .any(|entry| entry.event == "observer_action")
+        );
+    }
+
+    #[test]
+    fn test_observer_action_gates_main_skill_in_same_tick() {
+        let mut slot = make_slot("sk1", 1);
+        slot.condition_expr = Some(json!({
+            "type": "marker_eq",
+            "marker_id": "cast_state",
+            "value": "active"
+        }));
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![ObserverLaneConfig {
+                id: "observer".into(),
+                name: "Observer".into(),
+                enabled: true,
+                check_interval_ms: 50,
+                actions: vec![ObserverActionSlot {
+                    id: "mark_cast".into(),
+                    label: "Mark cast".into(),
+                    priority: 1,
+                    condition_expr: Some(json!({"type": "const", "value": true})),
+                    actions: vec![RuntimeAction::SetMarker {
+                        marker_id: "cast_state".into(),
+                        value: "active".into(),
+                    }],
+                }],
+            }],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: Some(CycleStateSchema {
+                markers: vec![RuntimeMarkerDef {
+                    id: "cast_state".into(),
+                    name: "Cast state".into(),
+                    initial_value: "idle".into(),
+                    allowed_values: vec!["idle".into(), "active".into()],
+                }],
+                timers: vec![],
+                counters: vec![],
+            }),
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1")];
+        let sampler = DummySampler { rgb: (0, 0, 0) };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(
+            exec.runtime.markers.get("cast_state"),
+            Some(&"active".to_string())
+        );
+        assert_eq!(ks.keys, vec!["f1"]);
+    }
+
+    #[test]
+    fn test_observer_lane_interval_prevents_repeated_counter_updates() {
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![],
+            observer_lanes: vec![ObserverLaneConfig {
+                id: "observer".into(),
+                name: "Observer".into(),
+                enabled: true,
+                check_interval_ms: 100,
+                actions: vec![ObserverActionSlot {
+                    id: "count_cast".into(),
+                    label: "Count cast".into(),
+                    priority: 1,
+                    condition_expr: Some(json!({"type": "const", "value": true})),
+                    actions: vec![RuntimeAction::IncrementCounter {
+                        counter_id: "seen_count".into(),
+                        by: 1,
+                    }],
+                }],
+            }],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: Some(CycleStateSchema {
+                markers: vec![],
+                timers: vec![],
+                counters: vec![RuntimeCounterDef {
+                    id: "seen_count".into(),
+                    name: "Seen count".into(),
+                    initial_value: 0,
+                    reset_on_phase_entry: false,
+                    reset_on_cycle_start: false,
+                }],
+            }),
+        };
+        let points = vec![];
+        let skills = vec![];
+        let sampler = DummySampler { rgb: (0, 0, 0) };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(!exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(exec.runtime.counters.get("seen_count"), Some(&1));
+        assert!(!exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(exec.runtime.counters.get("seen_count"), Some(&1));
+        assert!(!exec.tick(&mut ks, &|| false, 100));
+        assert_eq!(exec.runtime.counters.get("seen_count"), Some(&2));
+        assert!(ks.keys.is_empty());
+    }
+
+    #[test]
+    fn test_precompiled_slot_exprs_keep_duplicate_skill_slots_distinct() {
+        let mut blocked_slot = make_slot("sk1", 1);
+        blocked_slot.condition_expr = Some(json!({"type": "const", "value": false}));
+        let mut ready_slot = make_slot("sk1", 2);
+        ready_slot.condition_expr = Some(json!({"type": "const", "value": true}));
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![blocked_slot, ready_slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert_eq!(exec.slot_expr_cache.len(), 2);
+        let acted = exec.tick(&mut ks, &|| false, 0);
+
+        assert!(acted);
+        assert_eq!(ks.keys, vec!["f1"]);
+    }
+
+    #[test]
     fn test_assist_lane_executes_when_main_has_no_ready_slot() {
         let config = CycleConfig {
             name: "assist_idle".into(),
@@ -1478,6 +1990,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![make_assist_lane(
                 AssistInterruptPolicy::IdleOnly,
                 vec![make_slot("assist", 1)],
@@ -1526,6 +2039,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![make_assist_lane(
                 AssistInterruptPolicy::IdleOnly,
                 vec![make_slot("assist", 1)],
@@ -1572,6 +2086,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![make_assist_lane(
                 AssistInterruptPolicy::CompleteWait,
                 vec![make_slot("assist", 1)],
@@ -1629,6 +2144,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![make_assist_lane(
                 AssistInterruptPolicy::CompleteWait,
                 vec![make_slot("assist", 1)],
@@ -1675,6 +2191,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -1730,6 +2247,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -1770,6 +2288,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -1820,6 +2339,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -1868,6 +2388,7 @@ mod tests {
                     fallback_transition: None,
                 },
             ],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -1920,6 +2441,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -1964,6 +2486,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2022,6 +2545,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2077,6 +2601,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2138,6 +2663,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2194,6 +2720,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2263,6 +2790,7 @@ mod tests {
                     fallback_transition: None,
                 },
             ],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2340,6 +2868,7 @@ mod tests {
                     fallback_transition: None,
                 },
             ],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2414,6 +2943,7 @@ mod tests {
                     fallback_transition: None,
                 },
             ],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2488,6 +3018,7 @@ mod tests {
                     fallback_transition: None,
                 },
             ],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,
@@ -2539,6 +3070,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2597,6 +3129,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2653,6 +3186,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 50,
             max_cycles: 0,
@@ -2695,6 +3229,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2739,6 +3274,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,
@@ -2783,6 +3319,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 0,

@@ -3,10 +3,27 @@
 export interface CycleConfig {
   name: string;
   phases: CyclePhase[];
+  observer_lanes?: ObserverLaneConfig[];
   assist_lanes?: AssistLaneConfig[];
   poll_interval_ms: number;
   max_cycles: number;
   state_schema?: CycleStateSchema | null;
+}
+
+export interface ObserverLaneConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  check_interval_ms: number;
+  actions: ObserverActionSlot[];
+}
+
+export interface ObserverActionSlot {
+  id: string;
+  label: string;
+  priority: number;
+  condition_expr: Record<string, unknown> | null;
+  actions: RuntimeAction[];
 }
 
 export interface AssistLaneConfig {

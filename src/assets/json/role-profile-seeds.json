@@ -1,0 +1,537 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "power_virtuoso_greatsword",
+      "label": "直伤大剑灵刃",
+      "description": "直伤大剑灵刃 Profile：技能、点位、状态机循环一体配置。",
+      "rotation_id": "power_virtuoso_greatsword",
+      "skills": [
+        {
+          "id": "virt_weapon_swap",
+          "name": "Weapon Swap",
+          "key": "`",
+          "x": 581,
+          "y": 1011,
+          "color": "0xE7DBC6"
+        },
+        {
+          "id": "virt_focus5",
+          "name": "Offhand 5",
+          "key": "5",
+          "x": 867,
+          "y": 1016,
+          "color": "0xA392AB"
+        },
+        {
+          "id": "virt_focus4",
+          "name": "Offhand 4",
+          "key": "4",
+          "x": 808,
+          "y": 1014,
+          "color": "0xB795C2"
+        },
+        {
+          "id": "virt_gs4",
+          "name": "Greatsword 4",
+          "key": "4",
+          "x": 810,
+          "y": 1011,
+          "color": "0x8B0C70"
+        },
+        {
+          "id": "virt_gs2",
+          "name": "Greatsword 2",
+          "key": "2",
+          "x": 685,
+          "y": 1007,
+          "color": "0xFFFFFF"
+        },
+        {
+          "id": "virt_shatter",
+          "name": "Profession Burst",
+          "key": "F1",
+          "x": 647,
+          "y": 941,
+          "color": "0x5B2086"
+        }
+      ],
+      "points": [
+        {
+          "id": "virt_swap_ready",
+          "name": "Swap Ready",
+          "x": 581,
+          "y": 1011,
+          "color": "0xE7DBC6"
+        },
+        {
+          "id": "virt_burst_marker",
+          "name": "Burst Marker",
+          "x": 805,
+          "y": 917,
+          "color": "0xFD7FFD"
+        },
+        {
+          "id": "virt_mieshi",
+          "name": "Mieshi Marker",
+          "x": 786,
+          "y": 131,
+          "color": "0x428579"
+        }
+      ]
+    },
+    {
+      "id": "condi_quickness_firebrand",
+      "label": "症状急速燃火",
+      "description": "症状急速燃火 Profile：主循环、辅助 Lane、观察 Lane 一体配置。",
+      "rotation_id": "condi_quickness_firebrand",
+      "skills": [
+        {
+          "id": "fb_priority_1",
+          "name": "Priority 1",
+          "key": "3",
+          "x": 744,
+          "y": 1013,
+          "color": "0x55A6B6"
+        },
+        {
+          "id": "fb_priority_2",
+          "name": "Priority 2",
+          "key": "5",
+          "x": 869,
+          "y": 1011,
+          "color": "0x032E6D"
+        },
+        {
+          "id": "fb_axe2",
+          "name": "Main Weapon 2",
+          "key": "2",
+          "x": 685,
+          "y": 1011,
+          "color": "0x68CFD3"
+        },
+        {
+          "id": "fb_f1_open",
+          "name": "F1 Open",
+          "key": "F1",
+          "x": 624,
+          "y": 940,
+          "color": "0x0E3F41"
+        },
+        {
+          "id": "fb_f1_page2",
+          "name": "F1 Page 2",
+          "key": "F2",
+          "x": 665,
+          "y": 942,
+          "color": "0x233B25"
+        },
+        {
+          "id": "fb_f1_page4",
+          "name": "F1 Page 4",
+          "key": "F4",
+          "x": 708,
+          "y": 943,
+          "color": "0x2FB2A1"
+        },
+        {
+          "id": "fb_wp4_refresh",
+          "name": "Main Weapon 4",
+          "key": "4",
+          "x": 807,
+          "y": 1012,
+          "color": "0x251301"
+        },
+        {
+          "id": "fb_wp5_refresh",
+          "name": "Main Weapon 5",
+          "key": "5",
+          "x": 869,
+          "y": 1011,
+          "color": "0x032E6D"
+        },
+        {
+          "id": "fb_torch4",
+          "name": "Torch 4",
+          "key": "4",
+          "x": 805,
+          "y": 1013,
+          "color": "0x1C1416"
+        },
+        {
+          "id": "fb_torch5",
+          "name": "Torch 5",
+          "key": "5",
+          "x": 867,
+          "y": 1013,
+          "color": "0x0E7EC1"
+        },
+        {
+          "id": "fb_weapon_swap",
+          "name": "Weapon Swap",
+          "key": "`",
+          "x": 580,
+          "y": 1011,
+          "color": "0xE7DBC6"
+        },
+        {
+          "id": "fb_ty2_assist",
+          "name": "Utility TY2",
+          "key": "v",
+          "x": 1221,
+          "y": 1010,
+          "color": "0x3460AA"
+        },
+        {
+          "id": "fb_ty3_assist",
+          "name": "Utility TY3",
+          "key": "c",
+          "x": 1159,
+          "y": 1011,
+          "color": "0x0D60B4"
+        },
+        {
+          "id": "fb_ty1_assist",
+          "name": "Utility TY1",
+          "key": "z",
+          "x": 1039,
+          "y": 1011,
+          "color": "0xD2F9FB"
+        }
+      ],
+      "points": [
+        {
+          "id": "fb_point3_watch",
+          "name": "Point3 Watch",
+          "x": 1072,
+          "y": 1010,
+          "color": "0x064440"
+        },
+        {
+          "id": "fb_point4_watch",
+          "name": "Point4 Watch",
+          "x": 1067,
+          "y": 1011,
+          "color": "0x87888B"
+        },
+        {
+          "id": "fb_point0_opener",
+          "name": "Point0 Opener",
+          "x": 626,
+          "y": 1012,
+          "color": "0xA78786"
+        },
+        {
+          "id": "fb_point1_periodic",
+          "name": "Point1 Periodic",
+          "x": 813,
+          "y": 1007,
+          "color": "0x000000"
+        },
+        {
+          "id": "fb_point2_periodic",
+          "name": "Point2 Periodic",
+          "x": 875,
+          "y": 1008,
+          "color": "0x000000"
+        },
+        {
+          "id": "fb_point5_weapon",
+          "name": "Point5 Weapon",
+          "x": 809,
+          "y": 1011,
+          "color": "0xA6B0FF"
+        }
+      ]
+    },
+    {
+      "id": "condition_weaver_pistol_dagger",
+      "label": "Condition Weaver - Pistol/Dagger",
+      "description": "Frame-driven Condition Weaver profile seed: semantic skills, attunement points, Weave Self burst, and steady Fire/Earth loop.",
+      "rotation_id": "condition_weaver_pistol_dagger",
+      "skills": [
+        {
+          "id": "weaver_auto_1",
+          "name": "Auto Attack",
+          "key": "1",
+          "x": 624,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_fire_pistol_2",
+          "name": "Fire Pistol 2",
+          "key": "2",
+          "x": 685,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_earth_pistol_2",
+          "name": "Earth Pistol 2",
+          "key": "2",
+          "x": 685,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_fire_dual_3",
+          "name": "Dual Fire Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_earth_dual_3",
+          "name": "Dual Earth Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_fire_earth_dual_3",
+          "name": "Fire/Earth Dual Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_earth_fire_dual_3",
+          "name": "Earth/Fire Dual Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_air_earth_dual_3",
+          "name": "Air/Earth Dual Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_fire_air_dual_3",
+          "name": "Fire/Air Dual Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_water_earth_dual_3",
+          "name": "Water/Earth Dual Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_fire_water_dual_3",
+          "name": "Fire/Water Dual Attack 3",
+          "key": "3",
+          "x": 744,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_fire_dagger_4_ring_of_fire",
+          "name": "Ring of Fire",
+          "key": "4",
+          "x": 807,
+          "y": 1012,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5691."
+        },
+        {
+          "id": "weaver_fire_dagger_5_fire_grab",
+          "name": "Fire Grab",
+          "key": "5",
+          "x": 869,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5557."
+        },
+        {
+          "id": "weaver_earth_dagger_4_earthquake",
+          "name": "Earthquake",
+          "key": "4",
+          "x": 807,
+          "y": 1012,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5690."
+        },
+        {
+          "id": "weaver_earth_dagger_5_churning_earth",
+          "name": "Churning Earth",
+          "key": "5",
+          "x": 869,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5522."
+        },
+        {
+          "id": "weaver_signet_fire",
+          "name": "Signet of Fire",
+          "key": "8",
+          "x": 1159,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5542."
+        },
+        {
+          "id": "weaver_signet_earth",
+          "name": "Signet of Earth",
+          "key": "9",
+          "x": 1221,
+          "y": 1010,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 5571."
+        },
+        {
+          "id": "weaver_primordial_stance",
+          "name": "Primordial Stance",
+          "key": "7",
+          "x": 1099,
+          "y": 1011,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 40183. Align the key with your utility slot."
+        },
+        {
+          "id": "weaver_weave_self",
+          "name": "Weave Self",
+          "key": "0",
+          "x": 1282,
+          "y": 1010,
+          "color": "0xFFFFFF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement. GW2 skillID 43638."
+        },
+        {
+          "id": "weaver_attune_fire",
+          "name": "Fire Attunement",
+          "key": "F1",
+          "x": 624,
+          "y": 940,
+          "color": "0xFF5A2F",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_attune_water",
+          "name": "Water Attunement",
+          "key": "F2",
+          "x": 665,
+          "y": 942,
+          "color": "0x5AA7FF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_attune_air",
+          "name": "Air Attunement",
+          "key": "F3",
+          "x": 708,
+          "y": 943,
+          "color": "0xD8F2FF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_attune_earth",
+          "name": "Earth Attunement",
+          "key": "F4",
+          "x": 749,
+          "y": 943,
+          "color": "0xAA7A3A",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        }
+      ],
+      "points": [
+        {
+          "id": "attune_fire_primary",
+          "name": "Primary Fire Attunement",
+          "x": 624,
+          "y": 940,
+          "color": "0xFF5A2F",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_water_primary",
+          "name": "Primary Water Attunement",
+          "x": 665,
+          "y": 942,
+          "color": "0x5AA7FF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_air_primary",
+          "name": "Primary Air Attunement",
+          "x": 708,
+          "y": 943,
+          "color": "0xD8F2FF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_earth_primary",
+          "name": "Primary Earth Attunement",
+          "x": 749,
+          "y": 943,
+          "color": "0xAA7A3A",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_fire_secondary",
+          "name": "Secondary Fire Attunement",
+          "x": 624,
+          "y": 956,
+          "color": "0xFF5A2F",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_water_secondary",
+          "name": "Secondary Water Attunement",
+          "x": 665,
+          "y": 958,
+          "color": "0x5AA7FF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_air_secondary",
+          "name": "Secondary Air Attunement",
+          "x": 708,
+          "y": 959,
+          "color": "0xD8F2FF",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "attune_earth_secondary",
+          "name": "Secondary Earth Attunement",
+          "x": 749,
+          "y": 959,
+          "color": "0xAA7A3A",
+          "note": "Frame-driven Condition Weaver seed. Re-pick this pixel for your UI scale, skin, and active attunement."
+        },
+        {
+          "id": "weaver_cast_confirm_roi",
+          "name": "Cast Confirm ROI Anchor",
+          "x": 960,
+          "y": 895,
+          "color": "0x000000",
+          "note": "Optional cast-bar/ROI anchor. Use ROI conditions when cast-bar sampling is calibrated."
+        }
+      ]
+    }
+  ]
+}

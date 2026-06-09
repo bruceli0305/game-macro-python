@@ -1,5 +1,5 @@
 //! enigo 键盘模拟封装
-//! 对齐 python-legacy/core/input/ + rotation_editor/core/runtime/keyboard.py
+//! enigo 键盘模拟实现
 
 use crate::engine::skill_attempt::KeySender as KeySenderTrait;
 use enigo::{Enigo, Key, Keyboard, Settings};

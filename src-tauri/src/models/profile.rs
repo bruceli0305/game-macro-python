@@ -5,7 +5,7 @@ use super::cycle::CycleConfig;
 use super::point::PointsFile;
 use super::skill::SkillsFile;
 
-/// Profile 聚合根（对齐 python-legacy core/domain/profile.py）
+/// Profile 聚合根
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Profile {
     pub schema_version: u32,

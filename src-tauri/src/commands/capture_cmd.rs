@@ -54,7 +54,7 @@ fn app_data_dir() -> Result<PathBuf, AppError> {
 
 fn load_pick_config() -> Result<PickConfig, AppError> {
     let store = ProfileStore::new(app_data_dir()?);
-    Ok(store.load_or_create_default("default")?.base.pick)
+    Ok(store.load_active_or_default()?.1.base.pick)
 }
 
 fn avoid_target_y(y: i32, offset_y: i32) -> i32 {

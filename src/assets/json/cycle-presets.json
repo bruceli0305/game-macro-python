@@ -1,0 +1,5515 @@
+{
+  "schema_version": 1,
+  "presets": [
+    {
+      "label": "直伤大剑灵刃",
+      "value": "power_virtuoso_greatsword",
+      "description": "按入口判定、副武器起手、主武器循环、副武器循环和切武器爆发拆分。",
+      "rotation": {
+        "name": "直伤大剑灵刃 - 状态机模板",
+        "poll_interval_ms": 80,
+        "max_cycles": 0,
+        "state_schema": {
+          "markers": [
+            {
+              "id": "weapon",
+              "name": "当前武器组",
+              "initial_value": "unknown",
+              "allowed_values": [
+                "unknown",
+                "main",
+                "alt"
+              ]
+            }
+          ],
+          "timers": [
+            {
+              "id": "last_main_burst",
+              "name": "主武器爆发时间",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_entry_swap",
+              "name": "入口切武器时间",
+              "reset_on_cycle_start": true
+            }
+          ],
+          "counters": [
+            {
+              "id": "main_wp4_count",
+              "name": "主武器 4 计数",
+              "initial_value": 0,
+              "reset_on_phase_entry": true,
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "main_wp2_count",
+              "name": "主武器 2 计数",
+              "initial_value": 0,
+              "reset_on_phase_entry": true,
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "alt_twp5_count",
+              "name": "副武器 5 计数",
+              "initial_value": 0,
+              "reset_on_phase_entry": true,
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "alt_twp3_count",
+              "name": "副武器 3 计数",
+              "initial_value": 0,
+              "reset_on_phase_entry": true,
+              "reset_on_cycle_start": true
+            }
+          ]
+        },
+        "phases": [
+          {
+            "name": "入口判定",
+            "complete_when": "any_fired",
+            "entry_actions": [],
+            "transition_rules": [
+              {
+                "label": "已在主武器",
+                "condition_expr": {
+                  "type": "marker_eq",
+                  "marker_id": "weapon",
+                  "value": "main"
+                },
+                "target_phase": "主武器循环"
+              },
+              {
+                "label": "已在副武器",
+                "condition_expr": {
+                  "type": "marker_eq",
+                  "marker_id": "weapon",
+                  "value": "alt"
+                },
+                "target_phase": "副武器起手"
+              }
+            ],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "virt_weapon_swap",
+                "priority": 1,
+                "label": "入口切武器/校正武器组",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_weapon_swap",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "weapon",
+                    "value": "alt"
+                  },
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_entry_swap"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "副武器起手",
+            "complete_when": "none_ready",
+            "entry_actions": [
+              {
+                "type": "set_marker",
+                "marker_id": "weapon",
+                "value": "alt"
+              }
+            ],
+            "transition_rules": [
+              {
+                "label": "副武器起手完成",
+                "condition_expr": {
+                  "type": "counter_ge",
+                  "counter_id": "alt_twp5_count",
+                  "value": 1
+                },
+                "target_phase": "主武器循环"
+              }
+            ],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "virt_focus5",
+                "priority": 1,
+                "label": "副武器 5：关键爆发",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_focus5",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "alt_twp5_count",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "virt_focus4",
+                "priority": 2,
+                "label": "副武器 4：补伤害/触发",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_focus4",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "alt_twp3_count",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "主武器循环",
+            "complete_when": "none_ready",
+            "entry_actions": [
+              {
+                "type": "set_marker",
+                "marker_id": "weapon",
+                "value": "main"
+              }
+            ],
+            "transition_rules": [
+              {
+                "label": "主武器爆发窗口",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_main_burst",
+                  "ms": 6000
+                },
+                "target_phase": "切武器爆发"
+              },
+              {
+                "label": "主武器基础循环完成",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "counter_ge",
+                      "counter_id": "main_wp4_count",
+                      "value": 1
+                    },
+                    {
+                      "type": "counter_ge",
+                      "counter_id": "main_wp2_count",
+                      "value": 1
+                    }
+                  ]
+                },
+                "target_phase": "副武器循环"
+              }
+            ],
+            "fallback_transition": {
+              "type": "stay"
+            },
+            "skills": [
+              {
+                "skill_id": "virt_gs4",
+                "priority": 1,
+                "label": "主武器 4：优先释放",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_gs4",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "main_wp4_count",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "virt_gs2",
+                "priority": 2,
+                "label": "主武器 2：循环填充",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_gs2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "main_wp2_count",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "virt_shatter",
+                "priority": 3,
+                "label": "职业爆发：有资源时释放",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_shatter",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_main_burst"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "副武器循环",
+            "complete_when": "none_ready",
+            "entry_actions": [
+              {
+                "type": "set_marker",
+                "marker_id": "weapon",
+                "value": "alt"
+              }
+            ],
+            "transition_rules": [
+              {
+                "label": "副武器循环完成",
+                "condition_expr": {
+                  "type": "counter_ge",
+                  "counter_id": "alt_twp3_count",
+                  "value": 1
+                },
+                "target_phase": "主武器起手修正"
+              }
+            ],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "virt_focus4",
+                "priority": 1,
+                "label": "副武器 4：循环补位",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_focus4",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "alt_twp3_count",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "virt_focus5",
+                "priority": 2,
+                "label": "副武器 5：可用则释放",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_focus5",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "alt_twp5_count",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "主武器起手修正",
+            "complete_when": "any_fired",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "virt_weapon_swap",
+                "priority": 1,
+                "label": "切回主武器",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_weapon_swap",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "weapon",
+                    "value": "main"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "切武器爆发",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "phase",
+              "target_phase": "主武器循环"
+            },
+            "skills": [
+              {
+                "skill_id": "virt_shatter",
+                "priority": 1,
+                "label": "爆发技能：等待状态条完成",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_shatter",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_main_burst"
+                  }
+                ]
+              },
+              {
+                "skill_id": "virt_gs4",
+                "priority": 2,
+                "label": "爆发后补主武器 4",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "virt_gs4",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "main_wp4_count",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "observer_lanes": [],
+        "assist_lanes": []
+      }
+    },
+    {
+      "label": "症状急速燃火",
+      "value": "condi_quickness_firebrand",
+      "description": "主循环处理 F1/火炬/武器刷新，咒语类技能放入辅助 Lane。",
+      "rotation": {
+        "name": "症状急速燃火 - 状态机模板",
+        "poll_interval_ms": 80,
+        "max_cycles": 0,
+        "state_schema": {
+          "markers": [
+            {
+              "id": "weapon",
+              "name": "当前武器组",
+              "initial_value": "unknown",
+              "allowed_values": [
+                "unknown",
+                "main",
+                "torch"
+              ]
+            },
+            {
+              "id": "f1_state",
+              "name": "F1 状态",
+              "initial_value": "closed",
+              "allowed_values": [
+                "closed",
+                "open"
+              ]
+            }
+          ],
+          "timers": [
+            {
+              "id": "last_f1_burst",
+              "name": "F1 爆发时间",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_torch4",
+              "name": "火炬 4 时间",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_wp5_refresh",
+              "name": "武器 5 刷新",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_wp4_refresh",
+              "name": "武器 4 刷新",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_ty2_assist",
+              "name": "辅助 TY2",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_ty3_assist",
+              "name": "辅助 TY3",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_ty1_assist",
+              "name": "辅助 TY1",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "ty2_seen",
+              "name": "TY2 visible watcher",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "ty3_seen",
+              "name": "TY3 visible watcher",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "point3_seen",
+              "name": "Point3 watcher",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "point4_seen",
+              "name": "Point4 watcher",
+              "reset_on_cycle_start": true
+            }
+          ],
+          "counters": [
+            {
+              "id": "f1_pages_used",
+              "name": "F1 书页计数",
+              "initial_value": 0,
+              "reset_on_phase_entry": true,
+              "reset_on_cycle_start": true
+            }
+          ]
+        },
+        "phases": [
+          {
+            "name": "常规优先级",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [
+              {
+                "label": "F1 爆发到期",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_f1_burst",
+                  "ms": 8000
+                },
+                "target_phase": "F1 打开处理"
+              },
+              {
+                "label": "火炬窗口到期",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_torch4",
+                  "ms": 7000
+                },
+                "target_phase": "火炬循环"
+              }
+            ],
+            "fallback_transition": {
+              "type": "stay"
+            },
+            "skills": [
+              {
+                "skill_id": "fb_priority_1",
+                "priority": 1,
+                "label": "常规优先级 1",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_priority_1",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              },
+              {
+                "skill_id": "fb_priority_2",
+                "priority": 2,
+                "label": "常规优先级 2",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_priority_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              },
+              {
+                "skill_id": "fb_axe2",
+                "priority": 3,
+                "label": "主武器 2：填充/症状",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_axe2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              }
+            ]
+          },
+          {
+            "name": "F1 打开处理",
+            "complete_when": "none_ready",
+            "entry_actions": [
+              {
+                "type": "set_marker",
+                "marker_id": "f1_state",
+                "value": "open"
+              }
+            ],
+            "transition_rules": [
+              {
+                "label": "书页释放完成",
+                "condition_expr": {
+                  "type": "counter_ge",
+                  "counter_id": "f1_pages_used",
+                  "value": 2
+                },
+                "target_phase": "主武器循环"
+              }
+            ],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "fb_f1_open",
+                "priority": 1,
+                "label": "打开 F1",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_f1_open",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              },
+              {
+                "skill_id": "fb_f1_page2",
+                "priority": 2,
+                "label": "F1 书页 2",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_f1_page2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "f1_pages_used",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "fb_f1_page4",
+                "priority": 3,
+                "label": "F1 书页 4",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_f1_page4",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "f1_pages_used",
+                    "by": 1
+                  },
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_f1_burst"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "主武器循环",
+            "complete_when": "none_ready",
+            "entry_actions": [
+              {
+                "type": "set_marker",
+                "marker_id": "weapon",
+                "value": "main"
+              }
+            ],
+            "transition_rules": [
+              {
+                "label": "武器 5 刷新",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_wp5_refresh",
+                  "ms": 10000
+                },
+                "target_phase": "定时刷新"
+              },
+              {
+                "label": "切火炬窗口",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_torch4",
+                  "ms": 7000
+                },
+                "target_phase": "切武器处理"
+              }
+            ],
+            "fallback_transition": {
+              "type": "stay"
+            },
+            "skills": [
+              {
+                "skill_id": "fb_axe2",
+                "priority": 1,
+                "label": "主武器 2",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_axe2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              },
+              {
+                "skill_id": "fb_wp4_refresh",
+                "priority": 2,
+                "label": "武器 4 刷新",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_wp4_refresh",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_wp4_refresh"
+                  }
+                ]
+              },
+              {
+                "skill_id": "fb_wp5_refresh",
+                "priority": 3,
+                "label": "武器 5 刷新",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_wp5_refresh",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_wp5_refresh"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "火炬循环",
+            "complete_when": "none_ready",
+            "entry_actions": [
+              {
+                "type": "set_marker",
+                "marker_id": "weapon",
+                "value": "torch"
+              }
+            ],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "phase",
+              "target_phase": "主武器循环"
+            },
+            "skills": [
+              {
+                "skill_id": "fb_torch4",
+                "priority": 1,
+                "label": "火炬 4：状态条保护",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_torch4",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_torch4"
+                  }
+                ]
+              },
+              {
+                "skill_id": "fb_torch5",
+                "priority": 2,
+                "label": "火炬 5：可用则释放",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_torch5",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              }
+            ]
+          },
+          {
+            "name": "切武器处理",
+            "complete_when": "any_fired",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "phase",
+              "target_phase": "火炬循环"
+            },
+            "skills": [
+              {
+                "skill_id": "fb_weapon_swap",
+                "priority": 1,
+                "label": "切换武器组",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_weapon_swap",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "weapon",
+                    "value": "torch"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "定时刷新",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "phase",
+              "target_phase": "常规优先级"
+            },
+            "skills": [
+              {
+                "skill_id": "fb_wp5_refresh",
+                "priority": 1,
+                "label": "刷新武器 5",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_wp5_refresh",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_wp5_refresh"
+                  }
+                ]
+              },
+              {
+                "skill_id": "fb_wp4_refresh",
+                "priority": 2,
+                "label": "刷新武器 4",
+                "condition_expr": null,
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_wp4_refresh",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_wp4_refresh"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "observer_lanes": [
+          {
+            "id": "firebrand_cast_watchers",
+            "name": "Cast signal watchers",
+            "enabled": true,
+            "check_interval_ms": 50,
+            "actions": [
+              {
+                "id": "watch_ty2_visible",
+                "label": "TY2 visible",
+                "priority": 1,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "fb_ty2_assist",
+                      "tolerance": 5
+                    },
+                    {
+                      "type": "timer_elapsed_ge",
+                      "timer_id": "ty2_seen",
+                      "ms": 1000
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "ty2_seen"
+                  }
+                ]
+              },
+              {
+                "id": "watch_ty3_visible",
+                "label": "TY3 visible",
+                "priority": 2,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "fb_ty3_assist",
+                      "tolerance": 5
+                    },
+                    {
+                      "type": "timer_elapsed_ge",
+                      "timer_id": "ty3_seen",
+                      "ms": 1000
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "ty3_seen"
+                  }
+                ]
+              },
+              {
+                "id": "watch_point3_match",
+                "label": "Point3 match",
+                "priority": 3,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "fb_point3_watch",
+                      "tolerance": 20
+                    },
+                    {
+                      "type": "timer_elapsed_ge",
+                      "timer_id": "point3_seen",
+                      "ms": 1000
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "point3_seen"
+                  }
+                ]
+              },
+              {
+                "id": "watch_point4_match",
+                "label": "Point4 match",
+                "priority": 4,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "fb_point4_watch",
+                      "tolerance": 20
+                    },
+                    {
+                      "type": "timer_elapsed_ge",
+                      "timer_id": "point4_seen",
+                      "ms": 1000
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "point4_seen"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "assist_lanes": [
+          {
+            "id": "firebrand_mantra_assist",
+            "name": "咒语/补充技能辅助 Lane",
+            "enabled": true,
+            "check_interval_ms": 250,
+            "interrupt_policy": "complete_wait",
+            "skills": [
+              {
+                "skill_id": "fb_ty2_assist",
+                "priority": 1,
+                "label": "TY2：辅助补位",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_ty2_assist",
+                  "ms": 4500
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_ty2_assist",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_ty2_assist"
+                  }
+                ]
+              },
+              {
+                "skill_id": "fb_ty3_assist",
+                "priority": 2,
+                "label": "TY3：辅助补位",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_ty3_assist",
+                  "ms": 6500
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_ty3_assist",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_ty3_assist"
+                  }
+                ]
+              },
+              {
+                "skill_id": "fb_ty1_assist",
+                "priority": 3,
+                "label": "TY1：最低优先补位",
+                "condition_expr": {
+                  "type": "timer_elapsed_ge",
+                  "timer_id": "last_ty1_assist",
+                  "ms": 3500
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "fb_ty1_assist",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_ty1_assist"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "Condition Weaver - Pistol/Dagger",
+      "value": "condition_weaver_pistol_dagger",
+      "description": "Frame-confirmed Condition Weaver template: attunement pair points gate semantic skills instead of generic weapon-slot sequencing.",
+      "rotation": {
+        "name": "Condition Weaver - Pistol/Dagger frame-confirmed rotation",
+        "poll_interval_ms": 80,
+        "max_cycles": 0,
+        "state_schema": {
+          "markers": [
+            {
+              "id": "attunement",
+              "name": "Current attunement pair",
+              "initial_value": "unknown",
+              "allowed_values": [
+                "unknown",
+                "fire",
+                "earth",
+                "air",
+                "water",
+                "fire_earth",
+                "earth_fire",
+                "air_earth",
+                "fire_air",
+                "water_earth",
+                "fire_water"
+              ]
+            }
+          ],
+          "timers": [
+            {
+              "id": "last_weave_self",
+              "name": "Last Weave Self cast",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_signet_fire",
+              "name": "Last Signet of Fire cast",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_signet_earth",
+              "name": "Last Signet of Earth cast",
+              "reset_on_cycle_start": true
+            },
+            {
+              "id": "last_primordial_stance",
+              "name": "Last Primordial Stance cast",
+              "reset_on_cycle_start": true
+            }
+          ],
+          "counters": [
+            {
+              "id": "rotation_steps",
+              "name": "Rotation step counter",
+              "initial_value": 0,
+              "reset_on_phase_entry": false,
+              "reset_on_cycle_start": true
+            }
+          ]
+        },
+        "phases": [
+          {
+            "name": "Preparation - stock Earth bullet",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 2,
+                "label": "Stock Earth pistol bullet",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Earth opener",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_weave_self",
+                "priority": 2,
+                "label": "Weave Self when elite is ready",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_weave_self",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_weave_self",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_weave_self"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_signet_fire",
+                "priority": 3,
+                "label": "Signet of Fire opener",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_signet_fire",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_signet_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_signet_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 4,
+                "label": "Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dual_3",
+                "priority": 5,
+                "label": "Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Fire/Earth",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire_earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dagger_5_churning_earth",
+                "priority": 2,
+                "label": "Churning Earth",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dagger_5_churning_earth",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dagger_5_churning_earth",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_earth_dual_3",
+                "priority": 3,
+                "label": "Fire/Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Fire",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dual_3",
+                "priority": 2,
+                "label": "Fire Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_pistol_2",
+                "priority": 3,
+                "label": "Fire Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                "priority": 4,
+                "label": "Ring of Fire",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Earth/Fire",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth_fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 2,
+                "label": "Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dagger_5_fire_grab",
+                "priority": 3,
+                "label": "Fire Grab",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dagger_5_fire_grab",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dagger_5_fire_grab",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Earth repeat",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 2,
+                "label": "Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dual_3",
+                "priority": 3,
+                "label": "Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Air/Earth",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_air",
+                "priority": 1,
+                "label": "Attune/confirm air_earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_air_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_air_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "air_earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_signet_fire",
+                "priority": 2,
+                "label": "Signet of Fire priority insert",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_air_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_signet_fire",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_signet_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_signet_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 3,
+                "label": "Earth Pistol 2 while Air/Earth",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_air_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_air_earth_dual_3",
+                "priority": 4,
+                "label": "Air/Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_air_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_air_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_air_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Fire/Air",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire_air",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_air_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_air_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_air"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_pistol_2",
+                "priority": 2,
+                "label": "Fire Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_air_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_air_dual_3",
+                "priority": 3,
+                "label": "Fire/Air Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_air_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_air_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_air_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                "priority": 4,
+                "label": "Ring of Fire",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_air_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Fire repeat",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dual_3",
+                "priority": 2,
+                "label": "Fire Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Earth/Fire repeat",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth_fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 2,
+                "label": "Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_fire_dual_3",
+                "priority": 3,
+                "label": "Earth/Fire Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_fire_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_fire_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Earth final",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dual_3",
+                "priority": 2,
+                "label": "Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Water/Earth",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_water",
+                "priority": 1,
+                "label": "Attune/confirm water_earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_water_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_water_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "water_earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 2,
+                "label": "Earth Pistol 2 while Water/Earth",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_water_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_water_earth_dual_3",
+                "priority": 3,
+                "label": "Water/Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_water_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_water_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_water_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_signet_fire",
+                "priority": 4,
+                "label": "Signet of Fire late burst",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_water_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_signet_fire",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_signet_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_signet_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dagger_5_churning_earth",
+                "priority": 5,
+                "label": "Churning Earth",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_water_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dagger_5_churning_earth",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dagger_5_churning_earth",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Weave Self - Fire/Water",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire_water",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_water_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_water_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_water"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_water_dual_3",
+                "priority": 2,
+                "label": "Fire/Water Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_water_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_water_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_water_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_pistol_2",
+                "priority": 3,
+                "label": "Fire Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_water_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Loop - Fire",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dual_3",
+                "priority": 2,
+                "label": "Fire Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_pistol_2",
+                "priority": 3,
+                "label": "Fire Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Loop - Earth/Fire",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth_fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 2,
+                "label": "Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_fire_dual_3",
+                "priority": 3,
+                "label": "Earth/Fire Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_fire_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_fire_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Loop - Earth",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "next"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_earth",
+                "priority": 1,
+                "label": "Attune/confirm earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dual_3",
+                "priority": 2,
+                "label": "Earth Dual 3",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dual_3",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dual_3",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_pistol_2",
+                "priority": 3,
+                "label": "Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Loop - Fire/Earth",
+            "complete_when": "none_ready",
+            "entry_actions": [],
+            "transition_rules": [],
+            "fallback_transition": {
+              "type": "phase",
+              "target_phase": "Loop - Fire"
+            },
+            "skills": [
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 1,
+                "label": "Attune/confirm fire_earth",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_earth_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_pistol_2",
+                "priority": 2,
+                "label": "Fire/Earth Pistol 2",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_pistol_2",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_pistol_2",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_attune_fire",
+                "priority": 3,
+                "label": "Fully attune Fire",
+                "condition_expr": {
+                  "type": "not",
+                  "child": {
+                    "type": "and",
+                    "children": [
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_primary",
+                        "tolerance": 24
+                      },
+                      {
+                        "type": "pixel_point",
+                        "point_id": "attune_fire_secondary",
+                        "tolerance": 24
+                      }
+                    ]
+                  }
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "override_cast_ms": null,
+                "protected_release": true,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 900,
+                  "complete_timeout_ms": 3200,
+                  "retry_delay_ms": 100,
+                  "failure_policy": "hold_phase",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "observer_lanes": [
+          {
+            "id": "weaver_attunement_watchers",
+            "name": "Attunement frame watchers",
+            "enabled": true,
+            "check_interval_ms": 80,
+            "actions": [
+              {
+                "id": "watch_fire",
+                "label": "Observe fire",
+                "priority": 1,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire"
+                  }
+                ]
+              },
+              {
+                "id": "watch_earth",
+                "label": "Observe earth",
+                "priority": 2,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth"
+                  }
+                ]
+              },
+              {
+                "id": "watch_air",
+                "label": "Observe air",
+                "priority": 3,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_air_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_air_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "air"
+                  }
+                ]
+              },
+              {
+                "id": "watch_water",
+                "label": "Observe water",
+                "priority": 4,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_water_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_water_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "water"
+                  }
+                ]
+              },
+              {
+                "id": "watch_fire_earth",
+                "label": "Observe fire_earth",
+                "priority": 5,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_earth"
+                  }
+                ]
+              },
+              {
+                "id": "watch_earth_fire",
+                "label": "Observe earth_fire",
+                "priority": 6,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "earth_fire"
+                  }
+                ]
+              },
+              {
+                "id": "watch_air_earth",
+                "label": "Observe air_earth",
+                "priority": 7,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_air_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "air_earth"
+                  }
+                ]
+              },
+              {
+                "id": "watch_fire_air",
+                "label": "Observe fire_air",
+                "priority": 8,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_air_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_air"
+                  }
+                ]
+              },
+              {
+                "id": "watch_water_earth",
+                "label": "Observe water_earth",
+                "priority": 9,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_water_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_earth_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "water_earth"
+                  }
+                ]
+              },
+              {
+                "id": "watch_fire_water",
+                "label": "Observe fire_water",
+                "priority": 10,
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_fire_primary",
+                      "tolerance": 24
+                    },
+                    {
+                      "type": "pixel_point",
+                      "point_id": "attune_water_secondary",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "set_marker",
+                    "marker_id": "attunement",
+                    "value": "fire_water"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "assist_lanes": [
+          {
+            "id": "weaver_priority_skills",
+            "name": "Utility priority skills",
+            "enabled": true,
+            "check_interval_ms": 120,
+            "interrupt_policy": "complete_wait",
+            "skills": [
+              {
+                "skill_id": "weaver_signet_fire",
+                "priority": 1,
+                "label": "Signet of Fire when ready",
+                "condition_expr": {
+                  "type": "pixel_skill_not_black",
+                  "skill_id": "weaver_signet_fire",
+                  "tolerance": 24
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_signet_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_signet_fire"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_signet_earth",
+                "priority": 2,
+                "label": "Signet of Earth when ready",
+                "condition_expr": {
+                  "type": "pixel_skill_not_black",
+                  "skill_id": "weaver_signet_earth",
+                  "tolerance": 24
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_signet_earth",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_signet_earth"
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_primordial_stance",
+                "priority": 3,
+                "label": "Primordial Stance when ready",
+                "condition_expr": {
+                  "type": "pixel_skill_not_black",
+                  "skill_id": "weaver_primordial_stance",
+                  "tolerance": 24
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_primordial_stance",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "record_timer",
+                    "timer_id": "last_primordial_stance"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "weaver_dagger_priority",
+            "name": "Dagger priority by attunement pair",
+            "enabled": true,
+            "check_interval_ms": 120,
+            "interrupt_policy": "complete_wait",
+            "skills": [
+              {
+                "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                "priority": 1,
+                "label": "Ring of Fire in Fire",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dagger_4_ring_of_fire",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_fire_dagger_5_fire_grab",
+                "priority": 2,
+                "label": "Fire Grab in Earth/Fire",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_fire_dagger_5_fire_grab",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_fire_dagger_5_fire_grab",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dagger_4_earthquake",
+                "priority": 3,
+                "label": "Earthquake in Earth",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dagger_4_earthquake",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dagger_4_earthquake",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              },
+              {
+                "skill_id": "weaver_earth_dagger_5_churning_earth",
+                "priority": 4,
+                "label": "Churning Earth in Fire/Earth",
+                "condition_expr": {
+                  "type": "and",
+                  "children": [
+                    {
+                      "type": "and",
+                      "children": [
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_fire_primary",
+                          "tolerance": 24
+                        },
+                        {
+                          "type": "pixel_point",
+                          "point_id": "attune_earth_secondary",
+                          "tolerance": 24
+                        }
+                      ]
+                    },
+                    {
+                      "type": "pixel_skill_not_black",
+                      "skill_id": "weaver_earth_dagger_5_churning_earth",
+                      "tolerance": 24
+                    }
+                  ]
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_earth_dagger_5_churning_earth",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": [
+                  {
+                    "type": "increment_counter",
+                    "counter_id": "rotation_steps",
+                    "by": 1
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "weaver_auto_attack_fill",
+            "name": "Auto attack filler",
+            "enabled": true,
+            "check_interval_ms": 300,
+            "interrupt_policy": "idle_only",
+            "skills": [
+              {
+                "skill_id": "weaver_auto_1",
+                "priority": 1,
+                "label": "Fill gaps with auto attacks",
+                "condition_expr": {
+                  "type": "pixel_skill_not_black",
+                  "skill_id": "weaver_auto_1",
+                  "tolerance": 24
+                },
+                "start_expr": {
+                  "type": "const",
+                  "value": true
+                },
+                "complete_expr": {
+                  "type": "pixel_skill_black",
+                  "skill_id": "weaver_auto_1",
+                  "tolerance": 24
+                },
+                "override_cast_ms": null,
+                "protected_release": false,
+                "attempt_policy": {
+                  "max_attempts": 1,
+                  "start_timeout_ms": 700,
+                  "complete_timeout_ms": 2400,
+                  "retry_delay_ms": 80,
+                  "failure_policy": "next_slot",
+                  "complete_fallback": "assume_success_after_timeout"
+                },
+                "post_actions": []
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

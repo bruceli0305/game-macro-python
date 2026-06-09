@@ -1,8 +1,9 @@
-//! Profile configuration CRUD commands.
+﻿//! Profile configuration CRUD commands.
 use crate::ast::compiler::compile_expr_json;
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::models::cycle::{
-    AssistInterruptPolicy, CycleConfig, PhaseFallbackTransition, RuntimeAction, SkillSlot,
+    AssistInterruptPolicy, CycleConfig, ObserverActionSlot, PhaseFallbackTransition, RuntimeAction,
+    SkillSlot,
 };
 use crate::models::profile::Profile;
 use crate::models::skill::{PixelSpec, SampleConfig};
@@ -16,6 +17,11 @@ pub struct ProfileInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveProfileInfo {
+    pub name: String,
+}
+
 fn get_store() -> AppResult<ProfileStore> {
     let dir = app_data_dir()?;
     Ok(ProfileStore::new(dir))
@@ -26,6 +32,20 @@ pub fn profile_list() -> CommandResult<Vec<ProfileInfo>> {
     let store = get_store()?;
     let names = store.list()?;
     Ok(names.into_iter().map(|name| ProfileInfo { name }).collect())
+}
+
+#[tauri::command]
+pub fn profile_get_active() -> CommandResult<ActiveProfileInfo> {
+    let store = get_store()?;
+    Ok(ActiveProfileInfo {
+        name: store.active_profile_name()?,
+    })
+}
+
+#[tauri::command]
+pub fn profile_set_active(name: String) -> CommandResult<()> {
+    let store = get_store()?;
+    Ok(store.set_active_profile_name(&name)?)
 }
 
 #[tauri::command]
@@ -161,6 +181,13 @@ fn validate_profile_references(profile: &Profile) -> AppResult<()> {
             }
         }
         validate_assist_lanes(
+            rotation_index,
+            rotation,
+            &skill_ids,
+            &point_ids,
+            &state_refs,
+        )?;
+        validate_observer_lanes(
             rotation_index,
             rotation,
             &skill_ids,
@@ -465,6 +492,80 @@ fn validate_assist_lanes(
         }
     }
 
+    Ok(())
+}
+
+fn validate_observer_lanes(
+    rotation_index: usize,
+    rotation: &CycleConfig,
+    skill_ids: &HashSet<&str>,
+    point_ids: &HashSet<&str>,
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    let mut lane_ids = HashSet::new();
+    for (lane_index, lane) in rotation.observer_lanes.iter().enumerate() {
+        let lane_path = format!("rotations[{rotation_index}].observer_lanes[{lane_index}]");
+        let lane_id = lane.id.trim();
+        if lane_id.is_empty() {
+            return Err(AppError::Config(format!(
+                "{lane_path}.id must not be empty"
+            )));
+        }
+        if !lane_ids.insert(lane_id) {
+            return Err(AppError::Config(format!(
+                "{lane_path}.id duplicates observer lane '{lane_id}'"
+            )));
+        }
+        if lane.name.trim().is_empty() {
+            return Err(AppError::Config(format!(
+                "{lane_path}.name must not be empty"
+            )));
+        }
+        if !(10..=600_000).contains(&lane.check_interval_ms) {
+            return Err(AppError::Config(format!(
+                "{lane_path}.check_interval_ms must be between 10 and 600000"
+            )));
+        }
+        for (slot_index, slot) in lane.actions.iter().enumerate() {
+            validate_observer_action_slot(
+                &format!("{lane_path}.actions[{slot_index}]"),
+                slot,
+                skill_ids,
+                point_ids,
+                state_refs,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_observer_action_slot(
+    path: &str,
+    slot: &ObserverActionSlot,
+    skill_ids: &HashSet<&str>,
+    point_ids: &HashSet<&str>,
+    state_refs: &StateRefs,
+) -> AppResult<()> {
+    if slot.id.trim().is_empty() {
+        return Err(AppError::Config(format!("{path}.id must not be empty")));
+    }
+    if slot.label.trim().is_empty() {
+        return Err(AppError::Config(format!("{path}.label must not be empty")));
+    }
+    validate_expr_refs(
+        &slot.condition_expr,
+        &format!("{path}.condition_expr"),
+        skill_ids,
+        point_ids,
+        state_refs,
+    )?;
+    if slot.actions.is_empty() {
+        return Err(AppError::Config(format!(
+            "{path}.actions must not be empty"
+        )));
+    }
+    validate_runtime_actions(&format!("{path}.actions"), &slot.actions, state_refs)?;
     Ok(())
 }
 
@@ -816,6 +917,7 @@ mod tests {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,

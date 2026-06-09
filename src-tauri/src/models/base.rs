@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::skill::ColorRGB;
 
-/// 全局基础配置（对齐 python-legacy core/models/base.py）
+/// 全局基础配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BaseConfig {
     pub schema_version: u32,

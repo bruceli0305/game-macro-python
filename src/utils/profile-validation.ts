@@ -1,7 +1,7 @@
 import type { Profile } from "../types/profile";
 import type { Point } from "../types/point";
 import type { PixelSpec, SampleConfig } from "../types/skill";
-import type { AttemptPolicy, RuntimeAction, SkillSlot } from "../types/cycle";
+import type { AttemptPolicy, ObserverActionSlot, RuntimeAction, SkillSlot } from "../types/cycle";
 
 export interface ProfileValidationIssue {
   path: string;
@@ -308,6 +308,33 @@ function validateSkillSlotRefs(
       ctx.timerIds,
       ctx.counterIds,
       `${path}.post_actions`
+    )
+  );
+}
+
+function validateObserverActionSlot(
+  slot: ObserverActionSlot,
+  path: string,
+  ctx: Omit<ExprRefContext, "path">
+): void {
+  const slotId = stringField(slot.id);
+  if (!slotId) {
+    ctx.issues.push(issue(`${path}.id`, "观察动作 ID 不能为空"));
+  }
+  if (!stringField(slot.label)) {
+    ctx.issues.push(issue(`${path}.label`, "观察动作名称不能为空"));
+  }
+  validateExprRefs(slot.condition_expr, { ...ctx, path: `${path}.condition_expr` });
+  if ((slot.actions ?? []).length === 0) {
+    ctx.issues.push(issue(`${path}.actions`, "观察动作至少需要一个运行状态动作"));
+  }
+  ctx.issues.push(
+    ...validateRuntimeActions(
+      slot.actions,
+      ctx.markerValues,
+      ctx.timerIds,
+      ctx.counterIds,
+      `${path}.actions`
     )
   );
 }
@@ -644,6 +671,36 @@ export function validateProfileForSave(profile: Profile): ProfileValidationIssue
       };
       lane.skills.forEach((slot, slotIndex) => {
         validateSkillSlotRefs(slot, `${lanePath}.skills[${slotIndex}]`, exprCtx);
+      });
+    });
+
+    const observerLaneIds = new Set<string>();
+    (rotation.observer_lanes ?? []).forEach((lane, laneIndex) => {
+      const lanePath = `rotations[${rotationIndex}].observer_lanes[${laneIndex}]`;
+      const laneId = lane.id.trim();
+      if (!laneId) {
+        issues.push(issue(`${lanePath}.id`, "观察 lane ID 不能为空"));
+      } else if (observerLaneIds.has(laneId)) {
+        issues.push(issue(`${lanePath}.id`, `观察 lane ID 重复：${laneId}`));
+      } else {
+        observerLaneIds.add(laneId);
+      }
+      if (!lane.name.trim()) {
+        issues.push(issue(`${lanePath}.name`, "观察 lane 名称不能为空"));
+      }
+      if (!isIntegerInRange(lane.check_interval_ms, 10, 600000)) {
+        issues.push(issue(`${lanePath}.check_interval_ms`, "观察 lane 检查间隔必须在 10-600000ms 之间"));
+      }
+      const exprCtx = {
+        skillIds,
+        pointIds,
+        markerValues,
+        timerIds,
+        counterIds,
+        issues,
+      };
+      (lane.actions ?? []).forEach((slot, slotIndex) => {
+        validateObserverActionSlot(slot, `${lanePath}.actions[${slotIndex}]`, exprCtx);
       });
     });
   });

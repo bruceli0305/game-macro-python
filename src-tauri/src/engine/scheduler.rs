@@ -1,6 +1,6 @@
 //! 最小调度器
 //!
-//! 对齐 python-legacy/rotation_editor/core/runtime/scheduler.py
+//! CycleExecutor 内部调度器实现
 //!
 //! CycleExecutor 模式下的调度器非常简单:
 //! - 只有一个"当前活跃轨道"（当前 Phase 按 priority 排序后的 slot 队列）

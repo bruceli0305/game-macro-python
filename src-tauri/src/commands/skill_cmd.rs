@@ -65,7 +65,6 @@ fn find_skills_json() -> AppResult<PathBuf> {
     let candidates: Vec<PathBuf> = vec![
         PathBuf::from("assets/gw2/skills_all.json"),
         PathBuf::from("../assets/gw2/skills_all.json"),
-        PathBuf::from("../python-legacy/assets/json/gw2/skills_all.json"),
     ];
     for p in &candidates {
         if p.exists() {

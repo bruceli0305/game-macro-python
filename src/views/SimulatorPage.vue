@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, h } from "vue";
+import { computed, onMounted, onUnmounted, ref, h } from "vue";
 import { NCard, NButton, NSpace, NDataTable, NTag, NSwitch, useMessage } from "naive-ui";
 import { IconCopy, IconPlayerPlay, IconRefresh, IconTrash } from "@tabler/icons-vue";
 import ProfileIssueSummary from "../components/common/ProfileIssueSummary.vue";
 import { useCapture } from "../composables/useCapture";
 import { useEngine, type PixelOverride } from "../composables/useEngine";
 import { useHotkeys } from "../composables/useHotkeys";
-import { DEFAULT_PROFILE_NAME, useProfile } from "../composables/useProfile";
+import { useProfile } from "../composables/useProfile";
 import {
   ipcSmokeDebugJson,
   runDesktopIpcSmoke,
@@ -57,7 +57,7 @@ const {
   simulateProfileRotationWithPixels,
   simulateIpcSmokeFixture,
 } = useEngine();
-const { loadOrCreateProfile } = useProfile();
+const { loadActiveProfile } = useProfile();
 const { captureDiagnostics } = useCapture();
 const { diagnostics: hotkeyDiagnostics } = useHotkeys();
 const message = useMessage();
@@ -205,7 +205,10 @@ function buildPixelOverrides(current: Profile): PixelOverride[] {
 }
 
 async function loadSimulatorProfile() {
-  profile.value = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+  profile.value = await loadActiveProfile();
+  pointMatches.value = {};
+  skillMatches.value = {};
+  ammoMatches.value = {};
   for (const point of profile.value.points.points) {
     pointMatches.value[point.id] ??= true;
   }
@@ -221,7 +224,7 @@ async function runSim() {
   running.value = true;
   events.value = [];
   try {
-    const current = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const current = await loadActiveProfile();
     profile.value = current;
     const error = firstProfileError(validateProfileForRun(current));
     if (error) {
@@ -346,11 +349,17 @@ function clearResults() {
   maxTime.value = 0;
 }
 
+function onActiveProfileChanged() {
+  void loadSimulatorProfile();
+}
+
 onMounted(() => {
+  window.addEventListener("profile:active-changed", onActiveProfileChanged);
   loadSimulatorProfile().catch((e) => {
     console.error("加载推演配置失败:", e);
   });
 });
+onUnmounted(() => window.removeEventListener("profile:active-changed", onActiveProfileChanged));
 </script>
 
 <template>

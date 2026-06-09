@@ -1,16 +1,41 @@
 use serde::{Deserialize, Serialize};
 
-/// 阶段循环配置（对齐 python-legacy rotation_editor/core/models/cycle.py）
+/// 阶段循环配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CycleConfig {
     pub name: String,
     pub phases: Vec<CyclePhase>,
+    #[serde(default)]
+    pub observer_lanes: Vec<ObserverLaneConfig>,
     #[serde(default)]
     pub assist_lanes: Vec<AssistLaneConfig>,
     pub poll_interval_ms: u32,
     pub max_cycles: u32,
     #[serde(default)]
     pub state_schema: Option<CycleStateSchema>,
+}
+
+/// Background observer lane that evaluates conditions and applies runtime actions only.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObserverLaneConfig {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub check_interval_ms: u32,
+    #[serde(default)]
+    pub actions: Vec<ObserverActionSlot>,
+}
+
+/// Condition-only action slot used by observer lanes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObserverActionSlot {
+    pub id: String,
+    pub label: String,
+    pub priority: u32,
+    #[serde(default)]
+    pub condition_expr: Option<serde_json::Value>,
+    #[serde(default)]
+    pub actions: Vec<RuntimeAction>,
 }
 
 /// Background assist lane configuration evaluated by the cycle scheduler.

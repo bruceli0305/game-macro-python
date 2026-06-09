@@ -1,8 +1,10 @@
 //! xcap 截屏封装 + PixelSampler trait 实现 + 快照缓存 + 退避
 //!
-//! 对齐 python-legacy/core/pick/capture.py + rotation_editor/core/runtime/capture/manager.py
+//! 运行时截屏和像素采样实现
 
 use crate::ast::evaluator::PixelSampler;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use xcap::Monitor;
 
@@ -330,6 +332,155 @@ impl PixelSampler for DirectPixelSampler {
             let p = image.get_pixel(x_rel as u32, y_rel as u32);
             Some((p.0[0], p.0[1], p.0[2]))
         }
+    }
+}
+
+#[derive(Default)]
+struct TickFrameCache {
+    tick_ms: Option<u64>,
+    frames: HashMap<String, CachedFrame>,
+}
+
+struct CachedFrame {
+    image: image::RgbaImage,
+    x: i32,
+    y: i32,
+}
+
+pub struct CachedPixelSampler {
+    cache: Mutex<TickFrameCache>,
+}
+
+impl CachedPixelSampler {
+    pub fn new() -> Self {
+        Self {
+            cache: Mutex::new(TickFrameCache::default()),
+        }
+    }
+}
+
+impl Default for CachedPixelSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PixelSampler for CachedPixelSampler {
+    fn begin_tick(&self, tick_ms: u64) {
+        if let Ok(mut cache) = self.cache.lock() {
+            if cache.tick_ms != Some(tick_ms) {
+                cache.tick_ms = Some(tick_ms);
+                cache.frames.clear();
+            }
+        }
+    }
+
+    fn sample_rgb_abs(
+        &self,
+        monitor: &str,
+        x_abs: i32,
+        y_abs: i32,
+        sample_mode: &str,
+        sample_radius: u8,
+    ) -> Option<(u8, u8, u8)> {
+        let frame_key = pixel_frame_key(monitor, x_abs, y_abs)?;
+        let mut cache = self.cache.lock().ok()?;
+        if !cache.frames.contains_key(&frame_key) {
+            let frame = capture_pixel_frame(monitor, x_abs, y_abs)?;
+            cache.frames.insert(frame_key.clone(), frame);
+        }
+        let frame = cache.frames.get(&frame_key)?;
+        let x_rel = x_abs - frame.x;
+        let y_rel = y_abs - frame.y;
+        sample_image_rgb(&frame.image, x_rel, y_rel, sample_mode, sample_radius)
+    }
+}
+
+fn pixel_frame_key(monitor: &str, x_abs: i32, y_abs: i32) -> Option<String> {
+    let requested = monitor.trim();
+    if requested.is_empty() {
+        let monitors = Monitor::all().ok()?;
+        let selected = monitor_for_abs_point(&monitors, x_abs, y_abs)?;
+        Some(monitor_name(selected))
+    } else {
+        Some(requested.to_string())
+    }
+}
+
+fn capture_pixel_frame(monitor: &str, x_abs: i32, y_abs: i32) -> Option<CachedFrame> {
+    let monitors = Monitor::all().ok()?;
+    let requested = monitor.trim();
+    let selected = if requested.is_empty() {
+        monitor_for_abs_point(&monitors, x_abs, y_abs)?
+    } else if requested.eq_ignore_ascii_case("primary") {
+        monitors.iter().find(|m| monitor_is_primary(m))?
+    } else {
+        let key = requested.to_lowercase();
+        monitors
+            .iter()
+            .find(|m| monitor_name(m).to_lowercase() == key)?
+    };
+    let image = selected.capture_image().ok()?;
+    Some(CachedFrame {
+        image,
+        x: monitor_x(selected),
+        y: monitor_y(selected),
+    })
+}
+
+fn monitor_for_abs_point(monitors: &[Monitor], x_abs: i32, y_abs: i32) -> Option<&Monitor> {
+    monitors
+        .iter()
+        .find(|m| {
+            let mx = monitor_x(m);
+            let my = monitor_y(m);
+            let mw = monitor_w(m) as i32;
+            let mh = monitor_h(m) as i32;
+            x_abs >= mx && x_abs < mx + mw && y_abs >= my && y_abs < my + mh
+        })
+        .or_else(|| monitors.iter().find(|m| monitor_is_primary(m)))
+        .or_else(|| monitors.first())
+}
+
+fn sample_image_rgb(
+    image: &image::RgbaImage,
+    x_rel: i32,
+    y_rel: i32,
+    sample_mode: &str,
+    sample_radius: u8,
+) -> Option<(u8, u8, u8)> {
+    if x_rel < 0 || y_rel < 0 || x_rel >= image.width() as i32 || y_rel >= image.height() as i32 {
+        return None;
+    }
+
+    if sample_mode == "mean_square" && sample_radius > 0 {
+        let r = sample_radius as i32;
+        let mut sum_r: u64 = 0;
+        let mut sum_g: u64 = 0;
+        let mut sum_b: u64 = 0;
+        let mut count: u64 = 0;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let px = (x_rel + dx).max(0).min(image.width() as i32 - 1) as u32;
+                let py = (y_rel + dy).max(0).min(image.height() as i32 - 1) as u32;
+                let p = image.get_pixel(px, py);
+                sum_r += p.0[0] as u64;
+                sum_g += p.0[1] as u64;
+                sum_b += p.0[2] as u64;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some((
+            (sum_r / count) as u8,
+            (sum_g / count) as u8,
+            (sum_b / count) as u8,
+        ))
+    } else {
+        let p = image.get_pixel(x_rel as u32, y_rel as u32);
+        Some((p.0[0], p.0[1], p.0[2]))
     }
 }
 

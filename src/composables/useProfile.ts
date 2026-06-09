@@ -13,6 +13,10 @@ export interface ProfileInfo {
   name: string;
 }
 
+export interface ActiveProfileInfo {
+  name: string;
+}
+
 export function createDefaultProfile(name = DEFAULT_PROFILE_NAME): Profile {
   const now = new Date().toISOString();
 
@@ -78,6 +82,18 @@ export function cloneProfile(profile: Profile): Profile {
   return JSON.parse(JSON.stringify(profile)) as Profile;
 }
 
+export function profileChangedEvent(name: string): CustomEvent<{ name: string }> {
+  return new CustomEvent("profile:active-changed", { detail: { name } });
+}
+
+function hasTauriRuntime(): boolean {
+  if (typeof window === "undefined") return false;
+  const tauri = (window as Window & {
+    __TAURI_INTERNALS__?: { invoke?: unknown };
+  }).__TAURI_INTERNALS__;
+  return typeof tauri?.invoke === "function";
+}
+
 export function withProfileSkills(profile: Profile, skills: Skill[]): Profile {
   const next = cloneProfile(profile);
   next.skills = { schema_version: 2, skills };
@@ -103,13 +119,45 @@ export function useProfile() {
   const store = useProfileStore();
 
   async function listProfiles(): Promise<ProfileInfo[]> {
+    if (!hasTauriRuntime()) {
+      const names = new Set<string>([store.activeProfileName || DEFAULT_PROFILE_NAME]);
+      const profileId = store.profile?.meta?.profile_id?.trim();
+      if (profileId) names.add(profileId);
+      return [...names].map((name) => ({ name }));
+    }
     return await invoke<ProfileInfo[]>("profile_list");
   }
 
+  async function getActiveProfileName(): Promise<string> {
+    if (!hasTauriRuntime()) {
+      store.activeProfileName ||= DEFAULT_PROFILE_NAME;
+      return store.activeProfileName;
+    }
+    const active = await invoke<ActiveProfileInfo>("profile_get_active");
+    store.activeProfileName = active.name || DEFAULT_PROFILE_NAME;
+    return store.activeProfileName;
+  }
+
+  async function setActiveProfileName(name: string): Promise<void> {
+    if (hasTauriRuntime()) {
+      await invoke("profile_set_active", { name });
+    }
+    store.activeProfileName = name;
+  }
+
   async function loadProfile(name: string): Promise<Profile> {
+    if (!hasTauriRuntime()) {
+      const profile = store.profile && store.activeProfileName === name
+        ? cloneProfile(store.profile)
+        : createDefaultProfile(name);
+      store.profile = profile;
+      store.activeProfileName = name;
+      return profile;
+    }
     const content = await invoke<string>("profile_load", { name });
     const profile = JSON.parse(content) as Profile;
     store.profile = profile;
+    store.activeProfileName = name;
     return profile;
   }
 
@@ -123,11 +171,23 @@ export function useProfile() {
     }
   }
 
+  async function loadActiveProfile(): Promise<Profile> {
+    const name = await getActiveProfileName();
+    return await loadOrCreateProfile(name);
+  }
+
   async function saveProfile(name: string, profile: Profile): Promise<void> {
     const content = JSON.stringify(profile, null, 2);
-    await invoke("profile_save", { name, content });
+    if (hasTauriRuntime()) {
+      await invoke("profile_save", { name, content });
+    }
     store.profile = cloneProfile(profile);
     store.clearAllDirty();
+  }
+
+  async function saveActiveProfile(profile: Profile): Promise<void> {
+    const name = store.activeProfileName || (await getActiveProfileName());
+    await saveProfile(name, profile);
   }
 
   async function saveSkills(name: string, skills: Skill[]): Promise<Profile> {
@@ -150,9 +210,13 @@ export function useProfile() {
 
   return {
     listProfiles,
+    getActiveProfileName,
+    setActiveProfileName,
     loadProfile,
     loadOrCreateProfile,
+    loadActiveProfile,
     saveProfile,
+    saveActiveProfile,
     saveSkills,
     savePoints,
     saveRotations,

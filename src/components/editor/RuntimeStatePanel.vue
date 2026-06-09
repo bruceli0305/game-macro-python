@@ -116,12 +116,12 @@ function removeCounter(index: number) {
 
 <template>
   <section class="runtime-state-panel rounded border border-white/10 bg-white/[0.02]">
-    <div class="runtime-state-header flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-4 py-3">
+    <div class="runtime-state-header border-b border-white/10 px-4 py-3">
       <div>
         <h2 class="text-sm font-semibold text-gray-100">运行状态</h2>
         <p class="mt-0.5 text-xs text-gray-500">声明循环条件和动作可引用的标记、时间标记与计数器</p>
       </div>
-      <div class="flex flex-wrap gap-2">
+      <div class="runtime-state-actions">
         <n-button size="tiny" secondary @click="addMarker">
           <template #icon><IconPlus /></template>
           标记
@@ -137,7 +137,7 @@ function removeCounter(index: number) {
       </div>
     </div>
 
-    <div class="runtime-state-body grid gap-4 p-4 xl:grid-cols-3">
+    <div class="runtime-state-body">
       <div class="runtime-state-group min-w-0">
         <div class="mb-2 flex items-center gap-2">
           <span class="text-xs font-semibold text-gray-300">运行标记</span>
@@ -240,22 +240,51 @@ function removeCounter(index: number) {
   overflow: hidden;
 }
 
+.runtime-state-header {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.runtime-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runtime-state-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.runtime-state-group {
+  min-width: 0;
+}
+
 .runtime-state-row {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-items: center;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 2%);
+  padding: 10px;
 }
 
 .runtime-state-row-marker {
-  grid-template-columns: minmax(92px, 0.8fr) minmax(110px, 1fr) minmax(92px, 0.8fr) minmax(150px, 1.3fr) 34px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .runtime-state-row-timer {
-  grid-template-columns: minmax(100px, 1fr) minmax(120px, 1fr) minmax(130px, auto) 34px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .runtime-state-row-counter {
-  grid-template-columns: minmax(96px, 1fr) minmax(110px, 1fr) 96px minmax(110px, auto) minmax(130px, auto) 34px;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .runtime-state-empty {
@@ -273,18 +302,10 @@ function removeCounter(index: number) {
   min-width: 0;
   color: rgb(209 213 219);
   font-size: 12px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
-@media (max-width: 900px) {
-  .runtime-state-row-marker,
-  .runtime-state-row-timer,
-  .runtime-state-row-counter {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .runtime-state-row :deep(.n-button) {
-    justify-self: flex-start;
-  }
+.runtime-state-row :deep(.n-button) {
+  justify-self: flex-start;
 }
 </style>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, h, watch } from "vue";
+import { ref, reactive, onMounted, onUnmounted, h, watch } from "vue";
 import {
   NCard, NButton, NSpace, NDataTable, NTag, NModal,
   NInput, NInputNumber, NSwitch, NForm, NFormItem, NDivider,
@@ -9,7 +9,6 @@ import { IconPlus, IconEdit, IconTrash, IconDeviceFloppy, IconDownload, IconPoin
 import Gw2ImportDialog from "../components/editor/Gw2ImportDialog.vue";
 import { useCapture } from "../composables/useCapture";
 import {
-  DEFAULT_PROFILE_NAME,
   useProfile,
   withProfileSkills,
 } from "../composables/useProfile";
@@ -46,7 +45,7 @@ const pickingSkillPixel = ref(false);
 const pickingAmmoStageIndex = ref<number | null>(null);
 const lastSkillCapture = ref(0);
 const { captureAtCursor, store: pickerStore } = useCapture();
-const { loadOrCreateProfile, saveProfile } = useProfile();
+const { loadActiveProfile, saveActiveProfile } = useProfile();
 const message = useMessage();
 
 function defaultPixel(): PixelSpec {
@@ -271,7 +270,7 @@ function removeSkill(index: number) {
 // ---- 持久化 ----
 async function loadSkills() {
   try {
-    const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const profile = await loadActiveProfile();
     skills.value = profile.skills.skills;
   } catch {
     skills.value = [];
@@ -280,14 +279,14 @@ async function loadSkills() {
 
 async function persistSkills() {
   try {
-    const profile = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    const profile = await loadActiveProfile();
     const next = withProfileSkills(profile, JSON.parse(JSON.stringify(skills.value)) as Skill[]);
     const error = firstProfileError(validateProfileForSave(next));
     if (error) {
       message.error(error);
       return;
     }
-    await saveProfile(DEFAULT_PROFILE_NAME, next);
+    await saveActiveProfile(next);
     message.success("技能配置已保存");
   } catch (e) {
     console.error("保存失败:", e);
@@ -295,7 +294,15 @@ async function persistSkills() {
   }
 }
 
-onMounted(() => loadSkills());
+function onActiveProfileChanged() {
+  void loadSkills();
+}
+
+onMounted(() => {
+  window.addEventListener("profile:active-changed", onActiveProfileChanged);
+  void loadSkills();
+});
+onUnmounted(() => window.removeEventListener("profile:active-changed", onActiveProfileChanged));
 </script>
 
 <template>

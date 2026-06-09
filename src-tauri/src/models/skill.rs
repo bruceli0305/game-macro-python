@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// 单个技能配置（对齐 python-legacy core/models/skill.py）
+/// 单个技能配置
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Skill {
     pub id: String,

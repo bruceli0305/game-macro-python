@@ -1,4 +1,4 @@
-//! Engine start, stop, status, and simulation commands.
+﻿//! Engine start, stop, status, and simulation commands.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiStats, PixelSampler};
-use crate::capture::capturer::DirectPixelSampler;
+use crate::capture::capturer::{CachedPixelSampler, DirectPixelSampler};
 use crate::capture::cast_bar_roi::ScreenCastBarRoiProvider;
 use crate::engine::cycle_executor::CycleExecutor;
 use crate::engine::runtime_state::{AttemptStage, RuntimeState};
@@ -163,21 +163,21 @@ fn load_profile_config(
 ) -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
     let dir = app_data_dir()?;
     let store = ProfileStore::new(dir);
-    let profile = store.load_or_create_default("default")?;
+    let (profile_name, profile) = store.load_active_or_default()?;
 
     validate_engine_profile(&profile, require_exec_enabled)?;
     let attempt_cfg = attempt_config_from_base(&profile.base);
 
-    let config = profile
-        .rotations
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::Config("default profile has no rotations".into()))?;
+    let config =
+        profile.rotations.into_iter().next().ok_or_else(|| {
+            AppError::Config(format!("profile '{profile_name}' has no rotations"))
+        })?;
     let skills = profile.skills.skills;
     let points = profile.points.points;
 
     tracing::info!(
-        "loaded profile 'default': {} phases, {} skills",
+        "loaded profile '{}': {} phases, {} skills",
+        profile_name,
         config.phases.len(),
         skills.len()
     );
@@ -274,6 +274,7 @@ fn smoke_fixture_profile() -> Profile {
     }];
     profile.rotations = vec![CycleConfig {
         name: "IPC smoke rotation".into(),
+        observer_lanes: vec![],
         assist_lanes: vec![],
         poll_interval_ms: 10,
         max_cycles: 1,
@@ -347,11 +348,9 @@ fn validate_engine_profile(profile: &Profile, require_exec_enabled: bool) -> App
     let rotation = profile
         .rotations
         .first()
-        .ok_or_else(|| AppError::Config("default profile has no rotations".into()))?;
+        .ok_or_else(|| AppError::Config("profile has no rotations".into()))?;
     if rotation.phases.is_empty() {
-        return Err(AppError::Config(
-            "default rotation has no phases".to_string(),
-        ));
+        return Err(AppError::Config("rotation has no phases".to_string()));
     }
 
     let mut has_executable_slot = false;
@@ -386,7 +385,7 @@ fn validate_engine_profile(profile: &Profile, require_exec_enabled: bool) -> App
 
     if !has_executable_slot {
         return Err(AppError::Config(
-            "default rotation has no executable enabled skill slots".into(),
+            "rotation has no executable enabled skill slots".into(),
         ));
     }
 
@@ -616,7 +615,7 @@ async fn run_engine_loop(
     points: Vec<Point>,
     attempt_cfg: SkillAttemptConfig,
 ) {
-    let sampler = DirectPixelSampler;
+    let sampler = CachedPixelSampler::new();
     let roi_provider = attempt_cfg
         .cast_bar_roi
         .clone()
@@ -738,7 +737,7 @@ async fn run_engine_loop(
 pub fn engine_preflight(state: State<'_, AppState>) -> CommandResult<EnginePreflightReport> {
     let dir = app_data_dir()?;
     let store = ProfileStore::new(dir);
-    let profile = store.load_or_create_default("default")?;
+    let (_profile_name, profile) = store.load_active_or_default()?;
     let guard = state.engine_task.lock().map_err(engine_lock_error)?;
     let engine_running = task_is_running(guard.as_ref());
 
@@ -983,6 +982,7 @@ mod tests {
         let config = CycleConfig {
             name: "default".into(),
             phases: vec![],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,
@@ -1199,6 +1199,7 @@ mod tests {
     fn test_simulate_with_pixel_overrides_satisfies_point_condition() {
         let config = CycleConfig {
             name: "sim".into(),
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 1,
@@ -1271,6 +1272,7 @@ mod tests {
     fn test_simulate_with_pixel_overrides_reports_condition_reason() {
         let config = CycleConfig {
             name: "sim".into(),
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 10,
             max_cycles: 1,

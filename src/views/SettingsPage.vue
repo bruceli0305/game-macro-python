@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   NAlert,
   NButton,
@@ -15,13 +15,13 @@ import {
 import { IconDeviceFloppy } from "@tabler/icons-vue";
 import ProfileIssueSummary from "../components/common/ProfileIssueSummary.vue";
 import { useCapture, type CastBarRoiSample } from "../composables/useCapture";
-import { DEFAULT_PROFILE_NAME, cloneProfile, useProfile } from "../composables/useProfile";
+import { cloneProfile, useProfile } from "../composables/useProfile";
 import { firstProfileError, validateProfileForSave } from "../utils/profile-validation";
 import type { BaseConfig, CastBarRoiConfig, Profile } from "../types/profile";
 import type { ColorRGB } from "../types/skill";
 
 const message = useMessage();
-const { loadOrCreateProfile, saveProfile } = useProfile();
+const { loadActiveProfile, saveActiveProfile } = useProfile();
 const { captureAtCursor, captureCastBarRoi } = useCapture();
 const loading = ref(false);
 const saving = ref(false);
@@ -194,7 +194,7 @@ async function testCastBarRoi(updateBaseline: boolean) {
 async function loadSettings() {
   loading.value = true;
   try {
-    profile.value = await loadOrCreateProfile(DEFAULT_PROFILE_NAME);
+    profile.value = await loadActiveProfile();
     assignBase(profile.value.base);
   } catch (error) {
     console.error("load settings failed:", error);
@@ -216,7 +216,7 @@ async function persistSettings() {
       message.error(error);
       return;
     }
-    await saveProfile(DEFAULT_PROFILE_NAME, next);
+    await saveActiveProfile(next);
     profile.value = next;
     window.dispatchEvent(new CustomEvent("hotkeys:reload"));
     message.success("配置已保存");
@@ -228,7 +228,15 @@ async function persistSettings() {
   }
 }
 
-onMounted(() => loadSettings());
+function onActiveProfileChanged() {
+  void loadSettings();
+}
+
+onMounted(() => {
+  window.addEventListener("profile:active-changed", onActiveProfileChanged);
+  void loadSettings();
+});
+onUnmounted(() => window.removeEventListener("profile:active-changed", onActiveProfileChanged));
 </script>
 
 <template>

@@ -1,4 +1,4 @@
-//! Profile TOML 持久化
+﻿//! Profile TOML persistence.
 
 use crate::error::{AppError, AppResult};
 use crate::models::base::{
@@ -7,26 +7,42 @@ use crate::models::base::{
 };
 use crate::models::cycle::{CycleConfig, CyclePhase};
 use crate::models::point::PointsFile;
-use crate::models::profile::Profile;
-use crate::models::profile::ProfileMeta;
+use crate::models::profile::{Profile, ProfileMeta};
 use crate::models::skill::SkillsFile;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PROFILE_FILE_NAME: &str = "profile.toml";
+const SETTINGS_FILE_NAME: &str = "settings.toml";
+const DEFAULT_PROFILE_NAME: &str = "default";
 
-/// Profile 文件仓储 — TOML 格式
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfileStoreSettings {
+    active_profile: String,
+}
+
+impl Default for ProfileStoreSettings {
+    fn default() -> Self {
+        Self {
+            active_profile: DEFAULT_PROFILE_NAME.into(),
+        }
+    }
+}
+
+/// Stores profile TOML files under the app data directory.
 pub struct ProfileStore {
     root: PathBuf,
 }
 
 impl ProfileStore {
     pub fn new(root: PathBuf) -> Self {
-        tracing::info!("ProfileStore 根目录: {}", root.display());
+        tracing::info!("ProfileStore root: {}", root.display());
         Self { root }
     }
 
     pub fn list(&self) -> AppResult<Vec<String>> {
+        self.ensure_default_profile()?;
         let profiles_dir = self.root.join("profiles");
         if !profiles_dir.exists() {
             return Ok(vec![]);
@@ -38,15 +54,12 @@ impl ProfileStore {
                 names.push(entry.file_name().to_string_lossy().to_string());
             }
         }
+        names.sort();
         Ok(names)
     }
 
     pub fn load(&self, name: &str) -> AppResult<Profile> {
-        let path = self
-            .root
-            .join("profiles")
-            .join(name)
-            .join(PROFILE_FILE_NAME);
+        let path = self.profile_file_path(name)?;
         if !path.exists() {
             return Err(AppError::Config(format!("Profile not found: {name}")));
         }
@@ -67,16 +80,102 @@ impl ProfileStore {
     }
 
     pub fn save(&self, name: &str, profile: &Profile) -> AppResult<()> {
-        let dir = self.root.join("profiles").join(name);
+        let dir = self.profile_dir_path(name)?;
         std::fs::create_dir_all(&dir)?;
 
         let content = toml::to_string_pretty(profile)?;
         let path = dir.join(PROFILE_FILE_NAME);
         std::fs::write(&path, &content)?;
 
-        tracing::info!("Profile '{name}' 已保存");
+        tracing::info!("Profile '{name}' saved");
         Ok(())
     }
+
+    pub fn active_profile_name(&self) -> AppResult<String> {
+        Ok(self.load_settings()?.active_profile)
+    }
+
+    pub fn set_active_profile_name(&self, name: &str) -> AppResult<()> {
+        validate_profile_name(name)?;
+        let profile_path = self.profile_file_path(name)?;
+        if !profile_path.exists() {
+            return Err(AppError::Config(format!("Profile not found: {name}")));
+        }
+        self.save_settings(&ProfileStoreSettings {
+            active_profile: name.into(),
+        })
+    }
+
+    pub fn load_active_or_default(&self) -> AppResult<(String, Profile)> {
+        let name = self.active_profile_name()?;
+        let profile = self.load_or_create_default(&name)?;
+        Ok((name, profile))
+    }
+
+    fn ensure_default_profile(&self) -> AppResult<()> {
+        let path = self.profile_file_path(DEFAULT_PROFILE_NAME)?;
+        if !path.exists() {
+            self.save(DEFAULT_PROFILE_NAME, &default_profile(DEFAULT_PROFILE_NAME))?;
+        }
+        Ok(())
+    }
+
+    fn load_settings(&self) -> AppResult<ProfileStoreSettings> {
+        let path = self.settings_file_path();
+        if !path.exists() {
+            let settings = ProfileStoreSettings::default();
+            self.save_settings(&settings)?;
+            return Ok(settings);
+        }
+        let content = std::fs::read_to_string(path)?;
+        let mut settings: ProfileStoreSettings = toml::from_str(&content)?;
+        if settings.active_profile.trim().is_empty() {
+            settings.active_profile = DEFAULT_PROFILE_NAME.into();
+        }
+        validate_profile_name(&settings.active_profile)?;
+        Ok(settings)
+    }
+
+    fn save_settings(&self, settings: &ProfileStoreSettings) -> AppResult<()> {
+        std::fs::create_dir_all(&self.root)?;
+        let content = toml::to_string_pretty(settings)?;
+        std::fs::write(self.settings_file_path(), content)?;
+        Ok(())
+    }
+
+    fn settings_file_path(&self) -> PathBuf {
+        self.root.join(SETTINGS_FILE_NAME)
+    }
+
+    fn profile_dir_path(&self, name: &str) -> AppResult<PathBuf> {
+        validate_profile_name(name)?;
+        Ok(self.root.join("profiles").join(name))
+    }
+
+    fn profile_file_path(&self, name: &str) -> AppResult<PathBuf> {
+        Ok(self.profile_dir_path(name)?.join(PROFILE_FILE_NAME))
+    }
+}
+
+fn validate_profile_name(name: &str) -> AppResult<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Config("Profile name must not be empty".into()));
+    }
+    if trimmed != name {
+        return Err(AppError::Config(format!(
+            "Profile name must not contain leading or trailing whitespace: {name}"
+        )));
+    }
+    if !trimmed
+        .bytes()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-')
+    {
+        return Err(AppError::Config(format!(
+            "Profile name may only contain letters, numbers, '_' and '-': {name}"
+        )));
+    }
+    Ok(())
 }
 
 fn timestamp_string() -> String {
@@ -150,6 +249,7 @@ pub fn default_profile(name: &str) -> Profile {
                 transition_rules: vec![],
                 fallback_transition: None,
             }],
+            observer_lanes: vec![],
             assist_lanes: vec![],
             poll_interval_ms: 100,
             max_cycles: 0,
@@ -194,6 +294,7 @@ mod tests {
         store.save("p1", &Profile::default()).unwrap();
         store.save("p2", &Profile::default()).unwrap();
         let names = store.list().unwrap();
+        assert!(names.contains(&"default".to_string()));
         assert!(names.contains(&"p1".to_string()));
         assert!(names.contains(&"p2".to_string()));
     }
@@ -228,5 +329,38 @@ mod tests {
                 .join("profile.toml")
                 .exists()
         );
+    }
+
+    #[test]
+    fn test_active_profile_defaults_to_default() {
+        let tmp = TempDir::new().unwrap();
+        let store = ProfileStore::new(tmp.path().to_path_buf());
+
+        let active = store.active_profile_name().unwrap();
+
+        assert_eq!(active, "default");
+        assert!(tmp.path().join("settings.toml").exists());
+    }
+
+    #[test]
+    fn test_set_active_profile_requires_existing_profile() {
+        let tmp = TempDir::new().unwrap();
+        let store = ProfileStore::new(tmp.path().to_path_buf());
+
+        assert!(store.set_active_profile_name("missing").is_err());
+
+        store.save("role_1", &default_profile("role_1")).unwrap();
+        store.set_active_profile_name("role_1").unwrap();
+
+        assert_eq!(store.active_profile_name().unwrap(), "role_1");
+    }
+
+    #[test]
+    fn test_rejects_unsafe_profile_name() {
+        let tmp = TempDir::new().unwrap();
+        let store = ProfileStore::new(tmp.path().to_path_buf());
+
+        assert!(store.save("../bad", &Profile::default()).is_err());
+        assert!(store.load("bad/name").is_err());
     }
 }

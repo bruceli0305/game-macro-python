@@ -4,6 +4,7 @@ import type { Profile } from "../types/profile";
 
 export const useProfileStore = defineStore("profile", () => {
   const profile = ref<Profile | null>(null);
+  const activeProfileName = ref("default");
   const dirtyFlags = ref<Set<string>>(new Set());
 
   function markDirty(part: string) {
@@ -22,5 +23,5 @@ export const useProfileStore = defineStore("profile", () => {
     return dirtyFlags.value.size > 0;
   }
 
-  return { profile, dirtyFlags, markDirty, clearDirty, clearAllDirty, isDirty };
+  return { profile, activeProfileName, dirtyFlags, markDirty, clearDirty, clearAllDirty, isDirty };
 });

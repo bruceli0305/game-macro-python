@@ -1,6 +1,6 @@
 //! Skill attempt state machine.
 //!
-//! Aligned with python-legacy/rotation_editor/core/runtime/executor/skill_attempt.py.
+//! Runtime implementation for one protected skill release attempt.
 //!
 //! State transitions:
 //! ```text

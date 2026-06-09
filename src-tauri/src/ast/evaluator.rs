@@ -4,6 +4,8 @@ use crate::models::skill::Skill;
 
 // Runtime dependency traits used by the pure AST evaluator.
 pub trait PixelSampler: Send + Sync {
+    fn begin_tick(&self, _tick_ms: u64) {}
+
     fn sample_rgb_abs(
         &self,
         monitor: &str,
