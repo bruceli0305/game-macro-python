@@ -4,7 +4,7 @@
 //! reacquisition from frame, and cycle reset logic.
 
 use crate::engine::cycle_executor::{CycleExecutor, CycleLogEvent};
-use crate::engine::runtime_config::slot_cache_key;
+use crate::engine::runtime_config::SlotExprKey;
 use crate::models::cycle::{
     CyclePhase, PhaseFallbackTransition, RuntimeAction, SkillSlot, SkillSlotRole,
 };
@@ -88,21 +88,30 @@ impl<'a> CycleExecutor<'a> {
     // Phase completion detection.
     // ------------------------------------------------------------------
 
-    pub(super) fn is_phase_complete(&self, phase: &CyclePhase) -> bool {
-        let completion_slots = phase_completion_slots(phase);
+    pub(super) fn is_phase_complete(&self, phase_idx: usize, phase: &CyclePhase) -> bool {
+        let completion_slots = phase_completion_slot_indices(phase);
         match phase.complete_when.as_str() {
             "always" => true,
-            "any_fired" => completion_slots.iter().any(|slot| {
+            "any_fired" => completion_slots.iter().any(|(_, slot)| {
                 let sid = slot.skill_id.trim();
                 !sid.is_empty() && self.state.fired_in_phase.contains(sid)
             }),
-            "none_ready" => completion_slots.iter().all(|slot| {
+            "none_ready" => completion_slots.iter().all(|(slot_index, slot)| {
                 let sid = slot.skill_id.trim();
                 sid.is_empty()
                     || self.state.fired_in_phase.contains(sid)
-                    || !self.check_skill_ready(slot, self.state.next_ready_ms).0
+                    || !self
+                        .check_skill_ready_at(
+                            slot,
+                            SlotExprKey::Phase {
+                                phase_index: phase_idx,
+                                slot_index: *slot_index,
+                            },
+                            self.state.next_ready_ms,
+                        )
+                        .0
             }),
-            _ => completion_slots.iter().all(|slot| {
+            _ => completion_slots.iter().all(|(_, slot)| {
                 let skill_id = slot.skill_id.trim();
                 skill_id.is_empty() || self.slot_shots_complete_this_cycle(skill_id)
             }),
@@ -183,14 +192,17 @@ impl<'a> CycleExecutor<'a> {
 
     /// Check whether the highest-priority completion slot's `complete_expr`
     /// evaluates to true for reacquisition anchoring.
-    pub(super) fn phase_anchor_matches(&self, phase: &CyclePhase) -> bool {
-        phase_completion_slots(phase)
+    pub(super) fn phase_anchor_matches(&self, phase_idx: usize, phase: &CyclePhase) -> bool {
+        phase_completion_slot_indices(phase)
             .into_iter()
-            .filter(|slot| !slot.skill_id.trim().is_empty())
-            .min_by_key(|slot| slot.priority)
-            .and_then(|slot| {
+            .filter(|(_, slot)| !slot.skill_id.trim().is_empty())
+            .min_by_key(|(_, slot)| slot.priority)
+            .and_then(|(slot_index, _)| {
                 self.slot_expr_cache
-                    .get(&slot_cache_key(slot))
+                    .get(&SlotExprKey::Phase {
+                        phase_index: phase_idx,
+                        slot_index,
+                    })
                     .and_then(|exprs| exprs.complete_expr.as_ref())
             })
             .is_some_and(|expr| self.evaluate_expr(expr))
@@ -300,9 +312,7 @@ impl<'a> CycleExecutor<'a> {
 // Free helper functions.
 // ---------------------------------------------------------------------------
 
-/// Determine which slots decide phase completion based on the role hierarchy:
-/// mandatory > non-filler (priority) > all.
-pub(crate) fn phase_completion_slots(phase: &CyclePhase) -> Vec<&SkillSlot> {
+pub(crate) fn phase_completion_slot_indices(phase: &CyclePhase) -> Vec<(usize, &SkillSlot)> {
     let has_mandatory = phase
         .skills
         .iter()
@@ -311,7 +321,8 @@ pub(crate) fn phase_completion_slots(phase: &CyclePhase) -> Vec<&SkillSlot> {
         return phase
             .skills
             .iter()
-            .filter(|slot| slot.slot_role == SkillSlotRole::Mandatory)
+            .enumerate()
+            .filter(|(_, slot)| slot.slot_role == SkillSlotRole::Mandatory)
             .collect();
     }
 
@@ -323,11 +334,12 @@ pub(crate) fn phase_completion_slots(phase: &CyclePhase) -> Vec<&SkillSlot> {
         return phase
             .skills
             .iter()
-            .filter(|slot| slot.slot_role != SkillSlotRole::Filler)
+            .enumerate()
+            .filter(|(_, slot)| slot.slot_role != SkillSlotRole::Filler)
             .collect();
     }
 
-    phase.skills.iter().collect()
+    phase.skills.iter().enumerate().collect()
 }
 
 /// Score a phase for reacquisition: stable-loop/循环 phases get a 10 000

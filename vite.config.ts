@@ -16,4 +16,21 @@ export default defineConfig(async () => ({
       : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("naive-ui")) return "vendor-naive";
+          if (id.includes("@tabler/icons-vue")) return "vendor-icons";
+          if (id.includes("@codemirror") || id.includes("codemirror")) return "vendor-codemirror";
+          if (id.includes("vue-draggable-plus") || id.includes("sortablejs")) return "vendor-dnd";
+          if (id.includes("@tauri-apps")) return "vendor-tauri";
+          if (id.includes("vue") || id.includes("pinia")) return "vendor-vue";
+          return "vendor";
+        },
+      },
+    },
+    chunkSizeWarningLimit: 650,
+  },
 }));

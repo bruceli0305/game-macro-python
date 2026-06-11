@@ -87,17 +87,17 @@ pub struct CycleExecutor<'a> {
     // Owned by attempt_tracker / phase_manager impl blocks.
     pub(crate) pending_attempt: Option<PendingAttempt>,
     pub(crate) suspended_main_attempt: Option<PendingAttempt>,
-    pub(crate) slot_expr_cache: HashMap<usize, CompiledSlotExprs>,
-    pub(crate) observer_action_expr_cache: HashMap<usize, Option<Expr>>,
+    pub(crate) slot_expr_cache: HashMap<SlotExprKey, CompiledSlotExprs>,
+    pub(crate) observer_action_expr_cache: HashMap<ObserverActionExprKey, Option<Expr>>,
     pub(crate) transition_rule_expr_cache: Vec<Vec<Option<Expr>>>,
 }
 
 // Re-export items moved to sibling modules so `super::*` in tests still sees them.
 pub(crate) use crate::engine::phase_manager::phase_reacquire_score;
 pub(crate) use crate::engine::runtime_config::{
-    AttemptContext, CompiledSlotExprs, PendingAttempt, PendingAttemptStage,
-    build_observer_action_expr_cache, build_slot_expr_cache, build_transition_rule_expr_cache,
-    observer_action_cache_key, slot_cache_key,
+    AttemptContext, CompiledSlotExprs, ObserverActionExprKey, PendingAttempt, PendingAttemptStage,
+    SlotExprKey, build_observer_action_expr_cache, build_slot_expr_cache,
+    build_transition_rule_expr_cache,
 };
 
 impl<'a> CycleExecutor<'a> {
@@ -189,7 +189,7 @@ impl<'a> CycleExecutor<'a> {
             .phases
             .iter()
             .enumerate()
-            .filter(|(_, phase)| self.phase_anchor_matches(phase))
+            .filter(|(phase_idx, phase)| self.phase_anchor_matches(*phase_idx, phase))
             .max_by_key(|(phase_idx, phase)| phase_reacquire_score(*phase_idx, phase))
             .map(|(phase_idx, _)| phase_idx);
 
@@ -266,10 +266,10 @@ impl<'a> CycleExecutor<'a> {
 
         let phase = &phases[phase_idx];
         self.enter_phase_if_needed(phase_idx, phase, now_ms);
-        let mut sorted_slots: Vec<&SkillSlot> = phase.skills.iter().collect();
-        sorted_slots.sort_by_key(|slot| slot.priority);
+        let mut sorted_slots: Vec<(usize, &SkillSlot)> = phase.skills.iter().enumerate().collect();
+        sorted_slots.sort_by_key(|(_, slot)| slot.priority);
 
-        for slot in &sorted_slots {
+        for (slot_index, slot) in sorted_slots {
             let sid = slot.skill_id.trim();
             if sid.is_empty() {
                 continue;
@@ -293,7 +293,14 @@ impl<'a> CycleExecutor<'a> {
 
             self.runtime.mark_node_exec(sid);
 
-            let (ready, cond_reason) = self.check_skill_ready(slot, now_ms);
+            let (ready, cond_reason) = self.check_skill_ready_at(
+                slot,
+                SlotExprKey::Phase {
+                    phase_index: phase_idx,
+                    slot_index,
+                },
+                now_ms,
+            );
             if !ready {
                 self.runtime.mark_ready_false(sid);
                 self.log_event(CycleLogEvent {
@@ -316,6 +323,10 @@ impl<'a> CycleExecutor<'a> {
                 AttemptContext::Main {
                     phase_index: phase_idx,
                 },
+                SlotExprKey::Phase {
+                    phase_index: phase_idx,
+                    slot_index,
+                },
             ) {
                 self.finish_skill_attempt(
                     phase_idx,
@@ -330,7 +341,7 @@ impl<'a> CycleExecutor<'a> {
             return true;
         }
 
-        if phase.complete_when == "none_ready" && self.is_phase_complete(phase) {
+        if phase.complete_when == "none_ready" && self.is_phase_complete(phase_idx, phase) {
             self.log_event(CycleLogEvent {
                 ts_ms: now_ms,
                 phase_index: phase_idx,
@@ -350,7 +361,12 @@ impl<'a> CycleExecutor<'a> {
         self.try_assist_lanes(key_sender, stopped, now_ms, None)
     }
 
-    pub(super) fn check_skill_ready(&self, slot: &SkillSlot, now_ms: u64) -> (bool, String) {
+    pub(super) fn check_skill_ready_at(
+        &self,
+        slot: &SkillSlot,
+        key: SlotExprKey,
+        now_ms: u64,
+    ) -> (bool, String) {
         let sid = slot.skill_id.trim();
         if sid.is_empty() {
             return (false, "skill_id_empty".into());
@@ -386,7 +402,7 @@ impl<'a> CycleExecutor<'a> {
             baseline: None,
             cast_bar_roi: self.cast_bar_roi,
         };
-        let slot_exprs = self.slot_expr_cache.get(&slot_cache_key(slot));
+        let slot_exprs = self.slot_expr_cache.get(&key);
 
         if let Some(condition_expr) = slot_exprs.and_then(|exprs| exprs.condition_expr.as_ref()) {
             match evaluate(condition_expr, &ctx) {
@@ -444,11 +460,12 @@ impl<'a> CycleExecutor<'a> {
                 }
             }
 
-            let mut sorted_slots: Vec<&SkillSlot> = lane.skills.iter().collect();
-            sorted_slots.sort_by_key(|slot| slot.priority);
+            let mut sorted_slots: Vec<(usize, &SkillSlot)> =
+                lane.skills.iter().enumerate().collect();
+            sorted_slots.sort_by_key(|(_, slot)| slot.priority);
             let mut lane_checked = false;
 
-            for slot in sorted_slots {
+            for (slot_index, slot) in sorted_slots {
                 let sid = slot.skill_id.trim();
                 if sid.is_empty() {
                     continue;
@@ -456,7 +473,14 @@ impl<'a> CycleExecutor<'a> {
                 lane_checked = true;
                 self.runtime.mark_node_exec(sid);
 
-                let (ready, cond_reason) = self.check_skill_ready(slot, now_ms);
+                let (ready, cond_reason) = self.check_skill_ready_at(
+                    slot,
+                    SlotExprKey::Assist {
+                        lane_index,
+                        slot_index,
+                    },
+                    now_ms,
+                );
                 if !ready {
                     self.runtime.mark_ready_false(sid);
                     let phase_name = format!("assist:{}", lane.name);
@@ -478,9 +502,17 @@ impl<'a> CycleExecutor<'a> {
                     lane_id: lane.id.clone(),
                     lane_name: lane.name.clone(),
                 };
-                if let Some(execution) =
-                    self.begin_skill_attempt(key_sender, slot, stopped, now_ms, context.clone())
-                {
+                if let Some(execution) = self.begin_skill_attempt(
+                    key_sender,
+                    slot,
+                    stopped,
+                    now_ms,
+                    context.clone(),
+                    SlotExprKey::Assist {
+                        lane_index,
+                        slot_index,
+                    },
+                ) {
                     self.finish_assist_attempt(
                         &context,
                         &slot.post_actions,
@@ -513,12 +545,13 @@ impl<'a> CycleExecutor<'a> {
                 }
             }
 
-            let mut sorted_slots: Vec<&ObserverActionSlot> = lane.actions.iter().collect();
-            sorted_slots.sort_by_key(|slot| slot.priority);
+            let mut sorted_slots: Vec<(usize, &ObserverActionSlot)> =
+                lane.actions.iter().enumerate().collect();
+            sorted_slots.sort_by_key(|(_, slot)| slot.priority);
             let mut lane_checked = false;
             let phase_name = Self::observer_phase_name(lane);
 
-            for slot in sorted_slots {
+            for (action_index, slot) in sorted_slots {
                 let action_id = slot.id.trim();
                 if action_id.is_empty() {
                     continue;
@@ -526,7 +559,11 @@ impl<'a> CycleExecutor<'a> {
                 lane_checked = true;
                 self.runtime.mark_node_exec(action_id);
 
-                let (ready, cond_reason) = self.check_observer_action_ready(slot);
+                let (ready, cond_reason) =
+                    self.check_observer_action_ready(ObserverActionExprKey {
+                        lane_index,
+                        action_index,
+                    });
                 if !ready {
                     self.runtime.mark_ready_false(action_id);
                     self.log_event(CycleLogEvent {
@@ -566,10 +603,10 @@ impl<'a> CycleExecutor<'a> {
         }
     }
 
-    fn check_observer_action_ready(&self, slot: &ObserverActionSlot) -> (bool, String) {
+    fn check_observer_action_ready(&self, key: ObserverActionExprKey) -> (bool, String) {
         if let Some(expr) = self
             .observer_action_expr_cache
-            .get(&observer_action_cache_key(slot))
+            .get(&key)
             .and_then(|expr| expr.as_ref())
         {
             let ctx = EvalContext {
@@ -1030,23 +1067,77 @@ mod tests {
         assert_eq!(exec.transition_rule_expr_cache.len(), 1);
         let main_exprs = exec
             .slot_expr_cache
-            .get(&slot_cache_key(&config.phases[0].skills[0]))
+            .get(&SlotExprKey::Phase {
+                phase_index: 0,
+                slot_index: 0,
+            })
             .expect("main slot expressions cached");
         assert!(main_exprs.condition_expr.is_some());
         assert!(main_exprs.start_expr.is_some());
         assert!(main_exprs.complete_expr.is_some());
         let assist_exprs = exec
             .slot_expr_cache
-            .get(&slot_cache_key(&config.assist_lanes[0].skills[0]))
+            .get(&SlotExprKey::Assist {
+                lane_index: 0,
+                slot_index: 0,
+            })
             .expect("assist slot expressions cached");
         assert!(assist_exprs.condition_expr.is_some());
         let observer_expr = exec
             .observer_action_expr_cache
-            .get(&observer_action_cache_key(
-                &config.observer_lanes[0].actions[0],
-            ))
+            .get(&ObserverActionExprKey {
+                lane_index: 0,
+                action_index: 0,
+            })
             .expect("observer action expression cached");
         assert!(observer_expr.is_some());
+    }
+
+    #[test]
+    fn test_precompiled_expr_cache_keys_survive_config_clone() {
+        let mut slot = make_slot("sk1", 1);
+        slot.condition_expr = Some(json!({"type": "const", "value": false}));
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let cloned = config.clone();
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "f1")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+
+        let (ready, reason) = exec.check_skill_ready_at(
+            &cloned.phases[0].skills[0],
+            SlotExprKey::Phase {
+                phase_index: 0,
+                slot_index: 0,
+            },
+            0,
+        );
+
+        assert!(!ready);
+        assert!(reason.starts_with("condition_false:"));
     }
 
     #[test]
@@ -1720,7 +1811,14 @@ mod tests {
             fail: false,
         };
 
-        let (ready, reason) = exec.check_skill_ready(&config.phases[0].skills[0], 0);
+        let (ready, reason) = exec.check_skill_ready_at(
+            &config.phases[0].skills[0],
+            SlotExprKey::Phase {
+                phase_index: 0,
+                slot_index: 0,
+            },
+            0,
+        );
         assert!(ready);
         assert!(reason.starts_with("condition_true readiness_advisory:"));
 
@@ -1771,7 +1869,14 @@ mod tests {
             fail: false,
         };
 
-        let (ready, reason) = exec.check_skill_ready(&config.phases[0].skills[0], 0);
+        let (ready, reason) = exec.check_skill_ready_at(
+            &config.phases[0].skills[0],
+            SlotExprKey::Phase {
+                phase_index: 0,
+                slot_index: 0,
+            },
+            0,
+        );
         assert!(!ready);
         assert!(reason.starts_with("readiness_false:"));
 

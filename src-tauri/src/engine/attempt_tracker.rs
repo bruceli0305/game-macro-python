@@ -5,7 +5,7 @@
 
 use crate::engine::cycle_executor::{CycleExecutor, CycleLogEvent};
 use crate::engine::runtime_config::{
-    AttemptContext, PendingAttempt, PendingAttemptStage, slot_cache_key,
+    AttemptContext, PendingAttempt, PendingAttemptStage, SlotExprKey,
 };
 use crate::engine::skill_attempt::{
     Advance, AttemptEvent, CompletePolicy, ExecutionResult, KeySender, Outcome,
@@ -56,6 +56,7 @@ impl<'a> CycleExecutor<'a> {
         stopped: &dyn Fn() -> bool,
         now_ms: u64,
         context: AttemptContext,
+        slot_expr_key: SlotExprKey,
     ) -> Option<ExecutionResult> {
         let sid = slot.skill_id.trim().to_string();
         let attempt_cfg = self.slot_attempt_cfg(slot);
@@ -94,7 +95,7 @@ impl<'a> CycleExecutor<'a> {
             skill_id: sid.clone(),
         });
 
-        let slot_exprs = self.slot_expr_cache.get(&slot_cache_key(slot));
+        let slot_exprs = self.slot_expr_cache.get(&slot_expr_key);
         self.pending_attempt = Some(PendingAttempt {
             context,
             skill_id: sid,
@@ -451,7 +452,7 @@ impl<'a> CycleExecutor<'a> {
         // so the phase survives until no slot is ready, giving cooldowns more
         // ticks to expire and attunement‑guard slots time to resolve.
         if execution.advance == Advance::NextPhase
-            || (phase.complete_when != "none_ready" && self.is_phase_complete(phase))
+            || (phase.complete_when != "none_ready" && self.is_phase_complete(phase_idx, phase))
         {
             self.on_phase_complete(phase_idx, phase, now_ms);
             if self.state.phase_index >= self.config.phases.len() {
