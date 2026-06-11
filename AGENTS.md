@@ -94,9 +94,8 @@ src-tauri/                       <- Rust 后端（Tauri）
 │   │   └── codec.rs             <- Serde 序列化、反序列化
 │   ├── capture/                 <- 屏幕截取和像素检测
 │   │   ├── capturer.rs          <- xcap 封装
-│   │   ├── scanner.rs           <- 像素采样和 CapturePlan 执行
 │   │   ├── cast_bar_roi.rs      <- 读条区域检测
-│   │   └── plan.rs              <- CapturePlan 与探针去重
+│   │   └── mod.rs               <- Capture 模块声明
 │   ├── input/                   <- 模拟按键
 │   │   └── key_sender.rs        <- enigo 封装
 │   ├── models/                  <- 数据模型，Serde derive，不放业务逻辑
@@ -292,7 +291,7 @@ src/                             <- Vue 3 前端
 - `src-tauri/src/engine/cycle_executor.rs`：Phase/Priority 调度正确性。
 - `src-tauri/src/engine/skill_attempt.rs`：技能尝试状态机转移。
 - `src-tauri/src/engine/phase_manager.rs`：阶段切换规则。
-- `src-tauri/src/capture/plan.rs`：Plan 构建与探针去重。
+- `src-tauri/src/capture/cast_bar_roi.rs`：读条 ROI 检测和采样统计。
 - `src/utils/profile-validation.ts`、`src/utils/runtime-actions.ts` 等前端纯业务逻辑。
 
 ---
