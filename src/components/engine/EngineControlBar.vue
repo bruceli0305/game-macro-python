@@ -1,12 +1,14 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, ref } from "vue";
 import { NButton, NSpace, NTag, useMessage } from "naive-ui";
-import { IconPlayerPlay, IconPlayerStop, IconRefresh } from "@tabler/icons-vue";
+import { IconBug, IconPlayerPlay, IconPlayerStop, IconRefresh } from "@tabler/icons-vue";
 import { useEngine, type EnginePreflightReport } from "../../composables/useEngine";
 import { useEnginePreflight } from "../../composables/useEnginePreflight";
+import { useDebugRun } from "../../composables/useDebugRun";
 
 const { start, stop, preflight, store } = useEngine();
 const { validateEngineStart } = useEnginePreflight();
+const { openPanel } = useDebugRun();
 const message = useMessage();
 const backendPreflightRunning = ref(false);
 const backendPreflight = ref<EnginePreflightReport | null>(null);
@@ -102,6 +104,14 @@ async function runBackendPreflight() {
     backendPreflightRunning.value = false;
   }
 }
+
+async function openDebugPanel() {
+  try {
+    await openPanel();
+  } catch (error) {
+    message.error(String(error || "打开调试面板失败"));
+  }
+}
 </script>
 
 <template>
@@ -127,6 +137,10 @@ async function runBackendPreflight() {
     <n-button size="small" :loading="backendPreflightRunning" @click="runBackendPreflight">
       <template #icon><IconRefresh /></template>
       后端预检
+    </n-button>
+    <n-button size="small" secondary @click="openDebugPanel">
+      <template #icon><IconBug /></template>
+      调试面板
     </n-button>
 
     <n-tag v-if="store.isRunning" type="success" size="small">运行中</n-tag>

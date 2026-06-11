@@ -1,4 +1,5 @@
 pub mod cycle_executor;
+pub mod debug_runner;
 pub mod profile_config;
 pub mod runtime_state;
 pub mod scheduler;

@@ -32,6 +32,11 @@ const router = createRouter({
       name: "simulator",
       component: () => import("../views/SimulatorPage.vue"),
     },
+    {
+      path: "/debug-panel",
+      name: "debug-panel",
+      component: () => import("../views/DebugPanelPage.vue"),
+    },
   ],
 });
 

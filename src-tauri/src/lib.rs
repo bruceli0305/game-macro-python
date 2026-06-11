@@ -1,9 +1,11 @@
+use crate::debug_task::DebugTaskRegistry;
 use crate::engine_task::EngineTaskRegistry;
 use tracing_subscriber::{EnvFilter, fmt};
 
 pub mod ast;
 pub mod capture;
 mod commands;
+pub mod debug_task;
 pub mod engine;
 pub mod engine_task;
 pub mod error;
@@ -17,6 +19,8 @@ pub mod store;
 pub struct AppState {
     /// Active engine task, when the engine is running.
     pub engine_tasks: EngineTaskRegistry,
+    /// Active one-shot debug task, when the debug panel is running.
+    pub debug_tasks: DebugTaskRegistry,
 }
 
 pub fn run() {
@@ -30,6 +34,7 @@ pub fn run() {
 
     let state = AppState {
         engine_tasks: EngineTaskRegistry::new(),
+        debug_tasks: DebugTaskRegistry::new(),
     };
 
     tauri::Builder::default()
@@ -46,6 +51,9 @@ pub fn run() {
             commands::engine_cmd::simulate_profile_rotation,
             commands::engine_cmd::simulate_profile_rotation_with_pixels,
             commands::engine_cmd::simulate_ipc_smoke_fixture,
+            commands::debug_cmd::open_debug_panel_window,
+            commands::debug_cmd::debug_run_once,
+            commands::debug_cmd::debug_stop_run,
             commands::profile_cmd::profile_list,
             commands::profile_cmd::profile_get_active,
             commands::profile_cmd::profile_set_active,
