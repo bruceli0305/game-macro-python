@@ -41,7 +41,7 @@
 ## Risks
 
 - `expr_cache` 当前在 `CycleExecutor::new` 中构造，但运行时仍会在 tick 中重复编译 slot 条件表达式。
-- `CapturePlan` / `PixelScanner` 已存在，但没有真正接入引擎执行路径，多个像素条件会重复截图。
+- Legacy `CapturePlan` / `PixelScanner` modules were removed on 2026-06-11; repeated pixel sampling should be evaluated through `CachedPixelSampler`, not the old plan path.
 - `ahk/` 仍是未跟踪参考目录，需要决定是加入版本控制、移入 docs/reference，还是写入 `.gitignore`。
 - `skills_all.json` 重复占用仓库和打包体积，需要单独处理资源归属。
 
@@ -49,5 +49,5 @@
 
 1. 先提交本轮健康清理与上一轮 ROI 统计改动。
 2. 拆出 slot 级预编译运行时配置，避免 tick 内重复 `compile_expr_json`。
-3. 引入 tick 级 `FrameSampler`，让 Pixel 条件与 ROI 条件共享同一轮截图缓存。
+3. Keep ROI and pixel sampling aligned through `CachedPixelSampler` / shared sampler paths; do not reintroduce the removed `CapturePlan` scanner path.
 4. 单独处理 GW2 JSON 资源去重和 `ahk/` 目录归属。

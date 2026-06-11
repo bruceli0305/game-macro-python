@@ -40,7 +40,7 @@
 
 - `CachedPixelSampler` 对空 monitor 名称仍需先枚举 monitor 来解析 frame key；常规配置应使用已保存的 monitor 名称或 `primary`。
 - ROI 采样目前仍走独立 provider 和截图路径，尚未与 pixel sampler 共享同一帧。
-- `CapturePlan` / `PixelScanner` 仍未完全接入执行器，后续可以继续收敛旧采样模块。
+- Legacy `CapturePlan` / `PixelScanner` modules were removed on 2026-06-11; runtime sampling is explicitly through `PixelSampler` implementations.
 
 ## Next Step
 

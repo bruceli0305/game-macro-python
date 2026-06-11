@@ -32,30 +32,6 @@ fn monitor_name(m: &Monitor) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// CapturePlan
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct CaptureRegion {
-    pub monitor_name: String,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct CapturePlan {
-    pub regions: Vec<CaptureRegion>,
-}
-
-impl CapturePlan {
-    pub fn is_empty(&self) -> bool {
-        self.regions.is_empty()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Snapshot
 // ---------------------------------------------------------------------------
 
