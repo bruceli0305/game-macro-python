@@ -1,86 +1,22 @@
-use std::sync::Mutex;
-
-use tauri::async_runtime::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use crate::engine_task::EngineTaskRegistry;
 use tracing_subscriber::{EnvFilter, fmt};
 
 pub mod ast;
 pub mod capture;
 mod commands;
 pub mod engine;
+pub mod engine_task;
 pub mod error;
+pub mod gw2;
 pub mod input;
 pub mod models;
+pub mod profile;
 pub mod store;
-
-/// Runtime handle for the active engine task.
-pub struct EngineTaskHandle {
-    cancel: CancellationToken,
-    join: Option<JoinHandle<()>>,
-}
-
-impl EngineTaskHandle {
-    /// Creates a task handle for a spawned engine loop.
-    pub fn new(cancel: CancellationToken, join: JoinHandle<()>) -> Self {
-        Self {
-            cancel,
-            join: Some(join),
-        }
-    }
-
-    pub(crate) fn pending(cancel: CancellationToken) -> Self {
-        Self { cancel, join: None }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(cancel: CancellationToken) -> Self {
-        Self { cancel, join: None }
-    }
-
-    /// Requests cooperative shutdown.
-    pub fn cancel(&self) {
-        self.cancel.cancel();
-    }
-
-    /// Requests shutdown and waits for the task to exit.
-    pub async fn shutdown(mut self) {
-        self.cancel.cancel();
-
-        let Some(mut join) = self.join.take() else {
-            return;
-        };
-
-        tokio::select! {
-            result = &mut join => {
-                if let Err(error) = result {
-                    tracing::warn!(error = %error, "engine task finished with join error");
-                }
-            }
-            () = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
-                tracing::warn!("engine task did not stop within timeout; aborting");
-                join.abort();
-            }
-        }
-    }
-
-    /// Returns true when the cancellation token and join handle both look active.
-    pub fn is_running(&self) -> bool {
-        if self.cancel.is_cancelled() {
-            return false;
-        }
-
-        if let Some(join) = &self.join {
-            return !join.inner().is_finished();
-        }
-
-        true
-    }
-}
 
 /// Application-wide shared state.
 pub struct AppState {
     /// Active engine task, when the engine is running.
-    pub engine_task: Mutex<Option<EngineTaskHandle>>,
+    pub engine_tasks: EngineTaskRegistry,
 }
 
 pub fn run() {
@@ -93,7 +29,7 @@ pub fn run() {
     tracing::info!("Game Macro Tauri started");
 
     let state = AppState {
-        engine_task: Mutex::new(None),
+        engine_tasks: EngineTaskRegistry::new(),
     };
 
     tauri::Builder::default()

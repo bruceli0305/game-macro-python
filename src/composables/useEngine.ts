@@ -74,9 +74,9 @@ export function useEngine() {
       });
 
       await invoke("engine_start");
-      store.setRunning(true);
     } catch (e) {
       console.error("engine_start failed:", e);
+      cleanup();
       throw e;
     }
   }

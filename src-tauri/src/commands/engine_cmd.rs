@@ -1,20 +1,20 @@
 //! Engine start, stop, status, and simulation commands.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
+use crate::AppState;
 use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiStats, PixelSampler};
 use crate::capture::capturer::{CachedPixelSampler, DirectPixelSampler};
 use crate::capture::cast_bar_roi::ScreenCastBarRoiProvider;
-use crate::commands::profile_cmd::validate_profile_references;
 use crate::engine::cycle_executor::CycleExecutor;
 use crate::engine::runtime_state::{AttemptStage, RuntimeState};
 use crate::engine::skill_attempt::{KeySender, SkillAttemptConfig};
+use crate::engine_task::EngineTaskHandle;
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::input::EnigoKeySender;
 use crate::models::base::BaseConfig;
@@ -22,8 +22,8 @@ use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot, SkillSlotRole};
 use crate::models::point::Point;
 use crate::models::profile::Profile;
 use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig, Skill};
+use crate::profile::validation::validate_profile_references;
 use crate::store::profile_store::{ProfileStore, app_data_dir, default_profile};
-use crate::{AppState, EngineTaskHandle};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
@@ -443,50 +443,6 @@ fn preflight_report_from_profile(profile: &Profile, engine_running: bool) -> Eng
     }
 }
 
-fn engine_lock_error(error: impl std::fmt::Display) -> AppError {
-    AppError::Engine(format!("engine state lock failed: {error}"))
-}
-
-fn task_is_running(task: Option<&EngineTaskHandle>) -> bool {
-    task.is_some_and(EngineTaskHandle::is_running)
-}
-
-fn ensure_engine_stopped(engine_task: &Mutex<Option<EngineTaskHandle>>) -> AppResult<()> {
-    let guard = engine_task.lock().map_err(engine_lock_error)?;
-    if task_is_running(guard.as_ref()) {
-        return Err(AppError::Engine("engine already running".into()));
-    }
-    Ok(())
-}
-
-fn reserve_engine_task(
-    engine_task: &Mutex<Option<EngineTaskHandle>>,
-    task: EngineTaskHandle,
-) -> AppResult<()> {
-    let mut guard = engine_task.lock().map_err(engine_lock_error)?;
-    if task_is_running(guard.as_ref()) {
-        return Err(AppError::Engine("engine already running".into()));
-    }
-    *guard = Some(task);
-    Ok(())
-}
-
-fn take_engine_task(
-    engine_task: &Mutex<Option<EngineTaskHandle>>,
-) -> AppResult<Option<EngineTaskHandle>> {
-    let mut guard = engine_task.lock().map_err(engine_lock_error)?;
-    Ok(guard.take())
-}
-
-fn replace_engine_task(
-    engine_task: &Mutex<Option<EngineTaskHandle>>,
-    task: EngineTaskHandle,
-) -> AppResult<()> {
-    let mut guard = engine_task.lock().map_err(engine_lock_error)?;
-    *guard = Some(task);
-    Ok(())
-}
-
 fn stage_label(stage: AttemptStage) -> &'static str {
     match stage {
         AttemptStage::Idle => "IDLE",
@@ -732,42 +688,41 @@ pub fn engine_preflight(state: State<'_, AppState>) -> CommandResult<EnginePrefl
     let dir = app_data_dir()?;
     let store = ProfileStore::new(dir);
     let (_profile_name, profile) = store.load_active_or_default()?;
-    let guard = state.engine_task.lock().map_err(engine_lock_error)?;
-    let engine_running = task_is_running(guard.as_ref());
+    let engine_running = state.engine_tasks.is_running()?;
 
     Ok(preflight_report_from_profile(&profile, engine_running))
 }
 
 #[tauri::command]
 pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult<String> {
-    ensure_engine_stopped(&state.engine_task)?;
-
-    let cancel = CancellationToken::new();
-    reserve_engine_task(
-        &state.engine_task,
-        EngineTaskHandle::pending(cancel.clone()),
-    )?;
+    let reservation = state.engine_tasks.reserve()?;
 
     let (config, skills, points, attempt_cfg) = match load_profile_config(true) {
         Ok(config) => config,
         Err(error) => {
-            if let Some(task) = take_engine_task(&state.engine_task)? {
-                task.cancel();
-            }
+            state.engine_tasks.cancel_reservation(&reservation)?;
             return Err(error.into());
         }
     };
 
-    if cancel.is_cancelled() {
+    if reservation.is_cancelled() {
         return Ok("stopped".into());
     }
 
-    let task_cancel = cancel.clone();
+    let task_cancel = reservation.cancel_token();
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
     let join = tauri::async_runtime::spawn(async move {
+        if start_rx.await.is_err() || task_cancel.is_cancelled() {
+            return;
+        }
         run_engine_loop(app, task_cancel, config, skills, points, attempt_cfg).await;
     });
-    let task = EngineTaskHandle::new(cancel, join);
-    replace_engine_task(&state.engine_task, task)?;
+    let task = EngineTaskHandle::new(reservation.id(), reservation.cancel_token(), join);
+    if !state.engine_tasks.install(&reservation, task)? {
+        tracing::info!("engine start cancelled before task install");
+        return Ok("stopped".into());
+    }
+    let _ = start_tx.send(());
 
     tracing::info!("engine started");
     Ok("started".into())
@@ -775,7 +730,7 @@ pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult
 
 #[tauri::command]
 pub async fn engine_stop(state: State<'_, AppState>) -> CommandResult<String> {
-    let task = take_engine_task(&state.engine_task)?;
+    let task = state.engine_tasks.take()?;
 
     if let Some(task) = task {
         task.cancel();
@@ -931,9 +886,8 @@ fn simulate_rotation_with_sampler(
 
 #[tauri::command]
 pub fn engine_status(state: State<'_, AppState>) -> CommandResult<EngineStatus> {
-    let guard = state.engine_task.lock().map_err(engine_lock_error)?;
     Ok(EngineStatus {
-        running: task_is_running(guard.as_ref()),
+        running: state.engine_tasks.is_running()?,
     })
 }
 
@@ -944,34 +898,6 @@ mod tests {
     use crate::models::point::Point;
     use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig};
     use crate::store::profile_store::default_profile;
-
-    #[test]
-    fn test_running_token_blocks_reserve() {
-        let state = Mutex::new(Some(EngineTaskHandle::for_test(CancellationToken::new())));
-
-        assert!(matches!(
-            ensure_engine_stopped(&state),
-            Err(AppError::Engine(_))
-        ));
-        assert!(matches!(
-            reserve_engine_task(&state, EngineTaskHandle::for_test(CancellationToken::new())),
-            Err(AppError::Engine(_))
-        ));
-    }
-
-    #[test]
-    fn test_cancelled_token_can_be_replaced() {
-        let old = CancellationToken::new();
-        old.cancel();
-        let state = Mutex::new(Some(EngineTaskHandle::for_test(old)));
-
-        assert!(ensure_engine_stopped(&state).is_ok());
-        let new = CancellationToken::new();
-        reserve_engine_task(&state, EngineTaskHandle::for_test(new)).unwrap();
-
-        let guard = state.lock().unwrap();
-        assert!(task_is_running(guard.as_ref()));
-    }
 
     #[test]
     fn test_runtime_payload_maps_skill_metrics() {
