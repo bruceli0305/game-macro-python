@@ -81,7 +81,7 @@ const base = reactive<BaseConfig>({
     mouse_avoid_offset_y: 80,
     mouse_avoid_settle_ms: 80,
   },
-  io: { auto_save: true, backup_on_save: false },
+  io: { backup_on_save: false },
   cast_bar: {
     mode: "timer",
     point_id: "",
@@ -197,7 +197,6 @@ async function loadSettings() {
     profile.value = await loadActiveProfile();
     assignBase(profile.value.base);
   } catch (error) {
-    console.error("load settings failed:", error);
     message.error("加载配置失败");
   } finally {
     loading.value = false;
@@ -221,7 +220,6 @@ async function persistSettings() {
     window.dispatchEvent(new CustomEvent("hotkeys:reload"));
     message.success("配置已保存");
   } catch (error) {
-    console.error("save settings failed:", error);
     message.error("保存配置失败");
   } finally {
     saving.value = false;

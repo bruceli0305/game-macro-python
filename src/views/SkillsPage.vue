@@ -93,7 +93,6 @@ async function captureSkillPixel() {
     pickerStore.recordCaptureSuccess("skills.skill", `${result.monitor} (${result.x},${result.y}) ${result.hex}`);
     message.success("已更新技能像素点");
   } catch (e) {
-    console.error("取色失败:", e);
     pickerStore.recordCaptureFailure("skills.skill", String(e || "capture failed"));
     message.error("取色失败，请确认屏幕捕获权限和鼠标位置");
   }
@@ -128,7 +127,6 @@ async function captureAmmoStagePixel(index: number) {
     pickerStore.recordCaptureSuccess(context, `${result.monitor} (${result.x},${result.y}) ${result.hex}`);
     message.success(`已更新弹药阶段 ${stage.charges_left} 的像素点`);
   } catch (e) {
-    console.error("取色失败:", e);
     pickerStore.recordCaptureFailure(context, String(e || "capture failed"));
     message.error("取色失败，请确认屏幕捕获权限和鼠标位置");
   }
@@ -272,8 +270,9 @@ async function loadSkills() {
   try {
     const profile = await loadActiveProfile();
     skills.value = profile.skills.skills;
-  } catch {
+  } catch (e) {
     skills.value = [];
+    message.error(String(e || "加载技能配置失败"));
   }
 }
 
@@ -289,7 +288,6 @@ async function persistSkills() {
     await saveActiveProfile(next);
     message.success("技能配置已保存");
   } catch (e) {
-    console.error("保存失败:", e);
     message.error("保存技能失败");
   }
 }
@@ -366,7 +364,7 @@ onUnmounted(() => window.removeEventListener("profile:active-changed", onActiveP
             <n-input-number v-model:value="form.cooldown_ms" :min="0" :max="600000" />
           </n-form-item>
           <n-form-item label="每轮次数">
-            <n-input-number v-model:value="form.shots_per_cycle" :min="1" :max="99" />
+            <n-input-number v-model:value="form.shots_per_cycle" :min="0" :max="99" />
           </n-form-item>
 
           <n-divider>像素检测</n-divider>

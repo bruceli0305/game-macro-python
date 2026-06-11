@@ -3,18 +3,31 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEngineStore } from "../stores/engine";
+import { notifyApp } from "../utils/app-message";
 import type { EngineRuntimeSnapshot, SkillAttemptStage } from "../types/engine";
 import type { Profile } from "../types/profile";
 
+let unlistenTick: UnlistenFn | null = null;
+let unlistenRuntime: UnlistenFn | null = null;
+let unlistenLog: UnlistenFn | null = null;
+let unlistenStarted: UnlistenFn | null = null;
+let unlistenStopped: UnlistenFn | null = null;
+
+function cleanupEngineListeners() {
+  unlistenTick?.();
+  unlistenTick = null;
+  unlistenRuntime?.();
+  unlistenRuntime = null;
+  unlistenLog?.();
+  unlistenLog = null;
+  unlistenStarted?.();
+  unlistenStarted = null;
+  unlistenStopped?.();
+  unlistenStopped = null;
+}
 
 export function useEngine() {
   const store = useEngineStore();
-
-  let unlistenTick: UnlistenFn | null = null;
-  let unlistenRuntime: UnlistenFn | null = null;
-  let unlistenLog: UnlistenFn | null = null;
-  let unlistenStarted: UnlistenFn | null = null;
-  let unlistenStopped: UnlistenFn | null = null;
 
   async function start(): Promise<void> {
     try {
@@ -62,9 +75,8 @@ export function useEngine() {
       });
 
       await invoke("engine_start");
-      store.setRunning(true);
     } catch (e) {
-      console.error("engine_start failed:", e);
+      cleanup();
       throw e;
     }
   }
@@ -73,7 +85,7 @@ export function useEngine() {
     try {
       await invoke("engine_stop");
     } catch (e) {
-      console.error("engine_stop failed:", e);
+      notifyApp("error", String(e || "engine_stop failed"));
     }
   }
 
@@ -118,16 +130,7 @@ export function useEngine() {
 
   /** 取消事件监听 */
   function cleanup() {
-    unlistenTick?.();
-    unlistenTick = null;
-    unlistenRuntime?.();
-    unlistenRuntime = null;
-    unlistenLog?.();
-    unlistenLog = null;
-    unlistenStarted?.();
-    unlistenStarted = null;
-    unlistenStopped?.();
-    unlistenStopped = null;
+    cleanupEngineListeners();
   }
 
   return {

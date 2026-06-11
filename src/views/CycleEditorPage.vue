@@ -12,7 +12,7 @@ import {
 import { IconPlus, IconDeviceFloppy } from "@tabler/icons-vue";
 import AssistLanePanel from "../components/editor/AssistLanePanel.vue";
 import ObserverLanePanel from "../components/editor/ObserverLanePanel.vue";
-import PhaseLane from "../components/editor/PhaseLane.vue";
+import PhaseWorkspace from "../components/editor/PhaseWorkspace.vue";
 import RuntimeStatePanel from "../components/editor/RuntimeStatePanel.vue";
 import SkillEditModal from "../components/editor/SkillEditModal.vue";
 import ProfileIssueSummary from "../components/common/ProfileIssueSummary.vue";
@@ -29,10 +29,14 @@ import {
 import type {
   AssistLaneConfig,
   CycleConfig,
+  PhaseFallbackTransition,
+  RuntimeAction,
   CycleStateSchema,
   ObserverLaneConfig,
   SkillSlot,
+  SkillSlotRole,
 } from "../types/cycle";
+import type { Expr } from "../types/ast";
 import type { Point } from "../types/point";
 import type { Profile } from "../types/profile";
 import type { Skill } from "../types/skill";
@@ -53,7 +57,7 @@ const defaultConfig: CycleConfig = {
   phases: [{
     name: "",
     skills: [],
-    complete_when: "any_fired",
+    complete_when: "none_ready",
     entry_actions: [],
     transition_rules: [],
     fallback_transition: { type: "next" },
@@ -73,6 +77,8 @@ const pointList = ref<{ id: string; name: string }[]>([]);
 const collapsedPhases = ref<Set<number>>(new Set());
 const loadedProfile = ref<Profile | null>(null);
 const showSideDrawer = ref(false);
+const workspace = ref<"phases" | "observer" | "assist">("phases");
+const selectedPhaseIndex = ref(0);
 const markerList = computed(() =>
   (config.state_schema?.markers ?? []).map((marker) => ({
     id: marker.id,
@@ -102,7 +108,10 @@ const editingSlot = reactive<SkillSlot>({
   skill_id: "",
   priority: 1,
   label: "",
+  slot_role: "mandatory",
   condition_expr: null,
+  readiness_expr: null,
+  readiness_policy: "required",
   start_expr: null,
   complete_expr: null,
   override_cast_ms: null,
@@ -137,6 +146,186 @@ const engineStartIssues = computed(() => {
   );
   return validateProfileForEngineStart(next);
 });
+const completeLabels: Record<string, string> = {
+  all_fired: "全部释放",
+  any_fired: "任一释放",
+  none_ready: "都未就绪",
+  always: "立即进入",
+};
+const completeWhenOptions = [
+  { label: "都未就绪（推荐）", value: "none_ready" },
+  { label: "全部释放", value: "all_fired" },
+  { label: "任一释放", value: "any_fired" },
+  { label: "立即进入", value: "always" },
+];
+const roleLabels: Record<SkillSlotRole, string> = {
+  mandatory: "必放",
+  priority: "优先",
+  filler: "填充",
+};
+
+function phaseRoleCounts(phase: CycleConfig["phases"][number]) {
+  return phase.skills.reduce(
+    (counts, slot) => {
+      const role = slot.slot_role ?? "mandatory";
+      counts[role] += 1;
+      return counts;
+    },
+    { mandatory: 0, priority: 0, filler: 0 } as Record<SkillSlotRole, number>,
+  );
+}
+
+function phaseDisplayName(phase: CycleConfig["phases"][number], index: number): string {
+  return phase.name.trim() || `阶段 ${index + 1}`;
+}
+
+function completeLabel(value: string): string {
+  return completeLabels[value] ?? value;
+}
+function setCompleteWhen(value: string) {
+  const phase = config.phases[selectedPhaseIndex.value];
+  if (phase) {
+    phase.complete_when = value as CycleConfig["phases"][number]["complete_when"];
+  }
+}
+
+function skillDisplayName(skillId: string): string {
+  return skillNames.value[skillId] || skillId || "未选择技能";
+}
+
+function pointDisplayName(pointId: string): string {
+  return pointList.value.find((point) => point.id === pointId)?.name || pointId || "未选择点位";
+}
+
+function markerDisplayName(markerId: string): string {
+  return markerList.value.find((marker) => marker.id === markerId)?.name || markerId || "未选择标记";
+}
+
+function timerDisplayName(timerId: string): string {
+  return timerList.value.find((timer) => timer.id === timerId)?.name || timerId || "未选择时间";
+}
+
+function counterDisplayName(counterId: string): string {
+  return counterList.value.find((counter) => counter.id === counterId)?.name || counterId || "未选择计数器";
+}
+
+function exprSummary(value: Record<string, unknown> | null | undefined): string {
+  if (!value) return "无条件";
+  const exprValue = value as Expr;
+  return summarizeExpr(exprValue);
+}
+
+function summarizeExpr(value: Expr): string {
+  switch (value.type) {
+    case "and":
+      return value.children.length > 0
+        ? value.children.map(summarizeExpr).join(" 且 ")
+        : "AND 未配置子条件";
+    case "or":
+      return value.children.length > 0
+        ? value.children.map(summarizeExpr).join(" 或 ")
+        : "OR 未配置子条件";
+    case "not":
+      return `非（${summarizeExpr(value.child)}）`;
+    case "const":
+      return value.value ? "始终满足" : "永不满足";
+    case "pixel_point":
+      return `${pointDisplayName(value.point_id)} 颜色匹配，容差 ${value.tolerance}`;
+    case "pixel_point_not_match":
+      return `${pointDisplayName(value.point_id)} 颜色不匹配，容差 ${value.tolerance}`;
+    case "pixel_point_black":
+      return `${pointDisplayName(value.point_id)} 变黑，阈值 ${value.tolerance}`;
+    case "pixel_point_not_black":
+      return `${pointDisplayName(value.point_id)} 非黑，阈值 ${value.tolerance}`;
+    case "pixel_point_nearest":
+      return `${pointDisplayName(value.expected_point_id)} 是候选中最近颜色，最大差值 ${value.max_delta}，最小间隔 ${value.min_margin}`;
+    case "pixel_skill":
+      return `${skillDisplayName(value.skill_id)} 图标匹配，容差 ${value.tolerance}`;
+    case "pixel_skill_not_match":
+      return `${skillDisplayName(value.skill_id)} 图标不匹配，容差 ${value.tolerance}`;
+    case "pixel_skill_black":
+      return `${skillDisplayName(value.skill_id)} 图标变黑，阈值 ${value.tolerance}`;
+    case "pixel_skill_not_black":
+      return `${skillDisplayName(value.skill_id)} 图标非黑，阈值 ${value.tolerance}`;
+    case "cast_bar_changed":
+      return `${pointDisplayName(value.point_id)} 状态条变化，容差 ${value.tolerance}`;
+    case "cast_bar_roi_changed":
+      return "施法条 ROI 发生变化";
+    case "cast_bar_roi_border_visible":
+      return "施法条 ROI 边框出现";
+    case "cast_bar_roi_gone":
+      return "施法条 ROI 消失";
+    case "skill_metric_ge":
+      return `${skillDisplayName(value.skill_id)} 的 ${value.metric} >= ${value.count}`;
+    case "marker_eq":
+      return `${markerDisplayName(value.marker_id)} = ${value.value}`;
+    case "marker_ne":
+      return `${markerDisplayName(value.marker_id)} != ${value.value}`;
+    case "timer_elapsed_ge":
+      return `${timerDisplayName(value.timer_id)} 已超过 ${value.ms}ms`;
+    case "timer_elapsed_lt":
+      return `${timerDisplayName(value.timer_id)} 未超过 ${value.ms}ms`;
+    case "counter_ge":
+      return `${counterDisplayName(value.counter_id)} >= ${value.value}`;
+    case "counter_eq":
+      return `${counterDisplayName(value.counter_id)} = ${value.value}`;
+    case "counter_gt":
+      return `${counterDisplayName(value.counter_id)} > ${value.value}`;
+  }
+}
+
+function runtimeActionSummary(action: RuntimeAction): string {
+  switch (action.type) {
+    case "set_marker":
+      return `设置 ${markerDisplayName(action.marker_id)} = ${action.value}`;
+    case "clear_marker":
+      return `清除 ${markerDisplayName(action.marker_id)}`;
+    case "record_timer":
+      return `记录 ${timerDisplayName(action.timer_id)}`;
+    case "reset_timer":
+      return `重置 ${timerDisplayName(action.timer_id)}`;
+    case "increment_counter":
+      return `${counterDisplayName(action.counter_id)} + ${action.by}`;
+    case "set_counter":
+      return `设置 ${counterDisplayName(action.counter_id)} = ${action.value}`;
+    case "reset_counter":
+      return `重置 ${counterDisplayName(action.counter_id)}`;
+  }
+}
+
+function fallbackSummary(fallback: PhaseFallbackTransition | null | undefined): string {
+  if (!fallback || fallback.type === "next") return "未命中跳转规则时进入下一阶段";
+  if (fallback.type === "stay") return "未命中跳转规则时停留当前阶段";
+  return `未命中跳转规则时跳转到 ${fallback.target_phase}`;
+}
+
+function slotTriggerKey(slot: SkillSlot): string {
+  return skillMeta.value[slot.skill_id]?.triggerKey || "-";
+}
+
+function slotAttemptSummary(slot: SkillSlot): string {
+  const policy = slot.attempt_policy;
+  if (!policy) return "使用全局确认策略";
+  const completeWindow =
+    policy.complete_timeout_ms > 0 ? `${policy.complete_timeout_ms}ms` : "按技能读条/全局配置";
+  return `最多 ${policy.max_attempts} 次；施法确认窗口 ${policy.start_timeout_ms}ms；完成确认窗口 ${completeWindow}`;
+}
+
+function clampSelectedPhase() {
+  if (config.phases.length === 0) {
+    selectedPhaseIndex.value = 0;
+    return;
+  }
+  selectedPhaseIndex.value = Math.min(
+    Math.max(selectedPhaseIndex.value, 0),
+    config.phases.length - 1,
+  );
+}
+
+function selectPhase(index: number) {
+  selectedPhaseIndex.value = index;
+  workspace.value = "phases";
+}
 
 async function loadEditorProfile() {
   try {
@@ -164,6 +353,7 @@ async function loadEditorProfile() {
     );
     savedPoints.value = p?.points?.points || [];
     pointList.value = savedPoints.value.map((p) => ({ id: p.id, name: p.name || p.id }));
+    clampSelectedPhase();
   } catch { /* 棣栨 */ }
 }
 
@@ -181,19 +371,27 @@ function addPhase() {
   config.phases.push({
     name: "",
     skills: [],
-    complete_when: "any_fired",
+    complete_when: "none_ready",
     entry_actions: [],
     transition_rules: [],
     fallback_transition: { type: "next" },
   });
+  selectedPhaseIndex.value = config.phases.length - 1;
+  workspace.value = "phases";
 }
-function removePhase(i: number) { config.phases.splice(i, 1); }
-function addSlot(pi: number) {
+function removePhase(i: number) {
+  config.phases.splice(i, 1);
+  clampSelectedPhase();
+}
+function addSlot(pi: number, slotRole: SkillSlotRole = "mandatory") {
   config.phases[pi].skills.push({
     skill_id: "",
     priority: config.phases[pi].skills.length + 1,
     label: "",
+    slot_role: slotRole,
     condition_expr: null,
+    readiness_expr: null,
+    readiness_policy: "required",
     start_expr: null,
     complete_expr: null,
     override_cast_ms: null,
@@ -204,12 +402,15 @@ function addSlot(pi: number) {
 }
 function removeSlot(pi: number, si: number) { config.phases[pi].skills.splice(si, 1); }
 
-function createEmptySlot(priority: number): SkillSlot {
+function createEmptySlot(priority: number, slotRole: SkillSlotRole = "mandatory"): SkillSlot {
   return {
     skill_id: "",
     priority,
     label: "",
+    slot_role: slotRole,
     condition_expr: null,
+    readiness_expr: null,
+    readiness_policy: "required",
     start_expr: null,
     complete_expr: null,
     override_cast_ms: null,
@@ -222,7 +423,7 @@ function createEmptySlot(priority: number): SkillSlot {
 function addAssistSlot(laneIndex: number) {
   const lane = config.assist_lanes?.[laneIndex];
   if (!lane) return;
-  lane.skills.push(createEmptySlot(lane.skills.length + 1));
+  lane.skills.push(createEmptySlot(lane.skills.length + 1, "priority"));
 }
 
 function removeAssistSlot(laneIndex: number, slotIndex: number) {
@@ -290,7 +491,6 @@ async function saveProfile() {
     loadedProfile.value = next;
     message.success("循环配置已保存");
   } catch (e) {
-    console.error(e);
     message.error("保存失败，请检查技能和点位引用");
   }
 }
@@ -329,72 +529,106 @@ async function saveProfile() {
       </div>
     </header>
 
-    <div class="cycle-editor-grid grid min-h-0 flex-1 grid-cols-1 gap-4">
-      <div class="cycle-main-column min-w-0 min-h-0">
-        <section class="cycle-editor-panel flex min-w-0 min-h-0 flex-col overflow-hidden rounded border border-white/10 bg-white/[0.02]">
-          <div class="cycle-panel-header flex flex-none items-center justify-between border-b border-white/10 px-4 py-3">
-            <div>
-              <h2 class="text-sm font-semibold text-gray-100">阶段编排</h2>
-              <p class="mt-0.5 text-xs text-gray-500">按优先级从左到右编辑每个阶段的技能槽</p>
-            </div>
-          </div>
+    <nav class="cycle-workspace-tabs" aria-label="循环编辑工作区">
+      <button
+        class="cycle-workspace-tab"
+        :class="{ active: workspace === 'phases' }"
+        type="button"
+        @click="workspace = 'phases'"
+      >
+        <span>主循环</span>
+        <small>{{ phaseCount }} 阶段</small>
+      </button>
+      <button
+        class="cycle-workspace-tab"
+        :class="{ active: workspace === 'observer' }"
+        type="button"
+        @click="workspace = 'observer'"
+      >
+        <span>状态识别</span>
+        <small>{{ observerLaneCount }} Lane</small>
+      </button>
+      <button
+        class="cycle-workspace-tab"
+        :class="{ active: workspace === 'assist' }"
+        type="button"
+        @click="workspace = 'assist'"
+      >
+        <span>后台动作</span>
+        <small>{{ assistLaneCount }} Lane</small>
+      </button>
+    </nav>
 
-          <!-- Phase 泳道列表 -->
-          <div class="cycle-phase-scroll min-h-0 flex-1 overflow-auto p-4">
-            <div class="space-y-3">
-              <template v-for="(phase, pi) in config.phases" :key="pi">
-                <PhaseLane
-                  :phase="phase"
-                  :phase-index="pi"
-                  :skill-names="skillNames"
-                  :skill-meta="skillMeta"
-                  :skill-options="skillList"
-                  :point-options="pointList"
-                  :marker-options="markerList"
-                  :timer-options="timerList"
-                  :counter-options="counterList"
-                  :phase-options="phaseOptions"
-                  :collapsed="collapsedPhases.has(pi)"
-                  :style="engineStore.isRunning && engineStore.currentPhase === pi
-                    ? 'border-color: #18a058; box-shadow: 0 0 8px rgba(24,160,88,0.3)'
-                    : ''"
-                  @update:phase="(p: any) => config.phases[pi] = p"
-                  @remove="removePhase(pi)"
-                  @add-slot="addSlot(pi)"
-                  @edit-slot="(si: number) => openEdit(pi, si)"
-                  @remove-slot="(si: number) => removeSlot(pi, si)"
-                  @toggle-collapse="toggleCollapse(pi)"
-                />
-                <!-- Phase 间箭头 -->
-                <div v-if="pi < config.phases.length - 1" class="flex justify-center">
-                  <span class="text-gray-600 text-lg leading-none">→</span>
-                </div>
-              </template>
-            </div>
-          </div>
-        </section>
-
-        <ObserverLanePanel
-          :lanes="config.observer_lanes ?? []"
-          :skill-options="skillList"
-          :point-options="pointList"
-          :marker-options="markerList"
-          :timer-options="timerList"
-          :counter-options="counterList"
-          @update:lanes="updateObserverLanes"
-        />
-
-        <AssistLanePanel
-          :lanes="config.assist_lanes ?? []"
-          :skill-names="skillNames"
-          :skill-meta="skillMeta"
-          @update:lanes="updateAssistLanes"
-          @add-slot="addAssistSlot"
-          @edit-slot="openAssistEdit"
-          @remove-slot="removeAssistSlot"
-        />
+    <PhaseWorkspace
+      v-if="workspace === 'phases'"
+      :config="config"
+      :selected-phase-index="selectedPhaseIndex"
+      :engine-running="engineStore.isRunning"
+      :current-phase="engineStore.currentPhase"
+      :skill-names="skillNames"
+      :skill-meta="skillMeta"
+      :skill-options="skillList"
+      :point-options="pointList"
+      :marker-options="markerList"
+      :timer-options="timerList"
+      :counter-options="counterList"
+      :phase-options="phaseOptions"
+      :complete-when-options="completeWhenOptions"
+      :role-labels="roleLabels"
+      :phase-display-name="phaseDisplayName"
+      :complete-label="completeLabel"
+      :phase-role-counts="phaseRoleCounts"
+      :skill-display-name="skillDisplayName"
+      :expr-summary="exprSummary"
+      :runtime-action-summary="runtimeActionSummary"
+      :fallback-summary="fallbackSummary"
+      :slot-trigger-key="slotTriggerKey"
+      :slot-attempt-summary="slotAttemptSummary"
+      @add-phase="addPhase"
+      @select-phase="selectPhase"
+      @set-complete-when="setCompleteWhen"
+      @update-phase="(phase) => config.phases[selectedPhaseIndex] = phase"
+      @remove-phase="removePhase(selectedPhaseIndex)"
+      @add-slot="(role) => addSlot(selectedPhaseIndex, role)"
+      @edit-slot="(slotIndex) => openEdit(selectedPhaseIndex, slotIndex)"
+      @remove-slot="(slotIndex) => removeSlot(selectedPhaseIndex, slotIndex)"
+      @toggle-collapse="toggleCollapse(selectedPhaseIndex)"
+    />
+    <section v-else-if="workspace === 'observer'" class="workspace-panel">
+      <div class="workspace-panel-header">
+        <div>
+          <h2>状态识别</h2>
+          <p>只负责读取画面并写入标记、时间和计数器，不发送技能按键。</p>
+        </div>
       </div>
-    </div>
+      <ObserverLanePanel
+        :lanes="config.observer_lanes ?? []"
+        :skill-options="skillList"
+        :point-options="pointList"
+        :marker-options="markerList"
+        :timer-options="timerList"
+        :counter-options="counterList"
+        @update:lanes="updateObserverLanes"
+      />
+    </section>
+
+    <section v-else class="workspace-panel">
+      <div class="workspace-panel-header">
+        <div>
+          <h2>后台动作</h2>
+          <p>用于短 CD、增益和填充动作。主循环等待时才按 Lane 策略插入。</p>
+        </div>
+      </div>
+      <AssistLanePanel
+        :lanes="config.assist_lanes ?? []"
+        :skill-names="skillNames"
+        :skill-meta="skillMeta"
+        @update:lanes="updateAssistLanes"
+        @add-slot="addAssistSlot"
+        @edit-slot="openAssistEdit"
+        @remove-slot="removeAssistSlot"
+      />
+    </section>
 
     <button class="cycle-drawer-handle" type="button" @click="showSideDrawer = true">
       状态
@@ -478,8 +712,7 @@ async function saveProfile() {
 }
 
 .cycle-editor-header,
-.cycle-editor-actions,
-.cycle-panel-header {
+.cycle-editor-actions {
   display: flex;
   align-items: center;
 }
@@ -509,54 +742,88 @@ async function saveProfile() {
   padding-right: 4px;
 }
 
-.cycle-editor-grid {
+.cycle-workspace-tabs {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
-  flex: 1 1 auto;
-  min-height: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  flex: 0 0 auto;
+  gap: 8px;
 }
 
-.cycle-main-column {
+.cycle-workspace-tab {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
   min-width: 0;
-  min-height: 0;
-}
-
-.cycle-editor-panel,
-.cycle-side-section {
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   border: 1px solid rgb(255 255 255 / 10%);
   border-radius: 6px;
-  background: rgb(255 255 255 / 2%);
+  background: rgb(255 255 255 / 3%);
+  color: #d1d5db;
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
 }
 
-.cycle-editor-panel {
+.cycle-workspace-tab:hover,
+.cycle-workspace-tab.active {
+  border-color: rgb(94 234 212 / 40%);
+  background: rgb(94 234 212 / 10%);
+  color: #f9fafb;
+}
+
+.cycle-workspace-tab span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cycle-workspace-tab small {
+  flex: 0 0 auto;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.workspace-panel {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
 
-.cycle-panel-header,
+.workspace-panel-header,
 .cycle-side-header {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   border-bottom: 1px solid rgb(255 255 255 / 10%);
   padding: 12px 16px;
 }
 
-.cycle-panel-header {
-  justify-content: space-between;
+.workspace-panel-header h2 {
+  color: #f3f4f6;
+  font-size: 14px;
+  font-weight: 700;
 }
 
-.cycle-phase-scroll {
+.workspace-panel-header p {
+  margin-top: 2px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.workspace-panel {
+  flex: 1 1 auto;
+}
+
+.workspace-panel > :deep(.observer-lane-panel),
+.workspace-panel > :deep(.assist-lane-panel) {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
-  padding: 16px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .drawer-stack {
@@ -624,5 +891,13 @@ async function saveProfile() {
   min-height: 0;
   overflow: auto;
   padding: 8px;
+}
+
+
+
+@media (max-width: 760px) {
+  .cycle-workspace-tabs {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

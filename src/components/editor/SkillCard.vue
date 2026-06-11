@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NButton, NIcon, NTooltip } from "naive-ui";
+import { NButton, NIcon, NTag, NTooltip } from "naive-ui";
 import {
   IconChartBar,
   IconClock,
@@ -33,6 +33,18 @@ const emit = defineEmits<{
 }>();
 
 const condition = computed(() => props.slot.condition_expr as any);
+const slotRole = computed(() => props.slot.slot_role ?? "mandatory");
+const decisionOrder = computed(() => props.slot.priority || props.index + 1);
+const slotRoleMeta = computed(() => {
+  switch (slotRole.value) {
+    case "priority":
+      return { label: "优先", type: "warning" as const };
+    case "filler":
+      return { label: "填充", type: "info" as const };
+    default:
+      return { label: "必放", type: "success" as const };
+  }
+});
 
 const conditionMeta = computed(() => {
   const expr = condition.value;
@@ -48,7 +60,11 @@ const conditionMeta = computed(() => {
     case "pixel_point_not_match":
     case "pixel_point_black":
     case "pixel_point_not_black":
+    case "pixel_point_nearest":
     case "cast_bar_changed":
+    case "cast_bar_roi_changed":
+    case "cast_bar_roi_border_visible":
+    case "cast_bar_roi_gone":
       return { icon: IconEye, color: "#2080f0", label: "像素匹配" };
     case "skill_metric_ge":
       return { icon: IconChartBar, color: "#18a058", label: "计数条件" };
@@ -81,6 +97,14 @@ const conditionSummary = computed(() => {
       return `点位为黑 ${expr.point_id} <=${expr.tolerance}`;
     case "pixel_point_not_black":
       return `点位非黑 ${expr.point_id} >${expr.tolerance}`;
+    case "pixel_point_nearest":
+      return `最近颜色 ${expr.expected_point_id} Δ<=${expr.max_delta}`;
+    case "cast_bar_roi_changed":
+      return "施法条 ROI 变化";
+    case "cast_bar_roi_border_visible":
+      return "施法条边框出现";
+    case "cast_bar_roi_gone":
+      return "施法条 ROI 消失";
     case "skill_metric_ge":
       return `${expr.metric} >= ${expr.count}`;
     case "and":
@@ -106,9 +130,9 @@ const timingLabel = computed(() => {
 const attemptPolicyLabel = computed(() => {
   const guard = props.slot.protected_release ? " / 保护释放" : "";
   const policy = props.slot.attempt_policy;
-  if (!policy) return `使用全局尝试策略${guard}`;
+  if (!policy) return `全局确认策略${guard}`;
   const fallback = policy.complete_fallback === "fail" ? "超时失败" : "超时成功";
-  return `尝试 ${policy.max_attempts} 次 / 开始 ${policy.start_timeout_ms}ms / ${fallback}${guard}`;
+  return `最多 ${policy.max_attempts} 次 / 确认 ${policy.start_timeout_ms}ms / ${fallback}${guard}`;
 });
 
 function onDblClick() {
@@ -125,12 +149,16 @@ function onDblClick() {
       <span
         class="skill-card-index inline-flex items-center justify-center min-w-[20px] h-5 rounded-full text-[11px] font-bold text-white flex-shrink-0"
         :style="{ backgroundColor: conditionMeta.color }"
+        title="决策顺位，数字越小越先检查"
       >
-        {{ index + 1 }}
+        {{ decisionOrder }}
       </span>
       <span class="skill-card-title text-xs text-gray-200 font-medium truncate flex-1 min-w-0">
         {{ skillName || slot.skill_id || "未选择" }}
       </span>
+      <n-tag size="tiny" :type="slotRoleMeta.type" :bordered="false">
+        {{ slotRoleMeta.label }}
+      </n-tag>
       <n-tooltip trigger="hover">
         <template #trigger>
           <n-button size="tiny" quaternary circle @click.stop="emit('edit')">

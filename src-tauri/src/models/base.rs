@@ -34,7 +34,6 @@ pub struct PickConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IoConfig {
-    pub auto_save: bool,
     pub backup_on_save: bool,
 }
 

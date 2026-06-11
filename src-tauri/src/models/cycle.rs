@@ -104,7 +104,13 @@ pub struct SkillSlot {
     pub priority: u32,
     pub label: String,
     #[serde(default)]
+    pub slot_role: SkillSlotRole,
+    #[serde(default)]
     pub condition_expr: Option<serde_json::Value>,
+    #[serde(default)]
+    pub readiness_expr: Option<serde_json::Value>,
+    #[serde(default)]
+    pub readiness_policy: ReadinessPolicy,
     #[serde(default)]
     pub start_expr: Option<serde_json::Value>,
     #[serde(default)]
@@ -117,6 +123,30 @@ pub struct SkillSlot {
     pub attempt_policy: Option<AttemptPolicy>,
     #[serde(default)]
     pub post_actions: Vec<RuntimeAction>,
+}
+
+/// Semantic role of a skill slot inside a phase or assist lane.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSlotRole {
+    /// A phase-owned action required for the phase's intended rotation segment.
+    #[default]
+    Mandatory,
+    /// A high-value action that can be inserted when available.
+    Priority,
+    /// A low-value filler action used only when stronger actions are unavailable.
+    Filler,
+}
+
+/// How a skill slot should treat its readiness expression.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessPolicy {
+    /// Readiness must be true before a key attempt starts.
+    #[default]
+    Required,
+    /// Readiness is diagnostic only; hard conditions decide candidate eligibility.
+    Advisory,
 }
 
 /// Per-slot skill-attempt policy.
@@ -187,4 +217,51 @@ pub enum RuntimeAction {
     SetCounter { counter_id: String, value: i64 },
     #[serde(rename = "reset_counter")]
     ResetCounter { counter_id: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReadinessPolicy, SkillSlot, SkillSlotRole};
+
+    #[test]
+    fn skill_slot_role_defaults_to_mandatory_for_legacy_json() {
+        let slot: SkillSlot = serde_json::from_value(serde_json::json!({
+            "skill_id": "skill-1",
+            "priority": 1,
+            "label": "legacy slot"
+        }))
+        .expect("legacy skill slot should deserialize");
+
+        assert_eq!(slot.slot_role, SkillSlotRole::Mandatory);
+        assert_eq!(slot.readiness_policy, ReadinessPolicy::Required);
+        assert!(slot.readiness_expr.is_none());
+    }
+
+    #[test]
+    fn skill_slot_role_serializes_as_snake_case() {
+        let slot = SkillSlot {
+            skill_id: "skill-1".into(),
+            priority: 1,
+            label: "filler".into(),
+            slot_role: SkillSlotRole::Filler,
+            ..SkillSlot::default()
+        };
+        let value = serde_json::to_value(slot).expect("skill slot should serialize");
+
+        assert_eq!(value["slot_role"], "filler");
+    }
+
+    #[test]
+    fn readiness_policy_serializes_as_snake_case() {
+        let slot = SkillSlot {
+            skill_id: "skill-1".into(),
+            priority: 1,
+            label: "advisory".into(),
+            readiness_policy: ReadinessPolicy::Advisory,
+            ..SkillSlot::default()
+        };
+        let value = serde_json::to_value(slot).expect("skill slot should serialize");
+
+        assert_eq!(value["readiness_policy"], "advisory");
+    }
 }

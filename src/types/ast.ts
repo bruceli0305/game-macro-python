@@ -11,6 +11,13 @@ export type Expr =
   | { type: "pixel_point_not_match"; point_id: string; tolerance: number }
   | { type: "pixel_point_black"; point_id: string; tolerance: number }
   | { type: "pixel_point_not_black"; point_id: string; tolerance: number }
+  | {
+      type: "pixel_point_nearest";
+      expected_point_id: string;
+      candidate_point_ids: string[];
+      max_delta: number;
+      min_margin: number;
+    }
   | { type: "pixel_skill"; skill_id: string; tolerance: number }
   | { type: "pixel_skill_not_match"; skill_id: string; tolerance: number }
   | { type: "pixel_skill_black"; skill_id: string; tolerance: number }

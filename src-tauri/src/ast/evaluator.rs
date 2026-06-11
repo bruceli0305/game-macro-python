@@ -131,6 +131,18 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext) -> TriBool {
             point_id,
             tolerance,
         } => eval_pixel_point(point_id, *tolerance, PixelPredicate::NotBlack, ctx),
+        Expr::PixelPointNearest {
+            expected_point_id,
+            candidate_point_ids,
+            max_delta,
+            min_margin,
+        } => eval_pixel_point_nearest(
+            expected_point_id,
+            candidate_point_ids,
+            *max_delta,
+            *min_margin,
+            ctx,
+        ),
         Expr::PixelMatchSkill {
             skill_id,
             tolerance,
@@ -284,6 +296,71 @@ fn eval_pixel_skill(
             predicate,
         ),
     }
+}
+
+fn eval_pixel_point_nearest(
+    expected_point_id: &str,
+    candidate_point_ids: &[String],
+    max_delta: u8,
+    min_margin: u8,
+    ctx: &EvalContext,
+) -> TriBool {
+    let expected_id = expected_point_id.trim();
+    if expected_id.is_empty() {
+        return TriBool::Unknown("expected_point_id_empty".into());
+    }
+    if candidate_point_ids.len() < 2 {
+        return TriBool::Unknown("candidate_point_ids_too_few".into());
+    }
+
+    let Some(expected_point) = ctx.points.iter().find(|p| p.id.as_str() == expected_id) else {
+        return TriBool::Unknown("expected_point_missing".into());
+    };
+
+    let cur = ctx.sampler.sample_rgb_abs(
+        &expected_point.monitor,
+        expected_point.vx,
+        expected_point.vy,
+        &expected_point.sample.mode,
+        expected_point.sample.radius,
+    );
+    let Some(cur_rgb) = cur else {
+        return TriBool::Unknown("sample_failed".into());
+    };
+
+    let mut ranked: Vec<(&str, u8)> = Vec::with_capacity(candidate_point_ids.len());
+    for candidate_id in candidate_point_ids {
+        let candidate_id = candidate_id.trim();
+        if candidate_id.is_empty() {
+            return TriBool::Unknown("candidate_point_id_empty".into());
+        }
+        let Some(point) = ctx.points.iter().find(|p| p.id.as_str() == candidate_id) else {
+            return TriBool::Unknown(format!("candidate_point_missing:{candidate_id}"));
+        };
+        let target = (point.color.r, point.color.g, point.color.b);
+        ranked.push((candidate_id, rgb_diff_max(cur_rgb, target)));
+    }
+
+    ranked.sort_by_key(|(_, diff)| *diff);
+    let Some((best_id, best_delta)) = ranked.first().copied() else {
+        return TriBool::Unknown("candidate_point_ids_empty".into());
+    };
+    let second_delta = ranked.get(1).map(|(_, diff)| *diff).unwrap_or(u8::MAX);
+    let margin = second_delta.saturating_sub(best_delta);
+
+    if best_id != expected_id {
+        return TriBool::False(format!(
+            "nearest={best_id}, expected={expected_id}, delta={best_delta}"
+        ));
+    }
+    if best_delta > max_delta {
+        return TriBool::False(format!("nearest_delta={best_delta}>{max_delta}"));
+    }
+    if margin < min_margin {
+        return TriBool::False(format!("nearest_margin={margin}<{min_margin}"));
+    }
+
+    TriBool::True
 }
 
 fn eval_pixel_predicate(
@@ -916,6 +993,96 @@ mod tests {
         let expr = Expr::PixelMatchPoint {
             point_id: "pt1".into(),
             tolerance: 20,
+        };
+        assert!(evaluate(&expr, &ctx).is_false());
+    }
+
+    #[test]
+    fn test_pixel_point_nearest_true_when_expected_is_clear_winner() {
+        let points = vec![
+            make_point("fire", 218, 94, 16),
+            make_point("water", 59, 159, 225),
+            make_point("air", 103, 45, 202),
+            make_point("earth", 167, 135, 15),
+        ];
+        let skills = vec![];
+        let sampler = FixedSampler { rgb: (236, 109, 0) };
+        let ctx = EvalContext {
+            points: &points,
+            skills: &skills,
+            sampler: &sampler,
+            metrics: None,
+            timers: None,
+            markers: None,
+            counters: None,
+            baseline: None,
+            cast_bar_roi: None,
+        };
+        let expr = Expr::PixelPointNearest {
+            expected_point_id: "fire".into(),
+            candidate_point_ids: vec!["fire".into(), "water".into(), "air".into(), "earth".into()],
+            max_delta: 96,
+            min_margin: 20,
+        };
+        assert!(evaluate(&expr, &ctx).is_true());
+    }
+
+    #[test]
+    fn test_pixel_point_nearest_false_when_other_candidate_is_closer() {
+        let points = vec![
+            make_point("fire", 218, 94, 16),
+            make_point("earth", 198, 167, 53),
+        ];
+        let skills = vec![];
+        let sampler = FixedSampler {
+            rgb: (198, 170, 51),
+        };
+        let ctx = EvalContext {
+            points: &points,
+            skills: &skills,
+            sampler: &sampler,
+            metrics: None,
+            timers: None,
+            markers: None,
+            counters: None,
+            baseline: None,
+            cast_bar_roi: None,
+        };
+        let expr = Expr::PixelPointNearest {
+            expected_point_id: "fire".into(),
+            candidate_point_ids: vec!["fire".into(), "earth".into()],
+            max_delta: 96,
+            min_margin: 20,
+        };
+        assert!(evaluate(&expr, &ctx).is_false());
+    }
+
+    #[test]
+    fn test_pixel_point_nearest_false_when_margin_is_too_small() {
+        let points = vec![
+            make_point("fire", 100, 100, 100),
+            make_point("earth", 110, 110, 110),
+        ];
+        let skills = vec![];
+        let sampler = FixedSampler {
+            rgb: (104, 104, 104),
+        };
+        let ctx = EvalContext {
+            points: &points,
+            skills: &skills,
+            sampler: &sampler,
+            metrics: None,
+            timers: None,
+            markers: None,
+            counters: None,
+            baseline: None,
+            cast_bar_roi: None,
+        };
+        let expr = Expr::PixelPointNearest {
+            expected_point_id: "fire".into(),
+            candidate_point_ids: vec!["fire".into(), "earth".into()],
+            max_delta: 96,
+            min_margin: 20,
         };
         assert!(evaluate(&expr, &ctx).is_false());
     }

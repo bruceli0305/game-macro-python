@@ -34,13 +34,9 @@ import {
   roleProfileTemplateLabel,
   roleProfileTemplateOptions,
 } from "../utils/role-profile-templates";
+import type { AppMessagePayload } from "../utils/app-message";
 import type { MenuOption, SelectOption } from "naive-ui";
 import type { Profile } from "../types/profile";
-
-type AppMessagePayload = {
-  type?: "success" | "error" | "warning" | "info";
-  content?: string;
-};
 
 function renderIcon(icon: Component) {
   return () => h(NIcon, null, { default: () => h(icon) });
@@ -117,7 +113,6 @@ async function switchProfile(name: string) {
     window.dispatchEvent(new CustomEvent("hotkeys:reload"));
     message.success(`已切换角色配置：${name}`);
   } catch (error) {
-    console.error("switch profile failed:", error);
     message.error(String(error || "切换角色配置失败"));
   } finally {
     profileLoading.value = false;
@@ -161,7 +156,6 @@ async function createProfile(copyCurrent: boolean) {
     newProfileName.value = "";
     showCreateProfile.value = false;
   } catch (error) {
-    console.error("create profile failed:", error);
     message.error(String(error || "创建角色配置失败"));
   } finally {
     profileLoading.value = false;

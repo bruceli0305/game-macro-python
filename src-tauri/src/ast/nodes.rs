@@ -20,6 +20,13 @@ pub enum Expr {
     PixelPointBlack { point_id: String, tolerance: u8 },
     #[serde(rename = "pixel_point_not_black")]
     PixelPointNotBlack { point_id: String, tolerance: u8 },
+    #[serde(rename = "pixel_point_nearest")]
+    PixelPointNearest {
+        expected_point_id: String,
+        candidate_point_ids: Vec<String>,
+        max_delta: u8,
+        min_margin: u8,
+    },
     #[serde(rename = "pixel_skill")]
     PixelMatchSkill { skill_id: String, tolerance: u8 },
     #[serde(rename = "pixel_skill_not_match")]

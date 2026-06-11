@@ -63,8 +63,7 @@ export function useCapture() {
     try {
       const [r, g, b] = await invoke<[number, number, number]>("capture_sample", { x, y });
       return { r, g, b };
-    } catch (e) {
-      console.error("capture_sample failed:", e);
+    } catch {
       return null;
     }
   }
@@ -72,8 +71,7 @@ export function useCapture() {
   async function captureAtCursor(): Promise<CaptureAtCursorResult | null> {
     try {
       return await invoke<CaptureAtCursorResult>("capture_at_cursor");
-    } catch (e) {
-      console.error("capture_at_cursor failed:", e);
+    } catch {
       return null;
     }
   }
@@ -81,8 +79,7 @@ export function useCapture() {
   async function captureDiagnostics(): Promise<CaptureDiagnosticsResult | null> {
     try {
       return await invoke<CaptureDiagnosticsResult>("capture_diagnostics");
-    } catch (e) {
-      console.error("capture_diagnostics failed:", e);
+    } catch {
       return null;
     }
   }
@@ -90,8 +87,7 @@ export function useCapture() {
   async function captureCastBarRoi(request: CastBarRoiRequest): Promise<CastBarRoiSample | null> {
     try {
       return await invoke<CastBarRoiSample>("capture_cast_bar_roi", { request });
-    } catch (e) {
-      console.error("capture_cast_bar_roi failed:", e);
+    } catch {
       return null;
     }
   }

@@ -1,6 +1,5 @@
 //! Capture commands.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use enigo::{Coordinate, Mouse};
@@ -12,7 +11,7 @@ use crate::capture::cast_bar_roi::{
 };
 use crate::error::{AppError, CommandResult};
 use crate::models::base::PickConfig;
-use crate::store::profile_store::ProfileStore;
+use crate::store::profile_store::{ProfileStore, app_data_dir};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CaptureResult {
@@ -34,22 +33,6 @@ pub struct CaptureDiagnostics {
     pub cursor_monitor: String,
     pub sample: Option<CaptureResult>,
     pub sample_error: Option<String>,
-}
-
-fn app_data_dir() -> Result<PathBuf, AppError> {
-    #[cfg(target_os = "windows")]
-    {
-        let local = std::env::var("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        Ok(local.join("game-macro-tauri"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let dir = dirs::data_dir()
-            .ok_or_else(|| AppError::Config("unable to determine data directory".into()))?;
-        Ok(dir.join("game-macro-tauri"))
-    }
 }
 
 fn load_pick_config() -> Result<PickConfig, AppError> {

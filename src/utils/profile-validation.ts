@@ -294,10 +294,23 @@ function validateSkillSlotRefs(
   if (skillId && !ctx.skillIds.has(skillId)) {
     ctx.issues.push(issue(`${path}.skill_id`, `技能槽引用了不存在的技能：${skillId}`));
   }
+  if (
+    slot.slot_role !== undefined &&
+    !["mandatory", "priority", "filler"].includes(slot.slot_role)
+  ) {
+    ctx.issues.push(issue(`${path}.slot_role`, "skill slot role must be mandatory, priority, or filler"));
+  }
   if (slot.protected_release !== undefined && typeof slot.protected_release !== "boolean") {
     ctx.issues.push(issue(`${path}.protected_release`, "保护释放必须是布尔值"));
   }
+  if (
+    slot.readiness_policy !== undefined &&
+    !["required", "advisory"].includes(slot.readiness_policy)
+  ) {
+    ctx.issues.push(issue(`${path}.readiness_policy`, "readiness policy must be required or advisory"));
+  }
   validateExprRefs(slot.condition_expr, { ...ctx, path: `${path}.condition_expr` });
+  validateExprRefs(slot.readiness_expr ?? null, { ...ctx, path: `${path}.readiness_expr` });
   validateExprRefs(slot.start_expr, { ...ctx, path: `${path}.start_expr` });
   validateExprRefs(slot.complete_expr, { ...ctx, path: `${path}.complete_expr` });
   ctx.issues.push(...validateAttemptPolicy(slot.attempt_policy, `${path}.attempt_policy`));
@@ -380,6 +393,31 @@ function validateExprRefs(expr: unknown, ctx: ExprRefContext): void {
       } else if (!ctx.pointIds.has(pointId)) {
         ctx.issues.push(issue(ctx.path, `引用了不存在的点位：${pointId}`));
       }
+      return;
+    }
+    case "pixel_point_nearest": {
+      const expectedPointId = stringField(expr.expected_point_id);
+      if (!expectedPointId) {
+        ctx.issues.push(issue(ctx.path, "最近点位条件缺少 expected_point_id"));
+      } else if (!ctx.pointIds.has(expectedPointId)) {
+        ctx.issues.push(issue(ctx.path, `引用了不存在的点位：${expectedPointId}`));
+      }
+      const candidatePointIds = Array.isArray(expr.candidate_point_ids)
+        ? expr.candidate_point_ids.map(stringField)
+        : [];
+      if (candidatePointIds.length < 2) {
+        ctx.issues.push(issue(ctx.path, "最近点位条件至少需要 2 个候选点位"));
+      }
+      if (expectedPointId && !candidatePointIds.includes(expectedPointId)) {
+        ctx.issues.push(issue(ctx.path, "候选点位必须包含 expected_point_id"));
+      }
+      candidatePointIds.forEach((pointId) => {
+        if (!pointId) {
+          ctx.issues.push(issue(ctx.path, "候选点位 ID 不能为空"));
+        } else if (!ctx.pointIds.has(pointId)) {
+          ctx.issues.push(issue(ctx.path, `引用了不存在的点位：${pointId}`));
+        }
+      });
       return;
     }
     case "cast_bar_roi_changed":

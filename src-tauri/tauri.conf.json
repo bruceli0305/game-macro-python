@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/schemas/main/tauri/config.schema.json",
-  "productName": "激战2 协同学院 自动化克鲁",
+  "productName": "Game Macro",
   "version": "0.1.0",
   "identifier": "com.gamemacro.tauri",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "激战2 协同学院 自动化克鲁",
+        "title": "Game Macro",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": ["assets/gw2/skills_all.json"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

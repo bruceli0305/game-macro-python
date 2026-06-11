@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NButton, NInput, NInputNumber, NPopconfirm, NSelect, NSpace } from "naive-ui";
+import { NButton, NInput, NInputNumber, NPopconfirm, NSelect } from "naive-ui";
 import { IconPlus, IconTrash } from "@tabler/icons-vue";
 import type { Expr } from "../../types/ast";
 
@@ -26,12 +26,13 @@ const nodeTypes = [
   { label: "NOT（取反）", value: "not" },
   { label: "技能像素匹配", value: "pixel_skill" },
   { label: "技能像素不匹配", value: "pixel_skill_not_match" },
-  { label: "技能像素为黑", value: "pixel_skill_black" },
-  { label: "技能像素非黑", value: "pixel_skill_not_black" },
+  { label: "技能图标为黑", value: "pixel_skill_black" },
+  { label: "技能图标非黑", value: "pixel_skill_not_black" },
   { label: "点位像素匹配", value: "pixel_point" },
   { label: "点位像素不匹配", value: "pixel_point_not_match" },
   { label: "点位为黑", value: "pixel_point_black" },
   { label: "点位非黑", value: "pixel_point_not_black" },
+  { label: "点位最近颜色", value: "pixel_point_nearest" },
   { label: "状态条变化", value: "cast_bar_changed" },
   { label: "施法条 ROI 变化", value: "cast_bar_roi_changed" },
   { label: "施法条 ROI 边框出现", value: "cast_bar_roi_border_visible" },
@@ -120,6 +121,15 @@ function setType(type: string) {
     case "pixel_point_not_black":
       expr.value = { type: "pixel_point_not_black", point_id: "", tolerance: 5 };
       break;
+    case "pixel_point_nearest":
+      expr.value = {
+        type: "pixel_point_nearest",
+        expected_point_id: "",
+        candidate_point_ids: [],
+        max_delta: 96,
+        min_margin: 20,
+      };
+      break;
     case "cast_bar_changed":
       expr.value = { type: "cast_bar_changed", point_id: "", tolerance: 20 };
       break;
@@ -192,6 +202,13 @@ function updateNotChild(value: Expr | null) {
   }
 }
 
+function isPointNearestExpr(value: Expr | null): value is Extract<
+  Expr,
+  { type: "pixel_point_nearest" }
+> {
+  return value?.type === "pixel_point_nearest";
+}
+
 function isSkillPixelExpr(value: Expr | null): value is Extract<
   Expr,
   { type: "pixel_skill" | "pixel_skill_not_match" | "pixel_skill_black" | "pixel_skill_not_black" }
@@ -218,45 +235,46 @@ function isPointPixelExpr(value: Expr | null): value is Extract<
 </script>
 
 <template>
-  <div v-if="!expr" class="flex items-center gap-2">
+  <div v-if="!expr" class="condition-empty">
     <span class="text-sm text-gray-400">无条件</span>
     <n-select
       :options="nodeTypes"
       size="tiny"
       placeholder="+ 添加条件"
-      style="width: 160px"
+      class="condition-type-select"
       @update:value="(value: string) => setType(value)"
     />
-    <span class="text-xs text-gray-500">（始终就绪）</span>
+    <span class="text-xs text-gray-500">未设置时始终满足</span>
   </div>
 
-  <div v-else class="space-y-2 rounded border border-white/10 p-2">
-    <n-select
-      :value="nodeType(expr)"
-      :options="nodeTypes"
-      size="tiny"
-      style="max-width: 200px"
-      @update:value="(value: string) => setType(value)"
-    />
+  <div v-else class="condition-node">
+    <div class="condition-node-toolbar">
+      <n-select
+        :value="nodeType(expr)"
+        :options="nodeTypes"
+        size="tiny"
+        class="condition-type-select"
+        @update:value="(value: string) => setType(value)"
+      />
+    </div>
 
     <template v-if="expr.type === 'and' || expr.type === 'or'">
-      <div class="space-y-1 border-l border-white/10 pl-3">
+      <div class="condition-children">
         <template v-for="(child, index) in children()" :key="index">
-          <div class="flex items-start gap-1">
-            <div class="flex-1">
-              <ConditionBuilder
-                :model-value="child"
-                :skills="skills"
-                :points="points"
-                :markers="markers"
-                :timers="timers"
-                :counters="counters"
-                @update:model-value="(value) => { if (value) children()[index] = value; }"
-              />
-            </div>
+          <div class="condition-child-row">
+            <ConditionBuilder
+              class="condition-child-builder"
+              :model-value="child"
+              :skills="skills"
+              :points="points"
+              :markers="markers"
+              :timers="timers"
+              :counters="counters"
+              @update:model-value="(value) => { if (value) children()[index] = value; }"
+            />
             <n-popconfirm @positive-click="removeChild(index)">
               <template #trigger>
-                <n-button size="tiny" quaternary type="error">
+                <n-button size="tiny" quaternary type="error" class="condition-delete-button">
                   <template #icon><IconTrash /></template>
                 </n-button>
               </template>
@@ -272,7 +290,7 @@ function isPointPixelExpr(value: Expr | null): value is Extract<
     </template>
 
     <template v-if="expr.type === 'not'">
-      <div class="border-l border-white/10 pl-3">
+      <div class="condition-children">
         <ConditionBuilder
           :model-value="expr.child"
           :skills="skills"
@@ -286,67 +304,257 @@ function isPointPixelExpr(value: Expr | null): value is Extract<
     </template>
 
     <template v-if="isSkillPixelExpr(expr)">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.skill_id" :options="skillOptions" size="tiny" placeholder="选择技能" style="max-width: 200px" />
-        <n-input-number v-model:value="expr.tolerance" :min="0" :max="255" size="tiny" style="width: 120px" placeholder="容差/黑阈值" />
-      </n-space>
+      <div class="condition-fields two-cols">
+        <label class="condition-field">
+          <span>技能</span>
+          <n-select v-model:value="expr.skill_id" :options="skillOptions" size="tiny" placeholder="选择技能" />
+        </label>
+        <label class="condition-field short-field">
+          <span>容差 / 黑阈值</span>
+          <n-input-number v-model:value="expr.tolerance" :min="0" :max="255" size="tiny" placeholder="20" />
+        </label>
+      </div>
     </template>
 
     <template v-if="isPointPixelExpr(expr)">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.point_id" :options="pointOptions" size="tiny" placeholder="选择点位" style="max-width: 200px" />
-        <n-input-number v-model:value="expr.tolerance" :min="0" :max="255" size="tiny" style="width: 120px" placeholder="容差/黑阈值" />
-      </n-space>
+      <div class="condition-fields two-cols">
+        <label class="condition-field">
+          <span>点位</span>
+          <n-select v-model:value="expr.point_id" :options="pointOptions" size="tiny" placeholder="选择点位" />
+        </label>
+        <label class="condition-field short-field">
+          <span>容差 / 黑阈值</span>
+          <n-input-number v-model:value="expr.tolerance" :min="0" :max="255" size="tiny" placeholder="20" />
+        </label>
+      </div>
+    </template>
+
+    <template v-if="isPointNearestExpr(expr)">
+      <div class="condition-fields nearest-grid">
+        <label class="condition-field">
+          <span>目标点位</span>
+          <n-select
+            v-model:value="expr.expected_point_id"
+            :options="pointOptions"
+            size="tiny"
+            placeholder="选择目标点位"
+          />
+        </label>
+        <label class="condition-field candidate-field">
+          <span>候选点位</span>
+          <n-select
+            v-model:value="expr.candidate_point_ids"
+            :options="pointOptions"
+            multiple
+            size="tiny"
+            placeholder="选择用于比较的候选点位"
+          />
+        </label>
+        <label class="condition-field short-field">
+          <span>最大差值</span>
+          <n-input-number v-model:value="expr.max_delta" :min="0" :max="255" size="tiny" placeholder="96" />
+        </label>
+        <label class="condition-field short-field">
+          <span>最小间隔</span>
+          <n-input-number v-model:value="expr.min_margin" :min="0" :max="255" size="tiny" placeholder="20" />
+        </label>
+      </div>
     </template>
 
     <template v-if="expr.type === 'cast_bar_changed'">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.point_id" :options="pointOptions" size="tiny" placeholder="选择状态条点位" style="max-width: 200px" />
-        <n-input-number v-model:value="expr.tolerance" :min="0" :max="255" size="tiny" style="width: 100px" placeholder="变化容差" />
-      </n-space>
+      <div class="condition-fields two-cols">
+        <label class="condition-field">
+          <span>状态条点位</span>
+          <n-select v-model:value="expr.point_id" :options="pointOptions" size="tiny" placeholder="选择状态条点位" />
+        </label>
+        <label class="condition-field short-field">
+          <span>变化容差</span>
+          <n-input-number v-model:value="expr.tolerance" :min="0" :max="255" size="tiny" placeholder="20" />
+        </label>
+      </div>
     </template>
 
     <template v-if="expr.type === 'cast_bar_roi_changed' || expr.type === 'cast_bar_roi_border_visible' || expr.type === 'cast_bar_roi_gone'">
-      <div class="text-xs text-gray-500">
+      <div class="condition-note">
         使用基础配置中的施法条 ROI 区域、阈值和确认帧数。
       </div>
     </template>
 
     <template v-if="expr.type === 'skill_metric_ge'">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.skill_id" :options="skillOptions" size="tiny" placeholder="选择技能" style="max-width: 200px" />
-        <n-select v-model:value="expr.metric" :options="metricOptions" size="tiny" style="max-width: 150px" />
-        <n-input-number v-model:value="expr.count" :min="1" :max="999" size="tiny" style="width: 100px" placeholder="阈值" />
-      </n-space>
+      <div class="condition-fields metric-grid">
+        <label class="condition-field">
+          <span>技能</span>
+          <n-select v-model:value="expr.skill_id" :options="skillOptions" size="tiny" placeholder="选择技能" />
+        </label>
+        <label class="condition-field">
+          <span>指标</span>
+          <n-select v-model:value="expr.metric" :options="metricOptions" size="tiny" />
+        </label>
+        <label class="condition-field short-field">
+          <span>阈值</span>
+          <n-input-number v-model:value="expr.count" :min="1" :max="999" size="tiny" placeholder="1" />
+        </label>
+      </div>
     </template>
 
     <template v-if="expr.type === 'marker_eq' || expr.type === 'marker_ne'">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.marker_id" :options="markerOptions" size="tiny" placeholder="选择标记" style="max-width: 200px" />
-        <n-select
-          v-if="markerValueOptions.length > 0"
-          v-model:value="expr.value"
-          :options="markerValueOptions"
-          size="tiny"
-          placeholder="选择值"
-          style="max-width: 160px"
-        />
-        <n-input v-else v-model:value="expr.value" size="tiny" placeholder="标记值" style="max-width: 160px" />
-      </n-space>
+      <div class="condition-fields two-cols">
+        <label class="condition-field">
+          <span>标记</span>
+          <n-select v-model:value="expr.marker_id" :options="markerOptions" size="tiny" placeholder="选择标记" />
+        </label>
+        <label class="condition-field">
+          <span>值</span>
+          <n-select
+            v-if="markerValueOptions.length > 0"
+            v-model:value="expr.value"
+            :options="markerValueOptions"
+            size="tiny"
+            placeholder="选择值"
+          />
+          <n-input v-else v-model:value="expr.value" size="tiny" placeholder="标记值" />
+        </label>
+      </div>
     </template>
 
     <template v-if="expr.type === 'timer_elapsed_ge' || expr.type === 'timer_elapsed_lt'">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.timer_id" :options="timerOptions" size="tiny" placeholder="选择时间标记" style="max-width: 200px" />
-        <n-input-number v-model:value="expr.ms" :min="0" :max="600000" size="tiny" style="width: 120px" placeholder="毫秒" />
-      </n-space>
+      <div class="condition-fields two-cols">
+        <label class="condition-field">
+          <span>时间标记</span>
+          <n-select v-model:value="expr.timer_id" :options="timerOptions" size="tiny" placeholder="选择时间标记" />
+        </label>
+        <label class="condition-field short-field">
+          <span>毫秒</span>
+          <n-input-number v-model:value="expr.ms" :min="0" :max="600000" size="tiny" placeholder="1000" />
+        </label>
+      </div>
     </template>
 
     <template v-if="expr.type === 'counter_ge' || expr.type === 'counter_eq' || expr.type === 'counter_gt'">
-      <n-space vertical size="small">
-        <n-select v-model:value="expr.counter_id" :options="counterOptions" size="tiny" placeholder="选择计数器" style="max-width: 200px" />
-        <n-input-number v-model:value="expr.value" :min="-999999" :max="999999" size="tiny" style="width: 120px" placeholder="阈值" />
-      </n-space>
+      <div class="condition-fields two-cols">
+        <label class="condition-field">
+          <span>计数器</span>
+          <n-select v-model:value="expr.counter_id" :options="counterOptions" size="tiny" placeholder="选择计数器" />
+        </label>
+        <label class="condition-field short-field">
+          <span>阈值</span>
+          <n-input-number v-model:value="expr.value" :min="-999999" :max="999999" size="tiny" placeholder="0" />
+        </label>
+      </div>
     </template>
   </div>
 </template>
+
+<style scoped>
+.condition-empty {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.condition-node {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 6px;
+  padding: 10px;
+}
+
+.condition-node-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.condition-type-select {
+  width: min(260px, 100%);
+}
+
+.condition-children {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  border-left: 1px solid rgb(255 255 255 / 10%);
+  padding-left: 10px;
+}
+
+.condition-child-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 8px;
+  align-items: start;
+}
+
+.condition-child-builder {
+  min-width: 0;
+}
+
+.condition-delete-button {
+  width: 28px;
+}
+
+.condition-fields {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  align-items: end;
+}
+
+.two-cols {
+  grid-template-columns: minmax(220px, 1fr) minmax(120px, 180px);
+}
+
+.nearest-grid {
+  grid-template-columns: minmax(180px, 240px) minmax(260px, 1fr) minmax(108px, 128px) minmax(108px, 128px);
+}
+
+.metric-grid {
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, 180px) minmax(108px, 128px);
+}
+
+.condition-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: #9ca3af;
+  font-size: 11px;
+}
+
+.condition-field :deep(.n-select),
+.condition-field :deep(.n-input),
+.condition-field :deep(.n-input-number) {
+  width: 100%;
+}
+
+.short-field {
+  min-width: 108px;
+}
+
+.candidate-field :deep(.n-base-selection-tags) {
+  align-items: flex-start;
+}
+
+.condition-note {
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 4px;
+  background: rgb(255 255 255 / 3%);
+  padding: 8px 10px;
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .two-cols,
+  .nearest-grid,
+  .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+</style>

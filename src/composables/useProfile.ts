@@ -39,7 +39,7 @@ export function createDefaultProfile(name = DEFAULT_PROFILE_NAME): Profile {
         mouse_avoid_offset_y: 80,
         mouse_avoid_settle_ms: 80,
       },
-      io: { auto_save: true, backup_on_save: false },
+      io: { backup_on_save: false },
       cast_bar: {
         mode: "timer",
         point_id: "",
@@ -84,6 +84,17 @@ export function cloneProfile(profile: Profile): Profile {
 
 export function profileChangedEvent(name: string): CustomEvent<{ name: string }> {
   return new CustomEvent("profile:active-changed", { detail: { name } });
+}
+
+export function isProfileNotFoundError(error: unknown, name: string): boolean {
+  const expected = `Profile not found: ${name}`;
+  if (typeof error === "string") return error.includes(expected);
+  if (!error || typeof error !== "object") return false;
+
+  const candidate = error as { code?: unknown; message?: unknown };
+  return candidate.code === "config"
+    && typeof candidate.message === "string"
+    && candidate.message.includes(expected);
 }
 
 function hasTauriRuntime(): boolean {
@@ -164,7 +175,10 @@ export function useProfile() {
   async function loadOrCreateProfile(name = DEFAULT_PROFILE_NAME): Promise<Profile> {
     try {
       return await loadProfile(name);
-    } catch {
+    } catch (error) {
+      if (!isProfileNotFoundError(error, name)) {
+        throw error;
+      }
       const profile = createDefaultProfile(name);
       store.profile = profile;
       return profile;

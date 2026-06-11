@@ -93,7 +93,6 @@ async function captureNow() {
     pickerStore.recordCaptureSuccess("points", `${result.monitor} (${result.x},${result.y}) ${result.hex}`);
     message.success("已记录当前鼠标位置点位");
   } catch (e) {
-    console.error("取色失败:", e);
     pickerStore.recordCaptureFailure("points", String(e || "capture failed"));
     message.error("取色失败，请确认屏幕捕获权限和鼠标位置");
   }
@@ -206,7 +205,10 @@ async function loadPoints() {
   try {
     const profile = await loadActiveProfile();
     points.value = profile.points.points;
-  } catch { /* 首次使用 */ }
+  } catch (e) {
+    points.value = [];
+    message.error(String(e || "加载点位配置失败"));
+  }
 }
 
 async function savePoints() {
@@ -228,7 +230,6 @@ async function savePoints() {
     points.value = normalizedPoints;
     message.success("点位配置已保存");
   } catch (e) {
-    console.error(e);
     message.error("保存点位失败");
   }
 }

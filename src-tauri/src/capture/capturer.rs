@@ -32,30 +32,6 @@ fn monitor_name(m: &Monitor) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// CapturePlan
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct CaptureRegion {
-    pub monitor_name: String,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct CapturePlan {
-    pub regions: Vec<CaptureRegion>,
-}
-
-impl CapturePlan {
-    pub fn is_empty(&self) -> bool {
-        self.regions.is_empty()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Snapshot
 // ---------------------------------------------------------------------------
 
@@ -341,7 +317,7 @@ struct TickFrameCache {
     frames: HashMap<String, CachedFrame>,
 }
 
-struct CachedFrame {
+pub(crate) struct CachedFrame {
     image: image::RgbaImage,
     x: i32,
     y: i32,
@@ -356,6 +332,34 @@ impl CachedPixelSampler {
         Self {
             cache: Mutex::new(TickFrameCache::default()),
         }
+    }
+
+    /// Try to get a cached frame image for the given monitor.
+    /// Returns `None` if no frame has been captured for this monitor
+    /// in the current tick.
+    pub fn get_cached_monitor_image(&self, monitor: &str) -> Option<image::RgbaImage> {
+        let cache = self.cache.lock().ok()?;
+        let key = resolved_monitor_key(monitor)?;
+        // Look up any cached frame whose key starts with this monitor's key.
+        // The frame_key format is the monitor name, so a direct lookup works.
+        cache.frames.get(&key).map(|frame| frame.image.clone())
+    }
+
+    /// Capture a monitor frame (or return cached), returning the full
+    /// image and the monitor origin offset so the ROI provider can sample
+    /// rectangular regions.
+    pub fn ensure_monitor_frame(&self, monitor: &str) -> Option<(image::RgbaImage, i32, i32)> {
+        let key = resolved_monitor_key(monitor)?;
+        let mut cache = self.cache.lock().ok()?;
+        if let Some(frame) = cache.frames.get(&key) {
+            return Some((frame.image.clone(), frame.x, frame.y));
+        }
+        // Not cached yet — capture the full monitor.
+        let frame = capture_monitor_full_frame(monitor)?;
+        let image = frame.image.clone();
+        let (x, y) = (frame.x, frame.y);
+        cache.frames.insert(key, frame);
+        Some((image, x, y))
     }
 }
 
@@ -403,8 +407,41 @@ fn pixel_frame_key(monitor: &str, x_abs: i32, y_abs: i32) -> Option<String> {
         let selected = monitor_for_abs_point(&monitors, x_abs, y_abs)?;
         Some(monitor_name(selected))
     } else {
+        resolved_monitor_key(requested)
+    }
+}
+
+/// Resolve a monitor name (including "primary" / empty → primary monitor)
+/// to a stable cache key.
+fn resolved_monitor_key(monitor: &str) -> Option<String> {
+    let requested = monitor.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("primary") {
+        let monitors = Monitor::all().ok()?;
+        let primary = monitors.iter().find(|m| monitor_is_primary(m))?;
+        Some(monitor_name(primary))
+    } else {
         Some(requested.to_string())
     }
+}
+
+/// Capture the full monitor image for ROI-style sampling.
+pub(crate) fn capture_monitor_full_frame(monitor: &str) -> Option<CachedFrame> {
+    let monitors = Monitor::all().ok()?;
+    let requested = monitor.trim();
+    let selected = if requested.is_empty() || requested.eq_ignore_ascii_case("primary") {
+        monitors.iter().find(|m| monitor_is_primary(m))?
+    } else {
+        let key = requested.to_lowercase();
+        monitors
+            .iter()
+            .find(|m| monitor_name(m).to_lowercase() == key)?
+    };
+    let image = selected.capture_image().ok()?;
+    Some(CachedFrame {
+        image,
+        x: monitor_x(selected),
+        y: monitor_y(selected),
+    })
 }
 
 fn capture_pixel_frame(monitor: &str, x_abs: i32, y_abs: i32) -> Option<CachedFrame> {

@@ -35,7 +35,7 @@ export interface PickConfig {
   mouse_avoid_offset_y: number;
   mouse_avoid_settle_ms: number;
 }
-export interface IoConfig { auto_save: boolean; backup_on_save: boolean }
+export interface IoConfig { backup_on_save: boolean }
 export interface CastBarConfig {
   mode: string;
   point_id: string;
