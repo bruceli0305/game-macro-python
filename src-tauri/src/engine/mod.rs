@@ -5,5 +5,6 @@ pub mod skill_attempt;
 
 // Internal modules — split from cycle_executor to keep files manageable.
 mod attempt_tracker;
+mod lane_executor;
 mod phase_manager;
 mod runtime_config;
