@@ -1,46 +1,33 @@
 //! Engine start, stop, status, and simulation commands.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
 use crate::AppState;
-use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiStats, PixelSampler};
-use crate::capture::capturer::{CachedPixelSampler, DirectPixelSampler};
+use crate::ast::evaluator::CastBarRoiProvider;
+use crate::capture::capturer::CachedPixelSampler;
 use crate::capture::cast_bar_roi::ScreenCastBarRoiProvider;
 use crate::engine::cycle_executor::CycleExecutor;
-use crate::engine::runtime_state::{AttemptStage, RuntimeState};
+use crate::engine::profile_config::{
+    EnginePreflightReport, load_active_engine_profile, load_active_preflight_report,
+};
+use crate::engine::runtime_payload::{RuntimePayloadInput, runtime_payload};
+use crate::engine::simulation;
+pub use crate::engine::simulation::PixelOverride;
 use crate::engine::skill_attempt::{KeySender, SkillAttemptConfig};
 use crate::engine_task::EngineTaskHandle;
-use crate::error::{AppError, AppResult, CommandResult};
+use crate::error::CommandResult;
 use crate::input::EnigoKeySender;
-use crate::models::base::BaseConfig;
-use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot, SkillSlotRole};
+use crate::models::cycle::CycleConfig;
 use crate::models::point::Point;
-use crate::models::profile::Profile;
-use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig, Skill};
-use crate::profile::validation::validate_profile_references;
-use crate::store::profile_store::{ProfileStore, app_data_dir, default_profile};
+use crate::models::skill::Skill;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStatus {
     pub running: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct EnginePreflightReport {
-    pub ready: bool,
-    pub engine_running: bool,
-    pub profile_name: String,
-    pub exec_enabled: bool,
-    pub rotation_count: usize,
-    pub skill_count: usize,
-    pub point_count: usize,
-    pub executable_slot_count: usize,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,466 +39,6 @@ struct EngineTickPayload {
     skill_id: String,
     skill_name: String,
     outcome: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EngineRuntimePayload {
-    running: bool,
-    paused: bool,
-    preset_id: String,
-    stop_reason: String,
-    total_executed: u32,
-    cycle_count: u32,
-    phase_index: usize,
-    phase_name: String,
-    uptime_ms: u64,
-    cast_bar_roi: Option<CastBarRoiRuntimePayload>,
-    skills: Vec<SkillRuntimePayload>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct CastBarRoiRuntimePayload {
-    enabled: bool,
-    sample_count: u64,
-    cache_hit_count: u64,
-    failed_sample_count: u64,
-    last_latency_us: u64,
-    avg_latency_us: u64,
-    max_latency_us: u64,
-    last_changed_ratio: f64,
-    last_border_match_ratio: f64,
-    last_changed_from_baseline: bool,
-    last_border_visible: bool,
-    last_gone: bool,
-    last_error: String,
-}
-
-struct RuntimePayloadInput<'a> {
-    runtime: &'a RuntimeState,
-    config: &'a CycleConfig,
-    skills: &'a [Skill],
-    total_executed: u32,
-    cycle_count: u32,
-    phase_index: usize,
-    uptime_ms: u64,
-    cast_bar_roi: Option<CastBarRoiStats>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SkillRuntimePayload {
-    skill_id: String,
-    skill_name: String,
-    state: String,
-    node_exec: u32,
-    ready_false: u32,
-    skipped_disabled: u32,
-    skipped_lock_busy: u32,
-    attempt_started: u32,
-    key_sent_ok: u32,
-    cast_started: u32,
-    success: u32,
-    fail: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PixelOverride {
-    monitor: String,
-    x: i32,
-    y: i32,
-    r: u8,
-    g: u8,
-    b: u8,
-}
-
-struct OverridePixelSampler {
-    pixels: HashMap<(String, i32, i32), (u8, u8, u8)>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct IpcSmokeFixtureSummary {
-    profile_id: String,
-    direct_events: usize,
-    pixel_events: usize,
-}
-
-impl OverridePixelSampler {
-    fn new(overrides: Vec<PixelOverride>) -> Self {
-        let pixels = overrides
-            .into_iter()
-            .map(|item| ((item.monitor, item.x, item.y), (item.r, item.g, item.b)))
-            .collect();
-        Self { pixels }
-    }
-}
-
-impl PixelSampler for OverridePixelSampler {
-    fn sample_rgb_abs(
-        &self,
-        monitor: &str,
-        x_abs: i32,
-        y_abs: i32,
-        _sample_mode: &str,
-        _sample_radius: u8,
-    ) -> Option<(u8, u8, u8)> {
-        self.pixels
-            .get(&(monitor.to_string(), x_abs, y_abs))
-            .copied()
-    }
-}
-
-fn load_profile_config(
-    require_exec_enabled: bool,
-) -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
-    let dir = app_data_dir()?;
-    let store = ProfileStore::new(dir);
-    let (profile_name, profile) = store.load_active_or_default()?;
-
-    validate_profile_for_engine(&profile, require_exec_enabled)?;
-    let attempt_cfg = attempt_config_from_base(&profile.base);
-
-    let config =
-        profile.rotations.into_iter().next().ok_or_else(|| {
-            AppError::Config(format!("profile '{profile_name}' has no rotations"))
-        })?;
-    let skills = profile.skills.skills;
-    let points = profile.points.points;
-
-    tracing::info!(
-        "loaded profile '{}': {} phases, {} skills",
-        profile_name,
-        config.phases.len(),
-        skills.len()
-    );
-
-    Ok((config, skills, points, attempt_cfg))
-}
-
-fn simulation_inputs_from_profile(
-    profile: Profile,
-) -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
-    validate_profile_for_engine(&profile, false)?;
-    let attempt_cfg = attempt_config_from_base(&profile.base);
-
-    let config = profile
-        .rotations
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::Config("profile has no rotations".into()))?;
-
-    Ok((
-        config,
-        profile.skills.skills,
-        profile.points.points,
-        attempt_cfg,
-    ))
-}
-
-fn parse_profile_content(content: &str) -> AppResult<Profile> {
-    serde_json::from_str(content).map_err(AppError::from)
-}
-
-fn event_count_from_simulation_json(content: &str) -> AppResult<usize> {
-    let value: serde_json::Value = serde_json::from_str(content)?;
-    let events = value
-        .get("events")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| AppError::Engine("simulation response missing events array".into()))?;
-    Ok(events.len())
-}
-
-fn smoke_fixture_profile() -> Profile {
-    let mut profile = default_profile("ipc-smoke");
-    profile.points.points = vec![Point {
-        id: "smoke-point".into(),
-        name: "IPC smoke point".into(),
-        monitor: "primary".into(),
-        vx: 10,
-        vy: 20,
-        color: ColorRGB {
-            r: 12,
-            g: 34,
-            b: 56,
-        },
-        tolerance: 0,
-        sample: SampleConfig {
-            mode: "single".into(),
-            radius: 0,
-        },
-        captured_at: "ipc-smoke".into(),
-        note: "IPC smoke fixture".into(),
-    }];
-    profile.skills.skills = vec![Skill {
-        id: "smoke-skill".into(),
-        name: "IPC smoke skill".into(),
-        enabled: true,
-        trigger_key: "1".into(),
-        cast: CastConfig {
-            readbar_ms: 0,
-            cooldown_ms: 0,
-        },
-        pixel: PixelSpec {
-            monitor: "primary".into(),
-            vx: 30,
-            vy: 40,
-            color: ColorRGB {
-                r: 90,
-                g: 120,
-                b: 150,
-            },
-            tolerance: 0,
-            sample: SampleConfig {
-                mode: "single".into(),
-                radius: 0,
-            },
-        },
-        note: "IPC smoke fixture".into(),
-        game_id: 0,
-        game_desc: String::new(),
-        icon_url: String::new(),
-        cooldown_ms: 0,
-        radius: 0,
-        shots_per_cycle: 1,
-        ammo_stages: vec![],
-    }];
-    profile.rotations = vec![CycleConfig {
-        name: "IPC smoke rotation".into(),
-        observer_lanes: vec![],
-        assist_lanes: vec![],
-        poll_interval_ms: 10,
-        max_cycles: 1,
-        state_schema: None,
-        phases: vec![CyclePhase {
-            name: "P1".into(),
-            complete_when: "any_fired".into(),
-            entry_actions: vec![],
-            transition_rules: vec![],
-            fallback_transition: None,
-            skills: vec![SkillSlot {
-                skill_id: "smoke-skill".into(),
-                priority: 1,
-                label: "smoke-skill".into(),
-                slot_role: SkillSlotRole::Mandatory,
-                condition_expr: Some(serde_json::json!({
-                    "type": "pixel_point",
-                    "point_id": "smoke-point",
-                    "tolerance": 0
-                })),
-                readiness_expr: None,
-                readiness_policy: Default::default(),
-                start_expr: None,
-                complete_expr: None,
-                override_cast_ms: None,
-                protected_release: false,
-                attempt_policy: None,
-                post_actions: vec![],
-            }],
-        }],
-    }];
-    profile
-}
-
-fn smoke_fixture_pixel_overrides() -> Vec<PixelOverride> {
-    vec![PixelOverride {
-        monitor: "primary".into(),
-        x: 10,
-        y: 20,
-        r: 12,
-        g: 34,
-        b: 56,
-    }]
-}
-
-fn attempt_config_from_base(base: &BaseConfig) -> SkillAttemptConfig {
-    let cast_bar_roi =
-        (base.cast_bar.roi.enabled || base.cast_bar.mode.trim() == "roi").then(|| {
-            let mut roi = base.cast_bar.roi.clone();
-            if base.cast_bar.mode.trim() == "roi" {
-                roi.enabled = true;
-            }
-            roi
-        });
-    SkillAttemptConfig {
-        default_gap_ms: base.exec.default_skill_gap_ms,
-        poll_not_ready_ms: base.exec.poll_not_ready_ms,
-        max_retries: base.exec.max_retries,
-        retry_gap_ms: base.exec.retry_gap_ms,
-        complete_poll_ms: base.cast_bar.poll_interval_ms,
-        complete_max_wait_factor: base.cast_bar.max_wait_factor,
-        cast_bar_roi,
-        ..SkillAttemptConfig::default()
-    }
-}
-
-fn validate_engine_profile(profile: &Profile, require_exec_enabled: bool) -> AppResult<()> {
-    if require_exec_enabled && !profile.base.exec.enabled {
-        return Err(AppError::Config(
-            "macro execution is disabled in base.exec.enabled".into(),
-        ));
-    }
-
-    let rotation = profile
-        .rotations
-        .first()
-        .ok_or_else(|| AppError::Config("profile has no rotations".into()))?;
-    if rotation.phases.is_empty() {
-        return Err(AppError::Config("rotation has no phases".to_string()));
-    }
-
-    let mut has_executable_slot = false;
-    for phase in &rotation.phases {
-        for slot in &phase.skills {
-            let skill_id = slot.skill_id.trim();
-            if skill_id.is_empty() {
-                continue;
-            }
-            let Some(skill) = profile
-                .skills
-                .skills
-                .iter()
-                .find(|skill| skill.id.as_str() == skill_id)
-            else {
-                return Err(AppError::Config(format!(
-                    "slot references missing skill '{skill_id}'"
-                )));
-            };
-            if !skill.enabled {
-                continue;
-            }
-            if skill.trigger_key.trim().is_empty() {
-                return Err(AppError::Config(format!(
-                    "enabled skill '{}' has no trigger_key",
-                    skill.id
-                )));
-            }
-            has_executable_slot = true;
-        }
-    }
-
-    if !has_executable_slot {
-        return Err(AppError::Config(
-            "rotation has no executable enabled skill slots".into(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn validate_profile_for_engine(profile: &Profile, require_exec_enabled: bool) -> AppResult<()> {
-    validate_profile_references(profile)?;
-    validate_engine_profile(profile, require_exec_enabled)
-}
-
-fn count_executable_slots(profile: &Profile) -> usize {
-    let Some(rotation) = profile.rotations.first() else {
-        return 0;
-    };
-
-    rotation
-        .phases
-        .iter()
-        .flat_map(|phase| phase.skills.iter())
-        .filter(|slot| {
-            let skill_id = slot.skill_id.trim();
-            if skill_id.is_empty() {
-                return false;
-            }
-            profile.skills.skills.iter().any(|skill| {
-                skill.id.as_str() == skill_id
-                    && skill.enabled
-                    && !skill.trigger_key.trim().is_empty()
-            })
-        })
-        .count()
-}
-
-fn preflight_report_from_profile(profile: &Profile, engine_running: bool) -> EnginePreflightReport {
-    let validation = validate_profile_for_engine(profile, true);
-    EnginePreflightReport {
-        ready: validation.is_ok() && !engine_running,
-        engine_running,
-        profile_name: profile.meta.profile_name.clone(),
-        exec_enabled: profile.base.exec.enabled,
-        rotation_count: profile.rotations.len(),
-        skill_count: profile.skills.skills.len(),
-        point_count: profile.points.points.len(),
-        executable_slot_count: count_executable_slots(profile),
-        error: if engine_running {
-            Some("engine already running".into())
-        } else {
-            validation.err().map(|error| error.to_string())
-        },
-    }
-}
-
-fn stage_label(stage: AttemptStage) -> &'static str {
-    match stage {
-        AttemptStage::Idle => "IDLE",
-        AttemptStage::Preparing => "PREPARING",
-        AttemptStage::StartWait => "START_WAIT",
-        AttemptStage::Casting => "CASTING",
-        AttemptStage::CompleteWait => "COMPLETE_WAIT",
-        AttemptStage::Success => "SUCCESS",
-        AttemptStage::Failed => "FAILED",
-        AttemptStage::Stopped => "STOPPED",
-    }
-}
-
-fn runtime_payload(input: RuntimePayloadInput<'_>) -> EngineRuntimePayload {
-    let phase_name = input
-        .config
-        .phases
-        .get(
-            input
-                .phase_index
-                .min(input.config.phases.len().saturating_sub(1)),
-        )
-        .map(|phase| phase.name.as_str())
-        .unwrap_or("complete")
-        .to_string();
-
-    let mut skill_payloads: Vec<_> = input
-        .runtime
-        .skills
-        .values()
-        .map(|state| {
-            let skill_name = input
-                .skills
-                .iter()
-                .find(|skill| skill.id == state.skill_id)
-                .map(|skill| skill.name.as_str())
-                .unwrap_or("");
-
-            SkillRuntimePayload {
-                skill_id: state.skill_id.clone(),
-                skill_name: skill_name.into(),
-                state: stage_label(state.current_stage).into(),
-                node_exec: state.node_exec,
-                ready_false: state.ready_false,
-                skipped_disabled: state.skipped_disabled,
-                skipped_lock_busy: state.skipped_lock_busy,
-                attempt_started: state.attempt_started,
-                key_sent_ok: state.key_sent_ok,
-                cast_started: state.cast_started,
-                success: state.success,
-                fail: state.fail,
-            }
-        })
-        .collect();
-    skill_payloads.sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
-
-    EngineRuntimePayload {
-        running: input.runtime.engine.running,
-        paused: input.runtime.engine.paused,
-        preset_id: input.runtime.engine.preset_id.clone(),
-        stop_reason: input.runtime.engine.stop_reason.clone(),
-        total_executed: input.total_executed,
-        cycle_count: input.cycle_count,
-        phase_index: input.phase_index,
-        phase_name,
-        uptime_ms: input.uptime_ms,
-        cast_bar_roi: input.cast_bar_roi.map(CastBarRoiRuntimePayload::from),
-        skills: skill_payloads,
-    }
 }
 
 fn emit_runtime_snapshot(
@@ -534,26 +61,6 @@ fn emit_runtime_snapshot(
             .and_then(CastBarRoiProvider::get_cast_bar_roi_stats),
     });
     let _ = app.emit("engine:runtime", payload);
-}
-
-impl From<CastBarRoiStats> for CastBarRoiRuntimePayload {
-    fn from(stats: CastBarRoiStats) -> Self {
-        Self {
-            enabled: stats.enabled,
-            sample_count: stats.sample_count,
-            cache_hit_count: stats.cache_hit_count,
-            failed_sample_count: stats.failed_sample_count,
-            last_latency_us: stats.last_latency_us,
-            avg_latency_us: stats.avg_latency_us,
-            max_latency_us: stats.max_latency_us,
-            last_changed_ratio: stats.last_changed_ratio,
-            last_border_match_ratio: stats.last_border_match_ratio,
-            last_changed_from_baseline: stats.last_changed_from_baseline,
-            last_border_visible: stats.last_border_visible,
-            last_gone: stats.last_gone,
-            last_error: stats.last_error,
-        }
-    }
 }
 
 async fn run_engine_loop(
@@ -685,20 +192,16 @@ async fn run_engine_loop(
 
 #[tauri::command]
 pub fn engine_preflight(state: State<'_, AppState>) -> CommandResult<EnginePreflightReport> {
-    let dir = app_data_dir()?;
-    let store = ProfileStore::new(dir);
-    let (_profile_name, profile) = store.load_active_or_default()?;
     let engine_running = state.engine_tasks.is_running()?;
-
-    Ok(preflight_report_from_profile(&profile, engine_running))
+    Ok(load_active_preflight_report(engine_running)?)
 }
 
 #[tauri::command]
 pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult<String> {
     let reservation = state.engine_tasks.reserve()?;
 
-    let (config, skills, points, attempt_cfg) = match load_profile_config(true) {
-        Ok(config) => config,
+    let input = match load_active_engine_profile(true) {
+        Ok(input) => input,
         Err(error) => {
             state.engine_tasks.cancel_reservation(&reservation)?;
             return Err(error.into());
@@ -715,7 +218,15 @@ pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult
         if start_rx.await.is_err() || task_cancel.is_cancelled() {
             return;
         }
-        run_engine_loop(app, task_cancel, config, skills, points, attempt_cfg).await;
+        run_engine_loop(
+            app,
+            task_cancel,
+            input.config,
+            input.skills,
+            input.points,
+            input.attempt_cfg,
+        )
+        .await;
     });
     let task = EngineTaskHandle::new(reservation.id(), reservation.cancel_token(), join);
     if !state.engine_tasks.install(&reservation, task)? {
@@ -744,26 +255,19 @@ pub async fn engine_stop(state: State<'_, AppState>) -> CommandResult<String> {
 
 #[tauri::command]
 pub fn simulate_rotation() -> CommandResult<String> {
-    let (config, skills, points, attempt_cfg) = load_profile_config(false)?;
-
-    let sampler = DirectPixelSampler;
-    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+    Ok(simulation::simulate_active_rotation()?)
 }
 
 #[tauri::command]
 pub fn simulate_rotation_with_pixels(pixel_overrides: Vec<PixelOverride>) -> CommandResult<String> {
-    let (config, skills, points, attempt_cfg) = load_profile_config(false)?;
-    let sampler = OverridePixelSampler::new(pixel_overrides);
-    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+    Ok(simulation::simulate_active_rotation_with_pixels(
+        pixel_overrides,
+    )?)
 }
 
 #[tauri::command]
 pub fn simulate_profile_rotation(content: String) -> CommandResult<String> {
-    let profile = parse_profile_content(&content)?;
-    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(profile)?;
-
-    let sampler = DirectPixelSampler;
-    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+    Ok(simulation::simulate_profile_rotation(content)?)
 }
 
 #[tauri::command]
@@ -771,117 +275,15 @@ pub fn simulate_profile_rotation_with_pixels(
     content: String,
     pixel_overrides: Vec<PixelOverride>,
 ) -> CommandResult<String> {
-    let profile = parse_profile_content(&content)?;
-    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(profile)?;
-    let sampler = OverridePixelSampler::new(pixel_overrides);
-    simulate_rotation_with_sampler(&config, &skills, &points, &sampler, attempt_cfg)
+    Ok(simulation::simulate_profile_rotation_with_pixels(
+        content,
+        pixel_overrides,
+    )?)
 }
 
 #[tauri::command]
 pub fn simulate_ipc_smoke_fixture() -> CommandResult<String> {
-    let profile = smoke_fixture_profile();
-
-    let mut direct_profile = profile.clone();
-    if let Some(slot) = direct_profile
-        .rotations
-        .get_mut(0)
-        .and_then(|rotation| rotation.phases.get_mut(0))
-        .and_then(|phase| phase.skills.get_mut(0))
-    {
-        slot.condition_expr = None;
-    }
-
-    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(direct_profile)?;
-    let direct_sampler = DirectPixelSampler;
-    let direct_json =
-        simulate_rotation_with_sampler(&config, &skills, &points, &direct_sampler, attempt_cfg)?;
-
-    let (config, skills, points, attempt_cfg) = simulation_inputs_from_profile(profile.clone())?;
-    let pixel_sampler = OverridePixelSampler::new(smoke_fixture_pixel_overrides());
-    let pixel_json =
-        simulate_rotation_with_sampler(&config, &skills, &points, &pixel_sampler, attempt_cfg)?;
-
-    let summary = IpcSmokeFixtureSummary {
-        profile_id: profile.meta.profile_id,
-        direct_events: event_count_from_simulation_json(&direct_json)?,
-        pixel_events: event_count_from_simulation_json(&pixel_json)?,
-    };
-
-    serde_json::to_string_pretty(&summary)
-        .map_err(AppError::from)
-        .map_err(Into::into)
-}
-
-fn simulate_rotation_with_sampler(
-    config: &CycleConfig,
-    skills: &[Skill],
-    points: &[Point],
-    sampler: &dyn PixelSampler,
-    attempt_cfg: SkillAttemptConfig,
-) -> CommandResult<String> {
-    let roi_provider = attempt_cfg
-        .cast_bar_roi
-        .clone()
-        .map(ScreenCastBarRoiProvider::new);
-    let mut executor = CycleExecutor::new(config, points, skills, sampler, attempt_cfg)
-        .with_cast_bar_roi_provider(
-            roi_provider
-                .as_ref()
-                .map(|provider| provider as &dyn CastBarRoiProvider),
-        );
-
-    struct NoopKeySender;
-    impl KeySender for NoopKeySender {
-        fn send_key(&mut self, _: &str) -> bool {
-            true
-        }
-    }
-    let mut key_sender = NoopKeySender;
-
-    let mut sim_events: Vec<serde_json::Value> = Vec::new();
-    let max_ticks = 80;
-    let mut time_ms: u64 = 0;
-    let mut log_cursor = 0usize;
-
-    for _tick in 0..max_ticks {
-        let acted = executor.tick(&mut key_sender, &|| false, time_ms);
-
-        for log in &executor.log[log_cursor..] {
-            let skill = skills.iter().find(|skill| skill.id == log.skill_id);
-            let cast_ms = skill.map(|skill| skill.cast.readbar_ms).unwrap_or(0) as u64;
-            let cd_ms = skill.map(|skill| skill.cooldown_ms).unwrap_or(0) as u64;
-
-            sim_events.push(serde_json::json!({
-                "index": sim_events.len() + 1,
-                "timeMs": log.ts_ms,
-                "phase": log.phase_name,
-                "event": log.event,
-                "skillId": log.skill_id,
-                "skillName": log.skill_name,
-                "outcome": log.outcome,
-                "castMs": cast_ms,
-                "cdMs": cd_ms,
-                "reason": log.reason,
-            }));
-        }
-        log_cursor = executor.log.len();
-
-        if acted {
-            let gap = 50_u64;
-            let cast_ms = skills
-                .iter()
-                .find(|skill| skill.id == executor.state.last_skill_id)
-                .map(|skill| skill.cast.readbar_ms)
-                .unwrap_or(0) as u64;
-            time_ms += cast_ms.max(1) + gap;
-        } else {
-            time_ms += config.poll_interval_ms as u64;
-        }
-    }
-
-    serde_json::to_string_pretty(&serde_json::json!({ "events": sim_events }))
-        .map_err(AppError::from)
-        .map_err(Into::into)
+    Ok(simulation::simulate_ipc_smoke_fixture()?)
 }
 
 #[tauri::command]
@@ -894,8 +296,17 @@ pub fn engine_status(state: State<'_, AppState>) -> CommandResult<EngineStatus> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::cycle::{CyclePhase, SkillSlot};
+    use crate::ast::evaluator::CastBarRoiStats;
+    use crate::engine::profile_config::{
+        attempt_config_from_base, preflight_report_from_profile, validate_engine_profile,
+        validate_profile_for_engine,
+    };
+    use crate::engine::runtime_state::RuntimeState;
+    use crate::engine::simulation::{OverridePixelSampler, simulate_rotation_with_sampler};
+    use crate::error::AppError;
+    use crate::models::cycle::{CyclePhase, SkillSlot, SkillSlotRole};
     use crate::models::point::Point;
+    use crate::models::profile::Profile;
     use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig};
     use crate::store::profile_store::default_profile;
 
