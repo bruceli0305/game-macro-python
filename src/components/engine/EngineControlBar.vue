@@ -69,7 +69,6 @@ async function startWithValidation() {
     await start();
     message.success("引擎已启动");
   } catch (e) {
-    console.error("engine_start failed:", e);
     message.error(String(e || "引擎启动失败"));
   }
 }

@@ -237,7 +237,6 @@ async function runSim() {
     events.value = result.events || [];
     buildTimeline(events.value);
   } catch (e) {
-    console.error("推演失败:", e);
     message.error(String(e || "推演失败"));
   } finally {
     running.value = false;
@@ -327,7 +326,6 @@ async function copyDebugJson() {
     await navigator.clipboard.writeText(simulationDebugJson(events.value));
     message.success("推演调试 JSON 已复制");
   } catch (error) {
-    console.error("copy simulation debug json failed:", error);
     message.error("复制失败，请检查剪贴板权限");
   }
 }
@@ -338,7 +336,6 @@ async function copyIpcSmokeJson() {
     await navigator.clipboard.writeText(ipcSmokeDebugJson(ipcSmokeSteps.value));
     message.success("IPC 自检 JSON 已复制");
   } catch (error) {
-    console.error("copy IPC smoke json failed:", error);
     message.error("复制失败，请检查剪贴板权限");
   }
 }
@@ -356,7 +353,7 @@ function onActiveProfileChanged() {
 onMounted(() => {
   window.addEventListener("profile:active-changed", onActiveProfileChanged);
   loadSimulatorProfile().catch((e) => {
-    console.error("加载推演配置失败:", e);
+    message.error(String(e || "加载推演配置失败"));
   });
 });
 onUnmounted(() => window.removeEventListener("profile:active-changed", onActiveProfileChanged));

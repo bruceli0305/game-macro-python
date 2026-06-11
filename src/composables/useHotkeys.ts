@@ -5,8 +5,7 @@ import { isRegistered, register, unregister } from "@tauri-apps/plugin-global-sh
 import { useEngine } from "./useEngine";
 import { useEnginePreflight } from "./useEnginePreflight";
 import { useProfile } from "./useProfile";
-
-type AppMessageType = "success" | "error" | "warning" | "info";
+import { notifyApp } from "../utils/app-message";
 
 const DEFAULT_TOGGLE_HOTKEY = "F9";
 const DEFAULT_PICK_HOTKEY = "F8";
@@ -29,10 +28,6 @@ const callbackStats = {
   lastToggleAt: null as string | null,
   lastPickAt: null as string | null,
 };
-
-function notify(type: AppMessageType, content: string) {
-  window.dispatchEvent(new CustomEvent("app:message", { detail: { type, content } }));
-}
 
 function normalizeHotkey(value: string | undefined, fallback: string): string {
   const hotkey = value?.trim();
@@ -57,7 +52,7 @@ export function useHotkeys() {
 
   async function registerHotkey(hotkey: string, handler: () => Promise<void>): Promise<boolean> {
     if (await isRegistered(hotkey)) {
-      console.warn(`global shortcut already registered: ${hotkey}`);
+      notifyApp("warning", `Global shortcut already registered: ${hotkey}`);
       return false;
     }
     await register(hotkey, handler);
@@ -74,11 +69,11 @@ export function useHotkeys() {
     try {
       hotkeys = await configuredHotkeys();
     } catch (error) {
-      console.warn("load hotkey config failed, using defaults:", error);
+      notifyApp("warning", `Failed to load hotkey config, using defaults: ${String(error)}`);
     }
 
     if (hotkeys.toggle === hotkeys.pick) {
-      notify("error", `取色确认热键和引擎启停热键不能相同：${hotkeys.toggle}`);
+      notifyApp("error", `取色确认热键和引擎启停热键不能相同：${hotkeys.toggle}`);
       return false;
     }
 
@@ -92,25 +87,24 @@ export function useHotkeys() {
 
         if (store.isRunning) {
           await stop();
-          notify("info", "引擎已停止");
+          notifyApp("info", "引擎已停止");
           return;
         }
 
         const error = await validateEngineStart();
         if (error) {
-          console.warn("engine preflight failed:", error);
-          notify("error", error);
+          notifyApp("error", error);
           return;
         }
 
         await start();
-        notify("success", "引擎已启动");
+        notifyApp("success", "引擎已启动");
       });
       if (registered) {
         registeredToggleHotkey.value = hotkeys.toggle;
       }
     } catch (error) {
-      console.warn(`${hotkeys.toggle} registration failed:`, error);
+      notifyApp("warning", `${hotkeys.toggle} registration failed: ${String(error)}`);
     }
 
     try {
@@ -123,7 +117,7 @@ export function useHotkeys() {
         registeredPickHotkey.value = hotkeys.pick;
       }
     } catch (error) {
-      console.warn(`${hotkeys.pick} registration failed:`, error);
+      notifyApp("warning", `${hotkeys.pick} registration failed: ${String(error)}`);
     }
 
     return (
@@ -155,9 +149,9 @@ export function useHotkeys() {
   async function reload() {
     const ok = await setup();
     if (ok) {
-      notify("success", "全局热键已更新");
+      notifyApp("success", "全局热键已更新");
     } else {
-      notify("warning", "全局热键未完全注册，请检查是否被其他程序占用");
+      notifyApp("warning", "全局热键未完全注册，请检查是否被其他程序占用");
     }
   }
 

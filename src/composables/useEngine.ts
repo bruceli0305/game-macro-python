@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEngineStore } from "../stores/engine";
+import { notifyApp } from "../utils/app-message";
 import type { EngineRuntimeSnapshot, SkillAttemptStage } from "../types/engine";
 import type { Profile } from "../types/profile";
 
@@ -75,7 +76,6 @@ export function useEngine() {
 
       await invoke("engine_start");
     } catch (e) {
-      console.error("engine_start failed:", e);
       cleanup();
       throw e;
     }
@@ -85,7 +85,7 @@ export function useEngine() {
     try {
       await invoke("engine_stop");
     } catch (e) {
-      console.error("engine_stop failed:", e);
+      notifyApp("error", String(e || "engine_stop failed"));
     }
   }
 

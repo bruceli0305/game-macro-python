@@ -499,7 +499,6 @@ async function saveProfile() {
     loadedProfile.value = next;
     message.success("循环配置已保存");
   } catch (e) {
-    console.error(e);
     message.error("保存失败，请检查技能和点位引用");
   }
 }

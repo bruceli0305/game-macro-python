@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { NModal, NCard, NButton, NSpace, NInput, NDataTable } from "naive-ui";
+import { NModal, NCard, NButton, NSpace, NInput, NDataTable, useMessage } from "naive-ui";
 import { IconSearch, IconDownload } from "@tabler/icons-vue";
 import { useSkill, type Gw2SkillInfo } from "../../composables/useSkill";
 import type { DataTableColumns } from "naive-ui";
@@ -16,6 +16,7 @@ const results = ref<Gw2SkillInfo[]>([]);
 const selected = ref<number[]>([]);
 const loading = ref(false);
 const { searchGw2Skills } = useSkill();
+const message = useMessage();
 
 const columns: DataTableColumns<Gw2SkillInfo> = [
   { title: "ID", key: "id", width: 60 },
@@ -39,7 +40,7 @@ async function search() {
   try {
     results.value = await searchGw2Skills(query.value);
   } catch (e) {
-    console.error("搜索失败:", e);
+    message.error(String(e || "搜索失败"));
   }
   loading.value = false;
 }
