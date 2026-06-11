@@ -6,15 +6,27 @@ import { useEngineStore } from "../stores/engine";
 import type { EngineRuntimeSnapshot, SkillAttemptStage } from "../types/engine";
 import type { Profile } from "../types/profile";
 
+let unlistenTick: UnlistenFn | null = null;
+let unlistenRuntime: UnlistenFn | null = null;
+let unlistenLog: UnlistenFn | null = null;
+let unlistenStarted: UnlistenFn | null = null;
+let unlistenStopped: UnlistenFn | null = null;
+
+function cleanupEngineListeners() {
+  unlistenTick?.();
+  unlistenTick = null;
+  unlistenRuntime?.();
+  unlistenRuntime = null;
+  unlistenLog?.();
+  unlistenLog = null;
+  unlistenStarted?.();
+  unlistenStarted = null;
+  unlistenStopped?.();
+  unlistenStopped = null;
+}
 
 export function useEngine() {
   const store = useEngineStore();
-
-  let unlistenTick: UnlistenFn | null = null;
-  let unlistenRuntime: UnlistenFn | null = null;
-  let unlistenLog: UnlistenFn | null = null;
-  let unlistenStarted: UnlistenFn | null = null;
-  let unlistenStopped: UnlistenFn | null = null;
 
   async function start(): Promise<void> {
     try {
@@ -118,16 +130,7 @@ export function useEngine() {
 
   /** 取消事件监听 */
   function cleanup() {
-    unlistenTick?.();
-    unlistenTick = null;
-    unlistenRuntime?.();
-    unlistenRuntime = null;
-    unlistenLog?.();
-    unlistenLog = null;
-    unlistenStarted?.();
-    unlistenStarted = null;
-    unlistenStopped?.();
-    unlistenStopped = null;
+    cleanupEngineListeners();
   }
 
   return {

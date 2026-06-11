@@ -285,6 +285,31 @@ fn decode_expr(json: &Value, path: &str, diags: &mut Vec<Diagnostic>) -> Option<
                 tolerance,
             })
         }
+        "pixel_point_nearest" => {
+            let expected_point_id = obj
+                .get("expected_point_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let candidate_point_ids = obj
+                .get("candidate_point_ids")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let max_delta = obj.get("max_delta").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let min_margin = obj.get("min_margin").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            Some(Expr::PixelPointNearest {
+                expected_point_id,
+                candidate_point_ids,
+                max_delta,
+                min_margin,
+            })
+        }
         "pixel_skill" => {
             let skill_id = obj
                 .get("skill_id")
@@ -496,6 +521,45 @@ fn semantic_validate(expr: &Expr, path: &str, diags: &mut Vec<Diagnostic>) {
                 ));
             }
         }
+        Expr::PixelPointNearest {
+            expected_point_id,
+            candidate_point_ids,
+            ..
+        } => {
+            if expected_point_id.trim().is_empty() {
+                diags.push(Diagnostic::error(
+                    "expr.expected_point_id.empty",
+                    path,
+                    "expected_point_id 不能为空",
+                ));
+            }
+            if candidate_point_ids.len() < 2 {
+                diags.push(Diagnostic::error(
+                    "expr.candidate_point_ids.too_few",
+                    path,
+                    "candidate_point_ids 至少需要 2 个点位",
+                ));
+            }
+            if !candidate_point_ids
+                .iter()
+                .any(|point_id| point_id.trim() == expected_point_id.trim())
+            {
+                diags.push(Diagnostic::error(
+                    "expr.candidate_point_ids.missing_expected",
+                    path,
+                    "candidate_point_ids 必须包含 expected_point_id",
+                ));
+            }
+            for (index, point_id) in candidate_point_ids.iter().enumerate() {
+                if point_id.trim().is_empty() {
+                    diags.push(Diagnostic::error(
+                        "expr.candidate_point_id.empty",
+                        &format!("{path}.candidate_point_ids[{index}]"),
+                        "candidate point id must not be empty",
+                    ));
+                }
+            }
+        }
         Expr::PixelMatchSkill { skill_id, .. }
         | Expr::PixelSkillNotMatch { skill_id, .. }
         | Expr::PixelSkillBlack { skill_id, .. }
@@ -596,6 +660,18 @@ fn collect_probes(expr: &Expr, probes: &mut ProbeRequirements) {
             let pid = point_id.trim();
             if !pid.is_empty() && !probes.point_ids.contains(&pid.to_string()) {
                 probes.point_ids.push(pid.to_string());
+            }
+        }
+        Expr::PixelPointNearest {
+            expected_point_id,
+            candidate_point_ids,
+            ..
+        } => {
+            for point_id in std::iter::once(expected_point_id).chain(candidate_point_ids.iter()) {
+                let pid = point_id.trim();
+                if !pid.is_empty() && !probes.point_ids.contains(&pid.to_string()) {
+                    probes.point_ids.push(pid.to_string());
+                }
             }
         }
         Expr::PixelMatchSkill { skill_id, .. }
@@ -729,6 +805,20 @@ mod tests {
         assert!(!r.has_errors());
         assert!(matches!(r.expr, Some(Expr::PixelPointBlack { .. })));
         assert_eq!(r.probes.point_ids, vec!["pt1"]);
+    }
+
+    #[test]
+    fn test_decode_pixel_point_nearest() {
+        let r = compile(json!({
+            "type": "pixel_point_nearest",
+            "expected_point_id": "fire",
+            "candidate_point_ids": ["fire", "water", "air", "earth"],
+            "max_delta": 96,
+            "min_margin": 20
+        }));
+        assert!(!r.has_errors());
+        assert!(matches!(r.expr, Some(Expr::PixelPointNearest { .. })));
+        assert_eq!(r.probes.point_ids, vec!["fire", "water", "air", "earth"]);
     }
 
     #[test]

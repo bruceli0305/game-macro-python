@@ -7,17 +7,16 @@
 //! 4. Advance pending attempts across later ticks without blocking.
 //! 5. Advance or reset phases after attempts finish.
 
-use crate::ast::compiler::compile_expr_json;
-use crate::ast::evaluator::{CastBarRoiProvider, EvalContext, PixelSampler, evaluate};
+use crate::ast::evaluator::{CastBarRoiProvider, EvalContext, PixelSampler, TriBool, evaluate};
 use crate::ast::nodes::Expr;
 use crate::engine::runtime_state::RuntimeState;
-use crate::engine::skill_attempt::{
-    Advance, AttemptEvent, AttemptFailurePolicy, CompletePolicy, ExecutionResult, KeySender,
-    SkillAttemptConfig,
-};
+use crate::engine::skill_attempt::{AttemptEvent, KeySender, SkillAttemptConfig};
+// Re-exported for tests (CompletePolicy is used in test fixtures).
+#[allow(unused_imports)]
+pub(crate) use crate::engine::skill_attempt::CompletePolicy;
 use crate::models::cycle::{
-    AssistInterruptPolicy, AssistLaneConfig, CycleConfig, CyclePhase, ObserverActionSlot,
-    ObserverLaneConfig, PhaseFallbackTransition, RuntimeAction, SkillSlot,
+    AssistInterruptPolicy, AssistLaneConfig, CycleConfig, ObserverActionSlot, ObserverLaneConfig,
+    ReadinessPolicy, SkillSlot,
 };
 use crate::models::point::Point;
 use crate::models::skill::Skill;
@@ -60,14 +59,14 @@ pub struct CycleExecLogEntry {
     pub reason: String,
 }
 
-struct CycleLogEvent<'a> {
-    ts_ms: u64,
-    phase_index: usize,
-    phase_name: &'a str,
-    event: &'a str,
-    skill_id: &'a str,
-    outcome: &'a str,
-    reason: &'a str,
+pub(crate) struct CycleLogEvent<'a> {
+    pub(crate) ts_ms: u64,
+    pub(crate) phase_index: usize,
+    pub(crate) phase_name: &'a str,
+    pub(crate) event: &'a str,
+    pub(crate) skill_id: &'a str,
+    pub(crate) outcome: &'a str,
+    pub(crate) reason: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,55 +83,22 @@ pub struct CycleExecutor<'a> {
     pub state: CycleExecState,
     pub runtime: RuntimeState,
     pub log: Vec<CycleExecLogEntry>,
-    pending_attempt: Option<PendingAttempt>,
-    suspended_main_attempt: Option<PendingAttempt>,
 
-    slot_expr_cache: HashMap<usize, CompiledSlotExprs>,
-    observer_action_expr_cache: HashMap<usize, Option<Expr>>,
-    transition_rule_expr_cache: Vec<Vec<Option<Expr>>>,
+    // Owned by attempt_tracker / phase_manager impl blocks.
+    pub(crate) pending_attempt: Option<PendingAttempt>,
+    pub(crate) suspended_main_attempt: Option<PendingAttempt>,
+    pub(crate) slot_expr_cache: HashMap<usize, CompiledSlotExprs>,
+    pub(crate) observer_action_expr_cache: HashMap<usize, Option<Expr>>,
+    pub(crate) transition_rule_expr_cache: Vec<Vec<Option<Expr>>>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct CompiledSlotExprs {
-    condition_expr: Option<Expr>,
-    start_expr: Option<Expr>,
-    complete_expr: Option<Expr>,
-}
-
-#[derive(Debug, Clone)]
-struct PendingAttempt {
-    context: AttemptContext,
-    skill_id: String,
-    post_actions: Vec<RuntimeAction>,
-    readbar_ms: u32,
-    start_expr: Expr,
-    complete_expr: Option<Expr>,
-    protected_release: bool,
-    attempt_cfg: SkillAttemptConfig,
-    stage: PendingAttemptStage,
-    retries_left: u32,
-    deadline_ms: u64,
-    next_poll_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-enum AttemptContext {
-    Main {
-        phase_index: usize,
-    },
-    Assist {
-        lane_index: usize,
-        lane_id: String,
-        lane_name: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingAttemptStage {
-    StartWait,
-    RetryDelay,
-    CompleteWait,
-}
+// Re-export items moved to sibling modules so `super::*` in tests still sees them.
+pub(crate) use crate::engine::phase_manager::phase_reacquire_score;
+pub(crate) use crate::engine::runtime_config::{
+    AttemptContext, CompiledSlotExprs, PendingAttempt, PendingAttemptStage,
+    build_observer_action_expr_cache, build_slot_expr_cache, build_transition_rule_expr_cache,
+    observer_action_cache_key, slot_cache_key,
+};
 
 impl<'a> CycleExecutor<'a> {
     pub fn new(
@@ -180,6 +146,59 @@ impl<'a> CycleExecutor<'a> {
     ) -> Self {
         self.cast_bar_roi = provider;
         self
+    }
+
+    /// Select the best matching phase from the current screen state.
+    ///
+    /// This is intended for engine startup/resume after the player moved,
+    /// handled mechanics, or manually released skills. Explicit transition
+    /// rules win first; otherwise the first completion slot's complete signal
+    /// is treated as a phase anchor.
+    pub fn reacquire_phase_from_current_frame(&mut self, now_ms: u64) -> Option<usize> {
+        self.runtime.set_now_ms(now_ms);
+        self.sampler.begin_tick(now_ms);
+        if let Some(provider) = self.cast_bar_roi {
+            provider.begin_tick(now_ms);
+        }
+
+        if self.config.phases.is_empty() {
+            return None;
+        }
+
+        for (phase_idx, phase) in self.config.phases.iter().enumerate() {
+            for (rule_index, rule) in phase.transition_rules.iter().enumerate() {
+                if !self.transition_rule_matches(phase_idx, rule_index) {
+                    continue;
+                }
+                let Some(target_index) = self.find_phase_index(&rule.target_phase) else {
+                    continue;
+                };
+                let label = rule.label.trim();
+                let rule_name = if label.is_empty() { "unnamed" } else { label };
+                self.apply_reacquired_phase(
+                    target_index,
+                    now_ms,
+                    &format!("transition_rule:{rule_name}->{}", rule.target_phase.trim()),
+                );
+                return Some(target_index);
+            }
+        }
+
+        let best_phase = self
+            .config
+            .phases
+            .iter()
+            .enumerate()
+            .filter(|(_, phase)| self.phase_anchor_matches(phase))
+            .max_by_key(|(phase_idx, phase)| phase_reacquire_score(*phase_idx, phase))
+            .map(|(phase_idx, _)| phase_idx);
+
+        if let Some(phase_idx) = best_phase {
+            let phase_name = self.config.phases[phase_idx].name.trim();
+            self.apply_reacquired_phase(phase_idx, now_ms, &format!("phase_anchor:{phase_name}"));
+        }
+
+        best_phase
     }
 
     /// Advance the cycle executor by one scheduler tick.
@@ -260,6 +279,15 @@ impl<'a> CycleExecutor<'a> {
                 && phase.complete_when != "always"
                 && !self.slot_can_fire_more_this_cycle(sid)
             {
+                self.log_event(CycleLogEvent {
+                    ts_ms: now_ms,
+                    phase_index: phase_idx,
+                    phase_name: &phase.name,
+                    event: "skip",
+                    skill_id: sid,
+                    outcome: "ALREADY_FIRED",
+                    reason: "already_fired_this_phase",
+                });
                 continue;
             }
 
@@ -302,10 +330,27 @@ impl<'a> CycleExecutor<'a> {
             return true;
         }
 
+        if phase.complete_when == "none_ready" && self.is_phase_complete(phase) {
+            self.log_event(CycleLogEvent {
+                ts_ms: now_ms,
+                phase_index: phase_idx,
+                phase_name: &phase.name,
+                event: "phase_complete",
+                skill_id: "",
+                outcome: "NONE_READY",
+                reason: "all_slots_fired_or_not_ready",
+            });
+            self.on_phase_complete(phase_idx, phase, now_ms);
+            if self.state.phase_index >= self.config.phases.len() {
+                self.on_cycle_reset();
+            }
+            return true;
+        }
+
         self.try_assist_lanes(key_sender, stopped, now_ms, None)
     }
 
-    fn check_skill_ready(&self, slot: &SkillSlot, now_ms: u64) -> (bool, String) {
+    pub(super) fn check_skill_ready(&self, slot: &SkillSlot, now_ms: u64) -> (bool, String) {
         let sid = slot.skill_id.trim();
         if sid.is_empty() {
             return (false, "skill_id_empty".into());
@@ -323,41 +368,57 @@ impl<'a> CycleExecutor<'a> {
             }
         }
         if !self.slot_can_fire_more_this_cycle(sid) {
-            let shot_limit = skill.shots_per_cycle.max(1);
+            let shot_limit = skill.shots_per_cycle;
             return (false, format!("shots_per_cycle_exhausted={shot_limit}"));
         }
         if !self.skill_has_ammo(skill) {
             return (false, "ammo_unavailable".into());
         }
 
-        if let Some(e) = self
-            .slot_expr_cache
-            .get(&slot_cache_key(slot))
-            .and_then(|exprs| exprs.condition_expr.as_ref())
-        {
-            let ctx = EvalContext {
-                points: self.points,
-                skills: self.skills,
-                sampler: self.sampler,
-                metrics: Some(&self.runtime),
-                timers: Some(&self.runtime),
-                markers: Some(&self.runtime),
-                counters: Some(&self.runtime),
-                baseline: None,
-                cast_bar_roi: self.cast_bar_roi,
-            };
-            let result = evaluate(e, &ctx);
-            match &result {
-                crate::ast::evaluator::TriBool::True => (true, "condition_true".into()),
-                crate::ast::evaluator::TriBool::False(reason) => {
-                    (false, format!("condition_false: {reason}"))
-                }
-                crate::ast::evaluator::TriBool::Unknown(reason) => {
-                    (false, format!("condition_unknown: {reason}"))
+        let ctx = EvalContext {
+            points: self.points,
+            skills: self.skills,
+            sampler: self.sampler,
+            metrics: Some(&self.runtime),
+            timers: Some(&self.runtime),
+            markers: Some(&self.runtime),
+            counters: Some(&self.runtime),
+            baseline: None,
+            cast_bar_roi: self.cast_bar_roi,
+        };
+        let slot_exprs = self.slot_expr_cache.get(&slot_cache_key(slot));
+
+        if let Some(condition_expr) = slot_exprs.and_then(|exprs| exprs.condition_expr.as_ref()) {
+            match evaluate(condition_expr, &ctx) {
+                TriBool::True => {}
+                TriBool::False(reason) => return (false, format!("condition_false: {reason}")),
+                TriBool::Unknown(reason) => {
+                    return (false, format!("condition_unknown: {reason}"));
                 }
             }
-        } else {
-            (true, "no_condition".into())
+        }
+
+        let Some(readiness_expr) = slot_exprs.and_then(|exprs| exprs.readiness_expr.as_ref())
+        else {
+            return if slot_exprs
+                .and_then(|exprs| exprs.condition_expr.as_ref())
+                .is_some()
+            {
+                (true, "condition_true".into())
+            } else {
+                (true, "no_condition".into())
+            };
+        };
+
+        match evaluate(readiness_expr, &ctx) {
+            TriBool::True => (true, "condition_true readiness_true".into()),
+            TriBool::False(reason) | TriBool::Unknown(reason)
+                if slot.readiness_policy == ReadinessPolicy::Advisory =>
+            {
+                (true, format!("condition_true readiness_advisory: {reason}"))
+            }
+            TriBool::False(reason) => (false, format!("readiness_false: {reason}")),
+            TriBool::Unknown(reason) => (false, format!("readiness_unknown: {reason}")),
         }
     }
 
@@ -524,13 +585,9 @@ impl<'a> CycleExecutor<'a> {
             };
             let result = evaluate(expr, &ctx);
             match &result {
-                crate::ast::evaluator::TriBool::True => (true, "condition_true".into()),
-                crate::ast::evaluator::TriBool::False(reason) => {
-                    (false, format!("condition_false: {reason}"))
-                }
-                crate::ast::evaluator::TriBool::Unknown(reason) => {
-                    (false, format!("condition_unknown: {reason}"))
-                }
+                TriBool::True => (true, "condition_true".into()),
+                TriBool::False(reason) => (false, format!("condition_false: {reason}")),
+                TriBool::Unknown(reason) => (false, format!("condition_unknown: {reason}")),
             }
         } else {
             (true, "no_condition".into())
@@ -594,493 +651,7 @@ impl<'a> CycleExecutor<'a> {
         );
     }
 
-    fn slot_attempt_cfg(&self, slot: &SkillSlot) -> SkillAttemptConfig {
-        let mut cfg = self.attempt_cfg.clone();
-        let Some(policy) = &slot.attempt_policy else {
-            return cfg;
-        };
-
-        cfg.max_retries = policy.max_attempts.saturating_sub(1);
-        cfg.start_timeout_ms = policy.start_timeout_ms;
-        cfg.retry_gap_ms = policy.retry_delay_ms;
-        cfg.complete_timeout_ms =
-            (policy.complete_timeout_ms > 0).then_some(policy.complete_timeout_ms);
-        cfg.failure_policy = match policy.failure_policy.trim() {
-            "hold_phase" => AttemptFailurePolicy::HoldPhase,
-            "next_phase" => AttemptFailurePolicy::NextPhase,
-            _ => AttemptFailurePolicy::NextSlot,
-        };
-        cfg.complete_policy = match policy.complete_fallback.trim() {
-            "fail" => CompletePolicy::HybridFail,
-            "assume_success_after_timeout" => CompletePolicy::HybridAssume,
-            _ => cfg.complete_policy,
-        };
-        cfg
-    }
-
-    fn begin_skill_attempt(
-        &mut self,
-        key_sender: &mut dyn KeySender,
-        slot: &SkillSlot,
-        stopped: &dyn Fn() -> bool,
-        now_ms: u64,
-        context: AttemptContext,
-    ) -> Option<ExecutionResult> {
-        let sid = slot.skill_id.trim().to_string();
-        let attempt_cfg = self.slot_attempt_cfg(slot);
-        let Some(skill) = self.skills.iter().find(|skill| skill.id.as_str() == sid) else {
-            return Some(ExecutionResult::failed(
-                Advance::Advance,
-                attempt_cfg.poll_not_ready_ms,
-                "skill_missing",
-            ));
-        };
-
-        if stopped() {
-            self.apply_attempt_event(AttemptEvent::Stopped {
-                skill_id: sid.clone(),
-            });
-            return Some(ExecutionResult::stopped());
-        }
-
-        self.apply_attempt_event(AttemptEvent::AttemptStarted {
-            skill_id: sid.clone(),
-        });
-
-        if !key_sender.send_key(&skill.trigger_key) {
-            self.apply_attempt_event(AttemptEvent::Failed {
-                skill_id: sid.clone(),
-                reason: "send_key_failed".into(),
-            });
-            return Some(ExecutionResult::failed(
-                attempt_cfg.failure_policy.advance(),
-                attempt_cfg.poll_not_ready_ms,
-                "send_key_failed",
-            ));
-        }
-
-        self.apply_attempt_event(AttemptEvent::KeySentOk {
-            skill_id: sid.clone(),
-        });
-
-        let slot_exprs = self.slot_expr_cache.get(&slot_cache_key(slot));
-        self.pending_attempt = Some(PendingAttempt {
-            context,
-            skill_id: sid,
-            post_actions: slot.post_actions.clone(),
-            readbar_ms: slot.override_cast_ms.unwrap_or(skill.cast.readbar_ms),
-            start_expr: slot_exprs
-                .and_then(|exprs| exprs.start_expr.clone())
-                .unwrap_or(Expr::Const { value: true }),
-            complete_expr: slot_exprs.and_then(|exprs| exprs.complete_expr.clone()),
-            protected_release: slot.protected_release,
-            attempt_cfg: attempt_cfg.clone(),
-            stage: PendingAttemptStage::StartWait,
-            retries_left: attempt_cfg.max_retries,
-            deadline_ms: now_ms.saturating_add(u64::from(attempt_cfg.start_timeout_ms)),
-            next_poll_ms: now_ms,
-        });
-
-        let pending = self.pending_attempt.take().expect("pending attempt set");
-        self.advance_pending_attempt(key_sender, stopped, now_ms, pending);
-        None
-    }
-
-    fn advance_pending_attempt(
-        &mut self,
-        key_sender: &mut dyn KeySender,
-        stopped: &dyn Fn() -> bool,
-        now_ms: u64,
-        mut pending: PendingAttempt,
-    ) -> bool {
-        if stopped() {
-            self.apply_attempt_event(AttemptEvent::Stopped {
-                skill_id: pending.skill_id,
-            });
-            return true;
-        }
-
-        if now_ms < pending.next_poll_ms {
-            self.state.next_ready_ms = pending.next_poll_ms;
-            self.pending_attempt = Some(pending);
-            return false;
-        }
-
-        let result = match pending.stage {
-            PendingAttemptStage::StartWait => {
-                self.advance_start_wait(key_sender, now_ms, &mut pending)
-            }
-            PendingAttemptStage::RetryDelay => {
-                self.advance_retry_delay(key_sender, now_ms, &mut pending)
-            }
-            PendingAttemptStage::CompleteWait => self.advance_complete_wait(now_ms, &mut pending),
-        };
-
-        match result {
-            Some(execution) => {
-                match pending.context.clone() {
-                    AttemptContext::Main { phase_index } => {
-                        let phase = self.config.phases.get(phase_index).cloned();
-                        if let Some(phase) = phase {
-                            self.finish_skill_attempt(
-                                phase_index,
-                                &phase,
-                                &pending.post_actions,
-                                &pending.skill_id,
-                                execution,
-                                now_ms,
-                            );
-                        }
-                    }
-                    AttemptContext::Assist { .. } => {
-                        self.finish_assist_attempt(
-                            &pending.context,
-                            &pending.post_actions,
-                            &pending.skill_id,
-                            execution,
-                            now_ms,
-                        );
-                        if let Some(main_pending) = self.suspended_main_attempt.take() {
-                            self.pending_attempt = Some(main_pending);
-                        }
-                    }
-                }
-                true
-            }
-            None => {
-                self.state.next_ready_ms = pending.next_poll_ms;
-                self.pending_attempt = Some(pending);
-                false
-            }
-        }
-    }
-
-    fn advance_start_wait(
-        &mut self,
-        key_sender: &mut dyn KeySender,
-        now_ms: u64,
-        pending: &mut PendingAttempt,
-    ) -> Option<ExecutionResult> {
-        if self.evaluate_expr(&pending.start_expr) {
-            self.apply_attempt_event(AttemptEvent::CastStarted {
-                skill_id: pending.skill_id.clone(),
-            });
-            self.apply_attempt_event(AttemptEvent::CompleteWaitStarted {
-                skill_id: pending.skill_id.clone(),
-            });
-            pending.stage = PendingAttemptStage::CompleteWait;
-            pending.deadline_ms =
-                self.complete_deadline_ms(&pending.attempt_cfg, now_ms, pending.readbar_ms);
-            pending.next_poll_ms = now_ms;
-            return self.advance_complete_wait(now_ms, pending);
-        }
-
-        if now_ms >= pending.deadline_ms {
-            if pending.retries_left == 0 {
-                self.apply_attempt_event(AttemptEvent::Failed {
-                    skill_id: pending.skill_id.clone(),
-                    reason: "no_cast_start".into(),
-                });
-                return Some(ExecutionResult::failed(
-                    pending.attempt_cfg.failure_policy.advance(),
-                    pending.attempt_cfg.poll_not_ready_ms,
-                    "no_cast_start",
-                ));
-            }
-            pending.stage = PendingAttemptStage::RetryDelay;
-            pending.next_poll_ms =
-                now_ms.saturating_add(u64::from(pending.attempt_cfg.retry_gap_ms));
-            return None;
-        }
-
-        pending.next_poll_ms = now_ms
-            .saturating_add(u64::from(pending.attempt_cfg.start_poll_ms.max(1)))
-            .min(pending.deadline_ms);
-        let _ = key_sender;
-        None
-    }
-
-    fn advance_retry_delay(
-        &mut self,
-        key_sender: &mut dyn KeySender,
-        now_ms: u64,
-        pending: &mut PendingAttempt,
-    ) -> Option<ExecutionResult> {
-        if let Some(skill) = self
-            .skills
-            .iter()
-            .find(|skill| skill.id.as_str() == pending.skill_id)
-        {
-            if !key_sender.send_key(&skill.trigger_key) {
-                self.apply_attempt_event(AttemptEvent::Failed {
-                    skill_id: pending.skill_id.clone(),
-                    reason: "send_key_failed_retry".into(),
-                });
-                return Some(ExecutionResult::failed(
-                    pending.attempt_cfg.failure_policy.advance(),
-                    pending.attempt_cfg.poll_not_ready_ms,
-                    "send_key_failed_retry",
-                ));
-            }
-            self.apply_attempt_event(AttemptEvent::KeySentOk {
-                skill_id: pending.skill_id.clone(),
-            });
-            pending.retries_left = pending.retries_left.saturating_sub(1);
-            pending.stage = PendingAttemptStage::StartWait;
-            pending.deadline_ms =
-                now_ms.saturating_add(u64::from(pending.attempt_cfg.start_timeout_ms));
-            pending.next_poll_ms = now_ms;
-            return self.advance_start_wait(key_sender, now_ms, pending);
-        }
-
-        Some(ExecutionResult::failed(
-            pending.attempt_cfg.failure_policy.advance(),
-            pending.attempt_cfg.poll_not_ready_ms,
-            "skill_missing",
-        ))
-    }
-
-    fn advance_complete_wait(
-        &mut self,
-        now_ms: u64,
-        pending: &mut PendingAttempt,
-    ) -> Option<ExecutionResult> {
-        match pending.attempt_cfg.complete_policy {
-            CompletePolicy::AssumeSuccess => {
-                if pending.readbar_ms == 0 || now_ms >= pending.deadline_ms {
-                    self.apply_attempt_event(AttemptEvent::Succeeded {
-                        skill_id: pending.skill_id.clone(),
-                    });
-                    return Some(ExecutionResult::success(
-                        pending.attempt_cfg.default_gap_ms,
-                        "success",
-                    ));
-                }
-                pending.next_poll_ms = pending.deadline_ms;
-                return None;
-            }
-            CompletePolicy::CdBlack => {
-                if self.skill_pixel_is_black(&pending.skill_id) {
-                    self.apply_attempt_event(AttemptEvent::Succeeded {
-                        skill_id: pending.skill_id.clone(),
-                    });
-                    return Some(ExecutionResult::success(
-                        pending.attempt_cfg.default_gap_ms,
-                        "success",
-                    ));
-                }
-                if now_ms >= pending.deadline_ms {
-                    self.apply_attempt_event(AttemptEvent::Failed {
-                        skill_id: pending.skill_id.clone(),
-                        reason: "timeout".into(),
-                    });
-                    return Some(ExecutionResult::failed(
-                        pending.attempt_cfg.failure_policy.advance(),
-                        pending.attempt_cfg.poll_not_ready_ms,
-                        "timeout",
-                    ));
-                }
-            }
-            CompletePolicy::HybridAssume if pending.complete_expr.is_none() => {
-                if pending.readbar_ms == 0 || now_ms >= pending.deadline_ms {
-                    self.apply_attempt_event(AttemptEvent::Succeeded {
-                        skill_id: pending.skill_id.clone(),
-                    });
-                    return Some(ExecutionResult::success(
-                        pending.attempt_cfg.default_gap_ms,
-                        "hybrid_assume_no_expr",
-                    ));
-                }
-                pending.next_poll_ms = pending.deadline_ms;
-                return None;
-            }
-            _ => {
-                let Some(expr) = pending.complete_expr.as_ref() else {
-                    self.apply_attempt_event(AttemptEvent::Failed {
-                        skill_id: pending.skill_id.clone(),
-                        reason: "complete_signal_missing".into(),
-                    });
-                    return Some(ExecutionResult::failed(
-                        pending.attempt_cfg.failure_policy.advance(),
-                        pending.attempt_cfg.poll_not_ready_ms,
-                        "complete_signal_missing",
-                    ));
-                };
-
-                if self.evaluate_expr(expr) {
-                    self.apply_attempt_event(AttemptEvent::Succeeded {
-                        skill_id: pending.skill_id.clone(),
-                    });
-                    return Some(ExecutionResult::success(
-                        pending.attempt_cfg.default_gap_ms,
-                        "success",
-                    ));
-                }
-
-                if now_ms >= pending.deadline_ms {
-                    if pending.attempt_cfg.complete_policy == CompletePolicy::HybridAssume {
-                        self.apply_attempt_event(AttemptEvent::Succeeded {
-                            skill_id: pending.skill_id.clone(),
-                        });
-                        return Some(ExecutionResult::success(
-                            pending.attempt_cfg.default_gap_ms,
-                            "hybrid_assume_timeout",
-                        ));
-                    }
-                    self.apply_attempt_event(AttemptEvent::Failed {
-                        skill_id: pending.skill_id.clone(),
-                        reason: "timeout".into(),
-                    });
-                    return Some(ExecutionResult::failed(
-                        pending.attempt_cfg.failure_policy.advance(),
-                        pending.attempt_cfg.poll_not_ready_ms,
-                        "timeout",
-                    ));
-                }
-            }
-        }
-
-        pending.next_poll_ms = now_ms
-            .saturating_add(u64::from(pending.attempt_cfg.complete_poll_ms.max(1)))
-            .min(pending.deadline_ms);
-        None
-    }
-
-    fn finish_skill_attempt(
-        &mut self,
-        phase_idx: usize,
-        phase: &CyclePhase,
-        post_actions: &[RuntimeAction],
-        skill_id: &str,
-        execution: ExecutionResult,
-        now_ms: u64,
-    ) {
-        let outcome = format!("{:?}", execution.outcome);
-        self.state.next_ready_ms = now_ms.saturating_add(u64::from(execution.next_delay_ms));
-        let should_advance_slot = execution.outcome
-            == crate::engine::skill_attempt::Outcome::Success
-            || execution.advance == Advance::Advance
-            || execution.advance == Advance::NextPhase;
-        if should_advance_slot {
-            self.state.fired_in_phase.insert(skill_id.to_string());
-            self.state.fired_in_cycle.insert(skill_id.to_string());
-            *self
-                .state
-                .fired_count_in_cycle
-                .entry(skill_id.to_string())
-                .or_insert(0) += 1;
-            if let Some(cooldown_ms) = self.skill_cooldown_ms(skill_id) {
-                self.state.skill_ready_at_ms.insert(
-                    skill_id.to_string(),
-                    now_ms.saturating_add(u64::from(cooldown_ms)),
-                );
-            }
-        }
-        self.state.total_executed += 1;
-        self.state.last_skill_id = skill_id.to_string();
-        self.state.last_outcome = outcome.clone();
-
-        self.log_event(CycleLogEvent {
-            ts_ms: now_ms,
-            phase_index: phase_idx,
-            phase_name: &phase.name,
-            event: "execute",
-            skill_id,
-            outcome: &outcome,
-            reason: &execution.reason,
-        });
-
-        if execution.outcome == crate::engine::skill_attempt::Outcome::Success {
-            self.apply_runtime_actions(post_actions, now_ms, phase_idx, &phase.name, skill_id);
-        }
-
-        if execution.advance == Advance::NextPhase || self.is_phase_complete(phase) {
-            self.on_phase_complete(phase_idx, phase, now_ms);
-            if self.state.phase_index >= self.config.phases.len() {
-                self.on_cycle_reset();
-            }
-        }
-    }
-
-    fn finish_assist_attempt(
-        &mut self,
-        context: &AttemptContext,
-        post_actions: &[RuntimeAction],
-        skill_id: &str,
-        execution: ExecutionResult,
-        now_ms: u64,
-    ) {
-        let AttemptContext::Assist {
-            lane_index,
-            lane_id,
-            lane_name,
-        } = context
-        else {
-            return;
-        };
-        let outcome = format!("{:?}", execution.outcome);
-        self.state.next_ready_ms = now_ms.saturating_add(u64::from(execution.next_delay_ms));
-        let should_count = execution.outcome == crate::engine::skill_attempt::Outcome::Success
-            || execution.advance == Advance::Advance
-            || execution.advance == Advance::NextPhase;
-        if should_count {
-            self.state.fired_in_cycle.insert(skill_id.to_string());
-            *self
-                .state
-                .fired_count_in_cycle
-                .entry(skill_id.to_string())
-                .or_insert(0) += 1;
-            if let Some(cooldown_ms) = self.skill_cooldown_ms(skill_id) {
-                self.state.skill_ready_at_ms.insert(
-                    skill_id.to_string(),
-                    now_ms.saturating_add(u64::from(cooldown_ms)),
-                );
-            }
-        }
-        self.state.total_executed += 1;
-        self.state.last_skill_id = skill_id.to_string();
-        self.state.last_outcome = outcome.clone();
-
-        let phase_name = if lane_name.trim().is_empty() {
-            format!("assist:{lane_id}")
-        } else {
-            format!("assist:{lane_name}")
-        };
-        self.log_event(CycleLogEvent {
-            ts_ms: now_ms,
-            phase_index: *lane_index,
-            phase_name: &phase_name,
-            event: "assist_execute",
-            skill_id,
-            outcome: &outcome,
-            reason: &execution.reason,
-        });
-
-        if execution.outcome == crate::engine::skill_attempt::Outcome::Success {
-            self.apply_runtime_actions(post_actions, now_ms, *lane_index, &phase_name, skill_id);
-        }
-    }
-
-    fn complete_deadline_ms(
-        &self,
-        attempt_cfg: &SkillAttemptConfig,
-        now_ms: u64,
-        readbar_ms: u32,
-    ) -> u64 {
-        if let Some(timeout_ms) = attempt_cfg.complete_timeout_ms {
-            return now_ms.saturating_add(u64::from(timeout_ms));
-        }
-        if readbar_ms == 0 {
-            return now_ms;
-        }
-        let wait_ms = match attempt_cfg.complete_policy {
-            CompletePolicy::AssumeSuccess => readbar_ms,
-            _ => (readbar_ms as f64 * attempt_cfg.complete_max_wait_factor).max(1.0) as u32,
-        };
-        now_ms.saturating_add(u64::from(wait_ms))
-    }
-
-    fn evaluate_expr(&self, expr: &Expr) -> bool {
+    pub(super) fn evaluate_expr(&self, expr: &Expr) -> bool {
         let ctx = EvalContext {
             points: self.points,
             skills: self.skills,
@@ -1095,67 +666,9 @@ impl<'a> CycleExecutor<'a> {
         evaluate(expr, &ctx).is_true()
     }
 
-    fn enter_phase_if_needed(&mut self, phase_idx: usize, phase: &CyclePhase, now_ms: u64) {
-        if self.state.phase_entry_applied {
-            return;
-        }
-        self.state.phase_entry_applied = true;
-        self.reset_phase_entry_counters();
-        self.apply_runtime_actions(&phase.entry_actions, now_ms, phase_idx, &phase.name, "");
-    }
-
-    fn apply_runtime_actions(
-        &mut self,
-        actions: &[RuntimeAction],
-        now_ms: u64,
-        phase_idx: usize,
-        phase_name: &str,
-        skill_id: &str,
-    ) {
-        for action in actions {
-            let reason = match action {
-                RuntimeAction::SetMarker { marker_id, value } => {
-                    self.runtime.set_marker(marker_id, value);
-                    format!("set_marker:{marker_id}={value}")
-                }
-                RuntimeAction::ClearMarker { marker_id } => {
-                    self.runtime.clear_marker(marker_id);
-                    format!("clear_marker:{marker_id}")
-                }
-                RuntimeAction::RecordTimer { timer_id } => {
-                    self.runtime.record_timer(timer_id, now_ms);
-                    format!("record_timer:{timer_id}")
-                }
-                RuntimeAction::ResetTimer { timer_id } => {
-                    self.runtime.reset_timer(timer_id);
-                    format!("reset_timer:{timer_id}")
-                }
-                RuntimeAction::IncrementCounter { counter_id, by } => {
-                    self.runtime.increment_counter(counter_id, *by);
-                    format!("increment_counter:{counter_id}+={by}")
-                }
-                RuntimeAction::SetCounter { counter_id, value } => {
-                    self.runtime.set_counter(counter_id, *value);
-                    format!("set_counter:{counter_id}={value}")
-                }
-                RuntimeAction::ResetCounter { counter_id } => {
-                    self.reset_counter_to_initial(counter_id);
-                    format!("reset_counter:{counter_id}")
-                }
-            };
-            self.log_event(CycleLogEvent {
-                ts_ms: now_ms,
-                phase_index: phase_idx,
-                phase_name,
-                event: "runtime_action",
-                skill_id,
-                outcome: "Applied",
-                reason: &reason,
-            });
-        }
-    }
-
-    fn skill_pixel_is_black(&self, skill_id: &str) -> bool {
+    /// Check whether a skill's pixel is "black" (all channels ≤ 5).
+    /// Used by `CompletePolicy::CdBlack` in the attempt tracker.
+    pub(super) fn skill_pixel_is_black(&self, skill_id: &str) -> bool {
         let Some(skill) = self
             .skills
             .iter()
@@ -1175,7 +688,7 @@ impl<'a> CycleExecutor<'a> {
             .is_some_and(|(r, g, b)| r.max(g).max(b) <= 5)
     }
 
-    fn skill_cooldown_ms(&self, skill_id: &str) -> Option<u32> {
+    pub(super) fn skill_cooldown_ms(&self, skill_id: &str) -> Option<u32> {
         let skill = self
             .skills
             .iter()
@@ -1184,13 +697,10 @@ impl<'a> CycleExecutor<'a> {
         (cooldown_ms > 0).then_some(cooldown_ms)
     }
 
-    fn slot_can_fire_more_this_cycle(&self, skill_id: &str) -> bool {
-        let shot_limit = self
-            .skills
-            .iter()
-            .find(|skill| skill.id.as_str() == skill_id)
-            .map(|skill| skill.shots_per_cycle.max(1))
-            .unwrap_or(1);
+    pub(super) fn slot_can_fire_more_this_cycle(&self, skill_id: &str) -> bool {
+        let Some(shot_limit) = self.skill_shot_limit(skill_id) else {
+            return true;
+        };
         self.state
             .fired_count_in_cycle
             .get(skill_id)
@@ -1199,19 +709,29 @@ impl<'a> CycleExecutor<'a> {
             < shot_limit
     }
 
-    fn slot_shots_complete_this_cycle(&self, skill_id: &str) -> bool {
-        let shot_limit = self
-            .skills
-            .iter()
-            .find(|skill| skill.id.as_str() == skill_id)
-            .map(|skill| skill.shots_per_cycle.max(1))
-            .unwrap_or(1);
+    pub(super) fn slot_shots_complete_this_cycle(&self, skill_id: &str) -> bool {
+        let Some(shot_limit) = self.skill_shot_limit(skill_id) else {
+            return self.state.fired_in_phase.contains(skill_id);
+        };
         self.state
             .fired_count_in_cycle
             .get(skill_id)
             .copied()
             .unwrap_or(0)
             >= shot_limit
+    }
+
+    fn skill_shot_limit(&self, skill_id: &str) -> Option<u32> {
+        match self
+            .skills
+            .iter()
+            .find(|skill| skill.id.as_str() == skill_id)
+            .map(|skill| skill.shots_per_cycle)
+        {
+            Some(0) => None,
+            Some(limit) => Some(limit),
+            None => Some(1),
+        }
     }
 
     fn skill_has_ammo(&self, skill: &Skill) -> bool {
@@ -1238,7 +758,7 @@ impl<'a> CycleExecutor<'a> {
         })
     }
 
-    fn apply_attempt_event(&mut self, event: AttemptEvent) {
+    pub(super) fn apply_attempt_event(&mut self, event: AttemptEvent) {
         match event {
             AttemptEvent::AttemptStarted { skill_id } => {
                 self.runtime.mark_attempt_started(&skill_id);
@@ -1264,153 +784,7 @@ impl<'a> CycleExecutor<'a> {
         }
     }
 
-    fn is_phase_complete(&self, phase: &CyclePhase) -> bool {
-        match phase.complete_when.as_str() {
-            "always" => true,
-            "any_fired" => !self.state.fired_in_phase.is_empty(),
-            "none_ready" => phase.skills.iter().all(|slot| {
-                let sid = slot.skill_id.trim();
-                sid.is_empty()
-                    || self.state.fired_in_phase.contains(sid)
-                    || !self.check_skill_ready(slot, self.state.next_ready_ms).0
-            }),
-            _ => phase.skills.iter().all(|slot| {
-                let skill_id = slot.skill_id.trim();
-                skill_id.is_empty() || self.slot_shots_complete_this_cycle(skill_id)
-            }),
-        }
-    }
-
-    fn on_phase_complete(&mut self, phase_idx: usize, phase: &CyclePhase, now_ms: u64) {
-        let (next_phase_index, reason) = self.resolve_phase_transition(phase_idx, phase);
-        self.log_event(CycleLogEvent {
-            ts_ms: now_ms,
-            phase_index: phase_idx,
-            phase_name: &phase.name,
-            event: "phase_transition",
-            skill_id: "",
-            outcome: "Applied",
-            reason: &reason,
-        });
-        self.state.phase_index = next_phase_index;
-        self.state.fired_in_phase.clear();
-        self.state.phase_entry_applied = false;
-        // Outer tick code records phase-level logs.
-    }
-
-    fn resolve_phase_transition(&self, phase_idx: usize, phase: &CyclePhase) -> (usize, String) {
-        for (rule_index, rule) in phase.transition_rules.iter().enumerate() {
-            if self.transition_rule_matches(phase_idx, rule_index) {
-                if let Some(target_index) = self.find_phase_index(&rule.target_phase) {
-                    let label = rule.label.trim();
-                    let rule_name = if label.is_empty() { "unnamed" } else { label };
-                    return (
-                        target_index,
-                        format!("rule:{rule_name}->{}", rule.target_phase.trim()),
-                    );
-                }
-                return (
-                    phase_idx.saturating_add(1),
-                    format!("rule_target_missing:{}", rule.target_phase.trim()),
-                );
-            }
-        }
-
-        match phase.fallback_transition.as_ref() {
-            Some(PhaseFallbackTransition::Stay) => (phase_idx, "fallback:stay".into()),
-            Some(PhaseFallbackTransition::Next) | None => {
-                (phase_idx.saturating_add(1), "fallback:next".into())
-            }
-            Some(PhaseFallbackTransition::Phase { target_phase }) => self
-                .find_phase_index(target_phase)
-                .map(|target_index| {
-                    (
-                        target_index,
-                        format!("fallback:phase->{}", target_phase.trim()),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        phase_idx.saturating_add(1),
-                        format!("fallback_target_missing:{}", target_phase.trim()),
-                    )
-                }),
-        }
-    }
-
-    fn transition_rule_matches(&self, phase_idx: usize, rule_index: usize) -> bool {
-        self.transition_rule_expr_cache
-            .get(phase_idx)
-            .and_then(|rules| rules.get(rule_index))
-            .and_then(Option::as_ref)
-            .is_some_and(|expr| self.evaluate_expr(expr))
-    }
-
-    fn find_phase_index(&self, target_phase: &str) -> Option<usize> {
-        let target_phase = target_phase.trim();
-        if target_phase.is_empty() {
-            return None;
-        }
-        self.config
-            .phases
-            .iter()
-            .position(|phase| phase.name.trim() == target_phase)
-    }
-
-    fn on_cycle_reset(&mut self) {
-        self.state.cycle_count += 1;
-        self.state.phase_index = 0;
-        self.state.fired_in_phase.clear();
-        self.state.fired_in_cycle.clear();
-        self.state.fired_count_in_cycle.clear();
-        self.state.phase_entry_applied = false;
-        if let Some(schema) = &self.config.state_schema {
-            for timer in &schema.timers {
-                if timer.reset_on_cycle_start {
-                    self.runtime.reset_timer(&timer.id);
-                }
-            }
-            for counter in &schema.counters {
-                if counter.reset_on_cycle_start {
-                    self.runtime.set_counter(&counter.id, counter.initial_value);
-                }
-            }
-        }
-        // Runtime metrics are cumulative and are not reset per cycle.
-    }
-
-    fn reset_phase_entry_counters(&mut self) {
-        let Some(schema) = &self.config.state_schema else {
-            return;
-        };
-        for counter in &schema.counters {
-            if counter.reset_on_phase_entry {
-                self.runtime.set_counter(&counter.id, counter.initial_value);
-            }
-        }
-    }
-
-    fn reset_counter_to_initial(&mut self, counter_id: &str) {
-        let counter_id = counter_id.trim();
-        if counter_id.is_empty() {
-            return;
-        }
-        let initial_value = self
-            .config
-            .state_schema
-            .as_ref()
-            .and_then(|schema| {
-                schema
-                    .counters
-                    .iter()
-                    .find(|counter| counter.id == counter_id)
-            })
-            .map(|counter| counter.initial_value)
-            .unwrap_or(0);
-        self.runtime.set_counter(counter_id, initial_value);
-    }
-
-    fn log_event(&mut self, event: CycleLogEvent<'_>) {
+    pub(super) fn log_event(&mut self, event: CycleLogEvent<'_>) {
         let skill_name = self
             .skills
             .iter()
@@ -1442,80 +816,12 @@ impl<'a> CycleExecutor<'a> {
     }
 }
 
-fn build_slot_expr_cache(config: &CycleConfig) -> HashMap<usize, CompiledSlotExprs> {
-    let mut cache = HashMap::new();
-    for phase in &config.phases {
-        for slot in &phase.skills {
-            cache.insert(slot_cache_key(slot), compile_slot_exprs(slot));
-        }
-    }
-    for lane in &config.assist_lanes {
-        for slot in &lane.skills {
-            cache.insert(slot_cache_key(slot), compile_slot_exprs(slot));
-        }
-    }
-    cache
-}
+// ---------------------------------------------------------------------------
+// Utility.
+// ---------------------------------------------------------------------------
 
-fn build_observer_action_expr_cache(config: &CycleConfig) -> HashMap<usize, Option<Expr>> {
-    let mut cache = HashMap::new();
-    for lane in &config.observer_lanes {
-        for slot in &lane.actions {
-            cache.insert(
-                observer_action_cache_key(slot),
-                slot.condition_expr
-                    .as_ref()
-                    .and_then(|value| compile_expr_json(value, "$.condition_expr").expr),
-            );
-        }
-    }
-    cache
-}
-
-fn compile_slot_exprs(slot: &SkillSlot) -> CompiledSlotExprs {
-    CompiledSlotExprs {
-        condition_expr: slot
-            .condition_expr
-            .as_ref()
-            .and_then(|value| compile_expr_json(value, "$.condition_expr").expr),
-        start_expr: slot
-            .start_expr
-            .as_ref()
-            .and_then(|value| compile_expr_json(value, "$.start_expr").expr),
-        complete_expr: slot
-            .complete_expr
-            .as_ref()
-            .and_then(|value| compile_expr_json(value, "$.complete_expr").expr),
-    }
-}
-
-fn build_transition_rule_expr_cache(config: &CycleConfig) -> Vec<Vec<Option<Expr>>> {
-    config
-        .phases
-        .iter()
-        .map(|phase| {
-            phase
-                .transition_rules
-                .iter()
-                .map(|rule| {
-                    rule.condition_expr
-                        .as_ref()
-                        .and_then(|value| compile_expr_json(value, "$.condition_expr").expr)
-                })
-                .collect()
-        })
-        .collect()
-}
-
-fn slot_cache_key(slot: &SkillSlot) -> usize {
-    slot as *const SkillSlot as usize
-}
-
-fn observer_action_cache_key(slot: &ObserverActionSlot) -> usize {
-    slot as *const ObserverActionSlot as usize
-}
-
-fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
+/// Maximum per-channel absolute difference between two RGB colors.
+pub(crate) fn rgb_diff_max(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
     let dr = (a.0 as i16 - b.0 as i16).unsigned_abs() as u8;
     let dg = (a.1 as i16 - b.1 as i16).unsigned_abs() as u8;
     let db = (a.2 as i16 - b.2 as i16).unsigned_abs() as u8;
@@ -1533,7 +839,8 @@ mod tests {
     use crate::models::cycle::{
         AssistInterruptPolicy, AssistLaneConfig, AttemptPolicy, CyclePhase, CycleStateSchema,
         ObserverActionSlot, ObserverLaneConfig, PhaseFallbackTransition, PhaseTransitionRule,
-        RuntimeAction, RuntimeCounterDef, RuntimeMarkerDef, RuntimeTimerDef, SkillSlot,
+        ReadinessPolicy, RuntimeAction, RuntimeCounterDef, RuntimeMarkerDef, RuntimeTimerDef,
+        SkillSlot, SkillSlotRole,
     };
     use crate::models::skill::{AmmoStagePixel, ColorRGB, PixelSpec, SampleConfig, Skill};
     use serde_json::json;
@@ -1613,7 +920,10 @@ mod tests {
             skill_id: skill_id.into(),
             priority,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
             condition_expr: None,
+            readiness_expr: None,
+            readiness_policy: ReadinessPolicy::Required,
             start_expr: None,
             complete_expr: None,
             override_cast_ms: None,
@@ -2326,6 +1636,9 @@ mod tests {
                     skill_id: "sk1".into(),
                     priority: 1,
                     label: String::new(),
+                    slot_role: SkillSlotRole::Mandatory,
+                    readiness_expr: None,
+                    readiness_policy: Default::default(),
                     condition_expr: Some(json!({"type": "const", "value": false})),
                     start_expr: None,
                     complete_expr: None,
@@ -2364,6 +1677,290 @@ mod tests {
 
         let acted = exec.tick(&mut ks, &|| false, 0);
         assert!(!acted);
+    }
+
+    #[test]
+    fn test_advisory_readiness_allows_attempt_when_signal_is_false() {
+        let mut slot = make_slot("sk1", 1);
+        slot.condition_expr = Some(json!({"type": "const", "value": true}));
+        slot.readiness_expr = Some(json!({
+            "type": "pixel_skill_not_black",
+            "skill_id": "sk1",
+            "tolerance": 64
+        }));
+        slot.readiness_policy = ReadinessPolicy::Advisory;
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "C")];
+        let sampler = DummySampler { rgb: (0, 0, 0) };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        let (ready, reason) = exec.check_skill_ready(&config.phases[0].skills[0], 0);
+        assert!(ready);
+        assert!(reason.starts_with("condition_true readiness_advisory:"));
+
+        let acted = exec.tick(&mut ks, &|| false, 0);
+
+        assert!(acted);
+        assert_eq!(ks.keys, vec!["C"]);
+    }
+
+    #[test]
+    fn test_required_readiness_blocks_attempt_when_signal_is_false() {
+        let mut slot = make_slot("sk1", 1);
+        slot.condition_expr = Some(json!({"type": "const", "value": true}));
+        slot.readiness_expr = Some(json!({
+            "type": "pixel_skill_not_black",
+            "skill_id": "sk1",
+            "tolerance": 64
+        }));
+        slot.readiness_policy = ReadinessPolicy::Required;
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![slot],
+                complete_when: "any_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "C")];
+        let sampler = DummySampler { rgb: (0, 0, 0) };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        let (ready, reason) = exec.check_skill_ready(&config.phases[0].skills[0], 0);
+        assert!(!ready);
+        assert!(reason.starts_with("readiness_false:"));
+
+        let acted = exec.tick(&mut ks, &|| false, 0);
+
+        assert!(!acted);
+        assert!(ks.keys.is_empty());
+        assert!(exec.log.iter().any(|entry| {
+            entry.skill_id == "sk1"
+                && entry.event == "skip"
+                && entry.reason.starts_with("readiness_false:")
+        }));
+    }
+
+    #[test]
+    fn test_none_ready_phase_advances_when_all_slots_are_already_not_ready() {
+        let mut first = make_slot("sk1", 1);
+        first.condition_expr = Some(json!({"type": "const", "value": false}));
+        let mut second = make_slot("sk2", 2);
+        second.condition_expr = Some(json!({"type": "const", "value": false}));
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![first, second],
+                    complete_when: "none_ready".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![make_slot("sk3", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![
+            make_skill("sk1", "A"),
+            make_skill("sk2", "B"),
+            make_skill("sk3", "C"),
+        ];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        let acted = exec.tick(&mut ks, &|| false, 0);
+        assert!(acted);
+        assert!(ks.keys.is_empty());
+        assert_eq!(exec.state.phase_index, 1);
+    }
+
+    #[test]
+    fn test_reacquire_prefers_stable_loop_phase_anchor() {
+        let mut opener_slot = make_slot("sk1", 1);
+        opener_slot.complete_expr = Some(json!({"type": "const", "value": true}));
+        let mut loop_slot = make_slot("sk2", 1);
+        loop_slot.complete_expr = Some(json!({"type": "const", "value": true}));
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "Preparation - Fire".into(),
+                    skills: vec![opener_slot],
+                    complete_when: "none_ready".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "Loop - Fire".into(),
+                    skills: vec![loop_slot],
+                    complete_when: "none_ready".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("sk1", "A"), make_skill("sk2", "B")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+
+        assert_eq!(exec.reacquire_phase_from_current_frame(0), Some(1));
+        assert_eq!(exec.state.phase_index, 1);
+    }
+
+    #[test]
+    fn test_reacquire_transition_rule_wins_over_phase_anchor() {
+        let mut opener_slot = make_slot("sk1", 1);
+        opener_slot.complete_expr = Some(json!({"type": "const", "value": true}));
+        let mut loop_slot = make_slot("sk2", 1);
+        loop_slot.complete_expr = Some(json!({"type": "const", "value": true}));
+        let burst_slot = make_slot("sk3", 1);
+
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "Loop - Earth".into(),
+                    skills: vec![loop_slot],
+                    complete_when: "none_ready".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![PhaseTransitionRule {
+                        label: "burst ready".into(),
+                        condition_expr: Some(json!({"type": "const", "value": true})),
+                        target_phase: "Burst opener".into(),
+                    }],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "Preparation - Earth".into(),
+                    skills: vec![opener_slot],
+                    complete_when: "none_ready".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "Burst opener".into(),
+                    skills: vec![burst_slot],
+                    complete_when: "none_ready".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![
+            make_skill("sk1", "A"),
+            make_skill("sk2", "B"),
+            make_skill("sk3", "C"),
+        ];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+
+        assert_eq!(exec.reacquire_phase_from_current_frame(0), Some(2));
+        assert_eq!(exec.state.phase_index, 2);
     }
 
     #[test]
@@ -2427,6 +2024,111 @@ mod tests {
         assert!(exec.tick(&mut ks, &|| false, 100));
         // P2 completes and the cycle resets to P1.
         assert_eq!(exec.state.cycle_count, 1);
+    }
+
+    #[test]
+    fn test_filler_slot_does_not_block_mandatory_phase_completion() {
+        let mut filler = make_slot("fill", 2);
+        filler.slot_role = SkillSlotRole::Filler;
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![CyclePhase {
+                name: "P1".into(),
+                skills: vec![make_slot("main", 1), filler],
+                complete_when: "all_fired".into(),
+                entry_actions: vec![],
+                transition_rules: vec![],
+                fallback_transition: None,
+            }],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![make_skill("main", "M"), make_skill("fill", "F")];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(ks.keys, vec!["M"]);
+        assert_eq!(exec.state.total_executed, 1);
+        assert_eq!(exec.state.cycle_count, 1);
+        assert!(!exec.state.fired_in_cycle.contains("fill"));
+    }
+
+    #[test]
+    fn test_priority_slot_does_not_complete_phase_before_mandatory_slot() {
+        let mut priority = make_slot("priority", 1);
+        priority.slot_role = SkillSlotRole::Priority;
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![priority, make_slot("main", 2)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![make_slot("next", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+            ],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 50,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let skills = vec![
+            make_skill("priority", "P"),
+            make_skill("main", "M"),
+            make_skill("next", "N"),
+        ];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert_eq!(ks.keys, vec!["P"]);
+        assert_eq!(exec.state.phase_index, 0);
+        assert!(exec.state.fired_in_phase.contains("priority"));
+
+        assert!(exec.tick(&mut ks, &|| false, 50));
+        assert_eq!(ks.keys, vec!["P", "M"]);
+        assert_eq!(exec.state.phase_index, 1);
     }
 
     #[test]
@@ -3173,6 +2875,9 @@ mod tests {
                     skill_id: "sk1".into(),
                     priority: 1,
                     label: String::new(),
+                    slot_role: SkillSlotRole::Mandatory,
+                    readiness_expr: None,
+                    readiness_policy: Default::default(),
                     condition_expr: Some(json!({"type": "const", "value": false})),
                     start_expr: None,
                     complete_expr: None,
@@ -3305,6 +3010,63 @@ mod tests {
         assert!(exec.tick(&mut ks, &|| false, 50));
         assert_eq!(exec.state.cycle_count, 1);
         assert_eq!(exec.state.total_executed, 2);
+    }
+
+    #[test]
+    fn test_zero_shots_per_cycle_allows_repeating_loop_skill() {
+        let config = CycleConfig {
+            name: "test".into(),
+            phases: vec![
+                CyclePhase {
+                    name: "P1".into(),
+                    skills: vec![make_slot("sk1", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: None,
+                },
+                CyclePhase {
+                    name: "P2".into(),
+                    skills: vec![make_slot("sk1", 1)],
+                    complete_when: "any_fired".into(),
+                    entry_actions: vec![],
+                    transition_rules: vec![],
+                    fallback_transition: Some(PhaseFallbackTransition::Phase {
+                        target_phase: "P1".into(),
+                    }),
+                },
+            ],
+            observer_lanes: vec![],
+            assist_lanes: vec![],
+            poll_interval_ms: 10,
+            max_cycles: 0,
+            state_schema: None,
+        };
+        let points = vec![];
+        let mut skill = make_skill("sk1", "f1");
+        skill.shots_per_cycle = 0;
+        let skills = vec![skill];
+        let sampler = DummySampler {
+            rgb: (100, 150, 200),
+        };
+        let mut exec = CycleExecutor::new(
+            &config,
+            &points,
+            &skills,
+            &sampler,
+            SkillAttemptConfig::default(),
+        );
+        let mut ks = DummyKeySender {
+            keys: vec![],
+            fail: false,
+        };
+
+        assert!(exec.tick(&mut ks, &|| false, 0));
+        assert!(exec.tick(&mut ks, &|| false, 50));
+        assert!(exec.tick(&mut ks, &|| false, 100));
+        assert_eq!(exec.state.cycle_count, 0);
+        assert_eq!(exec.state.total_executed, 3);
+        assert_eq!(ks.keys, vec!["f1", "f1", "f1"]);
     }
 
     #[test]

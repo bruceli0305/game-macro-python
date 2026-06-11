@@ -42,6 +42,27 @@ impl EngineTaskHandle {
         self.cancel.cancel();
     }
 
+    /// Requests shutdown and waits for the task to exit.
+    pub async fn shutdown(mut self) {
+        self.cancel.cancel();
+
+        let Some(mut join) = self.join.take() else {
+            return;
+        };
+
+        tokio::select! {
+            result = &mut join => {
+                if let Err(error) = result {
+                    tracing::warn!(error = %error, "engine task finished with join error");
+                }
+            }
+            () = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+                tracing::warn!("engine task did not stop within timeout; aborting");
+                join.abort();
+            }
+        }
+    }
+
     /// Returns true when the cancellation token and join handle both look active.
     pub fn is_running(&self) -> bool {
         if self.cancel.is_cancelled() {

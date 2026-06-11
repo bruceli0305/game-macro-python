@@ -7,10 +7,9 @@ use crate::models::cycle::{
 };
 use crate::models::profile::Profile;
 use crate::models::skill::{PixelSpec, SampleConfig};
-use crate::store::profile_store::ProfileStore;
+use crate::store::profile_store::{ProfileStore, app_data_dir};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProfileInfo {
@@ -67,7 +66,7 @@ pub fn profile_save(name: String, content: String) -> CommandResult<()> {
     Ok(store.save(&name, &profile)?)
 }
 
-fn validate_profile_references(profile: &Profile) -> AppResult<()> {
+pub(crate) fn validate_profile_references(profile: &Profile) -> AppResult<()> {
     validate_base_config(profile)?;
 
     let pick_hotkey = profile.base.pick.confirm_hotkey.trim().to_uppercase();
@@ -417,6 +416,13 @@ fn validate_skill_slot_refs(
     validate_expr_refs(
         &slot.condition_expr,
         &format!("{path}.condition_expr"),
+        skill_ids,
+        point_ids,
+        state_refs,
+    )?;
+    validate_expr_refs(
+        &slot.readiness_expr,
+        &format!("{path}.readiness_expr"),
         skill_ids,
         point_ids,
         state_refs,
@@ -876,29 +882,13 @@ fn validate_expr_refs(
     Ok(())
 }
 
-fn app_data_dir() -> AppResult<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        let local = std::env::var("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
-        Ok(local.join("game-macro-tauri"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let dir = dirs::data_dir()
-            .ok_or_else(|| AppError::Config("unable to determine data directory".into()))?;
-        Ok(dir.join("game-macro-tauri"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::cycle::{
         AssistInterruptPolicy, AssistLaneConfig, AttemptPolicy, CycleConfig, CyclePhase,
         CycleStateSchema, PhaseFallbackTransition, PhaseTransitionRule, RuntimeAction,
-        RuntimeCounterDef, RuntimeMarkerDef, RuntimeTimerDef, SkillSlot,
+        RuntimeCounterDef, RuntimeMarkerDef, RuntimeTimerDef, SkillSlot, SkillSlotRole,
     };
     use crate::models::point::Point;
     use crate::models::skill::{AmmoStagePixel, PixelSpec, SampleConfig, Skill};
@@ -961,6 +951,9 @@ mod tests {
             skill_id: "missing".into(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: None,
             start_expr: None,
             complete_expr: None,
@@ -982,6 +975,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: None,
             start_expr: None,
             complete_expr: None,
@@ -1001,6 +997,9 @@ mod tests {
                 skill_id: "missing".into(),
                 priority: 1,
                 label: String::new(),
+                slot_role: SkillSlotRole::Mandatory,
+                readiness_expr: None,
+                readiness_policy: Default::default(),
                 condition_expr: None,
                 start_expr: None,
                 complete_expr: None,
@@ -1021,6 +1020,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "pixel_point",
                 "point_id": "missing",
@@ -1047,6 +1049,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: None,
             start_expr: None,
             complete_expr: None,
@@ -1075,6 +1080,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "timer_elapsed_ge",
                 "timer_id": "missing",
@@ -1100,6 +1108,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "timer_elapsed_ge",
                 "timer_id": "burst",
@@ -1133,6 +1144,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "marker_eq",
                 "marker_id": "missing",
@@ -1158,6 +1172,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "marker_eq",
                 "marker_id": "weapon",
@@ -1193,6 +1210,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "marker_eq",
                 "marker_id": "weapon",
@@ -1228,6 +1248,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "counter_ge",
                 "counter_id": "missing",
@@ -1253,6 +1276,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: Some(json!({
                 "type": "counter_ge",
                 "counter_id": "main_wp2_count",
@@ -1289,6 +1315,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: None,
             start_expr: None,
             complete_expr: None,
@@ -1316,6 +1345,9 @@ mod tests {
             skill_id: String::new(),
             priority: 1,
             label: String::new(),
+            slot_role: SkillSlotRole::Mandatory,
+            readiness_expr: None,
+            readiness_policy: Default::default(),
             condition_expr: None,
             start_expr: None,
             complete_expr: None,

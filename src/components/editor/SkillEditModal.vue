@@ -5,7 +5,7 @@ import {
 } from "naive-ui";
 import ConditionBuilder from "./ConditionBuilder.vue";
 import PostActionsEditor from "./PostActionsEditor.vue";
-import type { AttemptPolicy, SkillSlot } from "../../types/cycle";
+import type { AttemptPolicy, SkillSlot, SkillSlotRole } from "../../types/cycle";
 import type { Expr } from "../../types/ast";
 import {
   buildCompleteDetectionExpr,
@@ -35,7 +35,10 @@ const form = reactive<SkillSlot>({
   skill_id: "",
   priority: 1,
   label: "",
+  slot_role: "mandatory",
   condition_expr: null,
+  readiness_expr: null,
+  readiness_policy: "required",
   start_expr: null,
   complete_expr: null,
   override_cast_ms: null,
@@ -62,6 +65,17 @@ const failurePolicyOptions = [
 const completeFallbackOptions = [
   { label: "完成超时后按成功处理", value: "assume_success_after_timeout" },
   { label: "完成超时后判定失败", value: "fail" },
+];
+
+const readinessPolicyOptions = [
+  { label: "必须就绪才释放", value: "required" },
+  { label: "仅记录信号，不阻断释放", value: "advisory" },
+];
+
+const slotRoleOptions: { label: string; value: SkillSlotRole }[] = [
+  { label: "必放", value: "mandatory" },
+  { label: "优先", value: "priority" },
+  { label: "填充", value: "filler" },
 ];
 
 type StartTemplateValue = StartDetectionTemplate | "custom";
@@ -187,6 +201,9 @@ watch(() => props.show, (val) => {
   if (val) {
     Object.assign(form, {
       ...JSON.parse(JSON.stringify(props.slot)),
+      slot_role: props.slot.slot_role ?? "mandatory",
+      readiness_expr: props.slot.readiness_expr ?? null,
+      readiness_policy: props.slot.readiness_policy ?? "required",
       protected_release: props.slot.protected_release ?? false,
       attempt_policy: props.slot.attempt_policy
         ? JSON.parse(JSON.stringify(props.slot.attempt_policy))
@@ -225,7 +242,13 @@ function save() {
           @update:value="refreshCompleteTemplateExpr"
         />
         <n-input v-model:value="form.label" size="small" placeholder="显示标签（可选）" />
-        <n-input-number v-model:value="form.priority" size="small" :min="1" :max="99" placeholder="优先级" />
+        <n-select
+          v-model:value="form.slot_role"
+          :options="slotRoleOptions"
+          size="small"
+          placeholder="技能槽类型"
+        />
+        <n-input-number v-model:value="form.priority" size="small" :min="1" :max="99" placeholder="决策顺位（数字越小越先）" />
         <n-input-number v-model:value="form.override_cast_ms" size="small" :min="0" placeholder="覆盖读条时间(ms)" />
         <div class="flex items-center justify-between rounded border border-white/10 bg-white/[0.03] px-3 py-2">
           <div>
@@ -235,7 +258,7 @@ function save() {
           <n-switch v-model:value="form.protected_release" />
         </div>
 
-        <div class="text-xs text-gray-400 pt-2">条件表达式</div>
+        <div class="text-xs text-gray-400 pt-2">可释放条件（当前帧）</div>
         <ConditionBuilder
           :model-value="form.condition_expr as any"
           :skills="skillList"
@@ -245,7 +268,28 @@ function save() {
           :counters="counterOptions"
           @update:model-value="(v: any) => (form.condition_expr as any) = v"
         />
-        <div class="text-xs text-gray-400 pt-2">释放开始检测</div>
+        <div class="text-xs text-gray-400 pt-2">就绪信号</div>
+        <div class="rounded border border-white/10 bg-white/[0.03] p-2 space-y-2">
+          <n-select
+            v-model:value="form.readiness_policy"
+            :options="readinessPolicyOptions"
+            size="small"
+            placeholder="就绪信号策略"
+          />
+          <div class="text-xs text-gray-500">
+            硬条件决定当前帧是否进入候选列表；就绪信号用于识别图标、ROI 或其它弱状态。选择“仅记录信号”时，失败不会阻断按键尝试。
+          </div>
+        </div>
+        <ConditionBuilder
+          :model-value="form.readiness_expr as any"
+          :skills="skillList"
+          :points="pointOptions"
+          :markers="markerOptions"
+          :timers="timerOptions"
+          :counters="counterOptions"
+          @update:model-value="(v: any) => (form.readiness_expr as any) = v"
+        />
+        <div class="text-xs text-gray-400 pt-2">施法状态确认</div>
         <div class="rounded border border-white/10 bg-white/[0.03] p-2 space-y-2">
           <n-select
             :value="startDetectionTemplate"
@@ -273,7 +317,7 @@ function save() {
             />
           </n-space>
           <div class="text-xs text-gray-500">
-            开始检测只判断一次按键后是否出现释放状态；未命中时由下方尝试策略决定是否重试。
+            这里不是延迟排程；它只用于确认按键后是否真的进入施法/释放状态，未命中时由下方确认策略决定是否重试。
           </div>
         </div>
         <ConditionBuilder
@@ -347,7 +391,7 @@ function save() {
         <n-divider class="!my-2">失败与重试</n-divider>
         <div class="flex items-center justify-between rounded border border-white/10 bg-white/[0.03] px-3 py-2">
           <div>
-            <div class="text-sm text-gray-200">槽位级尝试策略</div>
+            <div class="text-sm text-gray-200">槽位级确认策略</div>
             <div class="text-xs text-gray-500">关闭时使用基础配置中的全局状态机策略</div>
           </div>
           <n-switch :value="!!form.attempt_policy" @update:value="setAttemptPolicyEnabled" />
@@ -368,9 +412,9 @@ function save() {
               size="small"
               :min="1"
               :max="600000"
-              placeholder="释放开始超时(ms)"
+              placeholder="施法确认窗口(ms)"
             >
-              <template #prefix>开始超时</template>
+              <template #prefix>确认窗口</template>
             </n-input-number>
             <n-input-number
               v-model:value="form.attempt_policy.complete_timeout_ms"
@@ -403,7 +447,7 @@ function save() {
               placeholder="完成超时兜底"
             />
             <div class="rounded border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-xs text-emerald-100/80">
-              每次尝试只发送一次按键；如果未检测到释放开始，会等待超时后按策略重试或失败。
+              每次尝试只发送一次按键；如果确认窗口内没有检测到施法状态，会按策略重试或失败。
             </div>
           </n-space>
         </template>

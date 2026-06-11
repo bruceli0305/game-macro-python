@@ -25,6 +25,7 @@ interface SkillSeed {
   color: string;
   readbarMs?: number;
   cooldownMs?: number;
+  shots_per_cycle?: number;
   note?: string;
 }
 
@@ -42,6 +43,7 @@ interface RoleProfileSeed {
   label: string;
   description: string;
   rotation_id: CyclePresetId;
+  default_shots_per_cycle?: number;
   base?: BaseSeed;
   skills: SkillSeed[];
   points: PointSeed[];
@@ -88,7 +90,10 @@ export function buildRoleProfileTemplate(id: RoleProfileTemplateId): Profile {
   profile.meta.description = seed.description;
   profile.rotations = [buildCyclePreset(seed.rotation_id)];
   applyBaseSeed(profile, seed.base);
-  profile.skills = { schema_version: 2, skills: seed.skills.map(skill) };
+  profile.skills = {
+    schema_version: 2,
+    skills: seed.skills.map((item) => skill(item, seed.default_shots_per_cycle ?? 1)),
+  };
   profile.points = { schema_version: 3, points: seed.points.map(point) };
 
   return profile;
@@ -145,7 +150,7 @@ function pixel(x: number, y: number, color: string, tolerance = 24): PixelSpec {
   };
 }
 
-function skill(seed: SkillSeed): Skill {
+function skill(seed: SkillSeed, defaultShotsPerCycle: number): Skill {
   return {
     id: seed.id,
     name: seed.name,
@@ -162,7 +167,7 @@ function skill(seed: SkillSeed): Skill {
     icon_url: "",
     cooldown_ms: seed.cooldownMs ?? 0,
     radius: 0,
-    shots_per_cycle: 1,
+    shots_per_cycle: seed.shots_per_cycle ?? defaultShotsPerCycle,
     ammo_stages: [],
   };
 }

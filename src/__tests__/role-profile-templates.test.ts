@@ -48,6 +48,11 @@ describe("role profile templates", () => {
     const rotation = profile.rotations[0];
 
     expect(skillIds.has("weaver_weave_self")).toBe(true);
+    expect(skillIds.has("weaver_air_auto_1")).toBe(true);
+    expect(skillIds.has("weaver_earth_auto_1")).toBe(true);
+    expect(skillIds.has("weaver_air_pistol_2")).toBe(true);
+    expect(skillIds.has("weaver_water_pistol_2")).toBe(true);
+    expect(skillIds.has("weaver_air_dagger_4_ride_lightning")).toBe(true);
     expect(skillIds.has("weaver_fire_pistol_2")).toBe(true);
     expect(skillIds.has("weaver_earth_dagger_5_churning_earth")).toBe(true);
     expect(skillIds.has("weaver_attune_fire")).toBe(true);
@@ -71,6 +76,13 @@ describe("role profile templates", () => {
     expect(skills.get("weaver_attune_water")?.trigger_key).toBe("E");
     expect(skills.get("weaver_attune_air")?.trigger_key).toBe("R");
     expect(skills.get("weaver_attune_earth")?.trigger_key).toBe("T");
+    expect(skills.get("weaver_attune_earth")?.shots_per_cycle).toBe(0);
+    expect(skills.get("weaver_auto_1")?.name).toBe("Scorching Shot");
+    expect(skills.get("weaver_earth_auto_1")?.name).toBe("Piercing Pebble");
+    expect(skills.get("weaver_fire_pistol_2")?.name).toBe("Raging Ricochet");
+    expect(skills.get("weaver_fire_pistol_2")?.shots_per_cycle).toBe(0);
+    expect(skills.get("weaver_air_pistol_2")?.trigger_key).toBe("2");
+    expect(skills.get("weaver_air_dagger_4_ride_lightning")?.trigger_key).toBe("4");
     expect(points.get("attune_fire_primary")?.vx).toBe(650);
     expect(points.get("attune_fire_primary")?.vy).toBe(972);
     expect(points.get("attune_earth_secondary")?.vx).toBe(800);

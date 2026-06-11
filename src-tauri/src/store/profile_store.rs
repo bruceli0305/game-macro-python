@@ -1,4 +1,4 @@
-﻿//! Profile TOML persistence.
+//! Profile TOML persistence.
 
 use crate::error::{AppError, AppResult};
 use crate::models::base::{
@@ -16,6 +16,43 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const PROFILE_FILE_NAME: &str = "profile.toml";
 const SETTINGS_FILE_NAME: &str = "settings.toml";
 const DEFAULT_PROFILE_NAME: &str = "default";
+
+/// Returns the application data directory used for persisted profiles.
+pub fn app_data_dir() -> AppResult<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let local = std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        Ok(local.join("game-macro-tauri"))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| AppError::Config("unable to determine home directory".into()))?;
+        Ok(home
+            .join("Library")
+            .join("Application Support")
+            .join("game-macro-tauri"))
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        if let Ok(xdg_data_home) = std::env::var("XDG_DATA_HOME") {
+            let trimmed = xdg_data_home.trim();
+            if !trimmed.is_empty() {
+                return Ok(PathBuf::from(trimmed).join("game-macro-tauri"));
+            }
+        }
+
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| AppError::Config("unable to determine home directory".into()))?;
+        Ok(home.join(".local").join("share").join("game-macro-tauri"))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProfileStoreSettings {
@@ -85,6 +122,9 @@ impl ProfileStore {
 
         let content = toml::to_string_pretty(profile)?;
         let path = dir.join(PROFILE_FILE_NAME);
+        if profile.base.io.backup_on_save && path.exists() {
+            self.backup_profile_file(&dir, &path)?;
+        }
         std::fs::write(&path, &content)?;
 
         tracing::info!("Profile '{name}' saved");
@@ -155,6 +195,26 @@ impl ProfileStore {
     fn profile_file_path(&self, name: &str) -> AppResult<PathBuf> {
         Ok(self.profile_dir_path(name)?.join(PROFILE_FILE_NAME))
     }
+
+    fn backup_profile_file(
+        &self,
+        profile_dir: &std::path::Path,
+        profile_path: &std::path::Path,
+    ) -> AppResult<()> {
+        let backup_dir = profile_dir.join("backups");
+        std::fs::create_dir_all(&backup_dir)?;
+
+        let mut backup_path = backup_dir.join(format!("profile-{}.toml", timestamp_string()));
+        let mut suffix = 1u32;
+        while backup_path.exists() {
+            backup_path = backup_dir.join(format!("profile-{}-{suffix}.toml", timestamp_string()));
+            suffix += 1;
+        }
+
+        std::fs::copy(profile_path, &backup_path)?;
+        tracing::info!("Profile backup written: {}", backup_path.display());
+        Ok(())
+    }
 }
 
 fn validate_profile_name(name: &str) -> AppResult<()> {
@@ -211,7 +271,6 @@ pub fn default_profile(name: &str) -> Profile {
                 mouse_avoid_settle_ms: 80,
             },
             io: IoConfig {
-                auto_save: true,
                 backup_on_save: false,
             },
             cast_bar: CastBarConfig {
@@ -297,6 +356,28 @@ mod tests {
         assert!(names.contains(&"default".to_string()));
         assert!(names.contains(&"p1".to_string()));
         assert!(names.contains(&"p2".to_string()));
+    }
+
+    #[test]
+    fn test_backup_on_save_copies_previous_profile() {
+        let tmp = TempDir::new().unwrap();
+        let store = ProfileStore::new(tmp.path().to_path_buf());
+        let mut profile = default_profile("role_1");
+        profile.meta.description = "old".into();
+        profile.base.io.backup_on_save = true;
+        store.save("role_1", &profile).unwrap();
+
+        profile.meta.description = "new".into();
+        store.save("role_1", &profile).unwrap();
+
+        let backup_dir = tmp.path().join("profiles").join("role_1").join("backups");
+        let backups = std::fs::read_dir(backup_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(backups.len(), 1);
+        let content = std::fs::read_to_string(backups[0].path()).unwrap();
+        assert!(content.contains("description = \"old\""));
     }
 
     #[test]

@@ -69,19 +69,39 @@ describe("cycle presets", () => {
     const priorityLane = preset.assist_lanes?.find((lane) => lane.id === "weaver_priority_skills");
     const daggerLane = preset.assist_lanes?.find((lane) => lane.id === "weaver_dagger_priority");
     const autoLane = preset.assist_lanes?.find((lane) => lane.id === "weaver_auto_attack_fill");
+    const syncSlot = preset.phases[0]?.skills[0];
+    const airEarthPhase = preset.phases.find((phase) => phase.name === "Weave Self - Air/Earth");
+    const fireAirPhase = preset.phases.find((phase) => phase.name === "Weave Self - Fire/Air");
+    const earthFinalPhase = preset.phases.find((phase) => phase.name === "Weave Self - Earth final");
+    const waterEarthPhase = preset.phases.find((phase) => phase.name === "Weave Self - Water/Earth");
+    const fireWaterPhase = preset.phases.find((phase) => phase.name === "Weave Self - Fire/Water");
+    const loopEarthPhase = preset.phases.find((phase) => phase.name === "Loop - Earth/Earth");
 
+    expect(preset.phases[0]?.name).toBe("Preparation - sync Earth primary");
+    expect(syncSlot?.skill_id).toBe("weaver_attune_earth");
+    expect(syncSlot?.condition_expr).toMatchObject({
+      type: "not",
+      child: {
+        type: "pixel_point_nearest",
+        expected_point_id: "attune_earth_primary",
+      },
+    });
+    expect(syncSlot?.complete_expr).toMatchObject({
+      type: "pixel_point_nearest",
+      expected_point_id: "attune_earth_primary",
+    });
     expect(phaseNames).toEqual(
       expect.arrayContaining([
         "Preparation - stock Earth bullet",
         "Weave Self - Earth opener",
         "Weave Self - Water/Earth",
-        "Loop - Fire",
+        "Loop - Fire/Fire",
         "Loop - Fire/Earth",
       ]),
     );
     expect(observerLane?.actions.map((action) => action.id)).toEqual([
-      "watch_fire",
-      "watch_earth",
+      "watch_fire_fire",
+      "watch_earth_earth",
       "watch_air",
       "watch_water",
       "watch_fire_earth",
@@ -103,8 +123,51 @@ describe("cycle presets", () => {
       "weaver_earth_dagger_5_churning_earth",
     ]);
     expect(autoLane?.skills[0]?.skill_id).toBe("weaver_auto_1");
+    expect(autoLane?.skills.map((slot) => slot.skill_id)).toEqual([
+      "weaver_auto_1",
+      "weaver_earth_auto_1",
+    ]);
+    expect(autoLane?.skills.map((slot) => slot.slot_role)).toEqual(["filler", "filler"]);
+    expect(airEarthPhase?.skills.map((slot) => slot.skill_id)).toEqual([
+      "weaver_attune_air",
+      "weaver_signet_fire",
+      "weaver_air_auto_1",
+      "weaver_air_pistol_2",
+      "weaver_air_earth_dual_3",
+    ]);
+    expect(fireAirPhase?.skills.map((slot) => slot.skill_id)).toContain("weaver_air_dagger_4_ride_lightning");
+    expect(fireAirPhase?.skills.map((slot) => slot.skill_id)).not.toContain("weaver_fire_dagger_4_ring_of_fire");
+    expect(earthFinalPhase?.skills.map((slot) => slot.skill_id)).toEqual([
+      "weaver_attune_earth",
+      "weaver_earth_dagger_4_earthquake",
+      "weaver_earth_dagger_5_churning_earth",
+      "weaver_earth_dual_3",
+    ]);
+    expect(waterEarthPhase?.skills.map((slot) => slot.skill_id)).toContain("weaver_water_pistol_2");
+    expect(waterEarthPhase?.skills.map((slot) => slot.skill_id)).not.toContain("weaver_earth_pistol_2");
+    expect(fireWaterPhase?.skills.map((slot) => slot.skill_id)).toEqual([
+      "weaver_attune_fire",
+      "weaver_fire_water_dual_3",
+      "weaver_signet_fire",
+      "weaver_fire_pistol_2",
+      "weaver_auto_1",
+    ]);
+    expect(fireWaterPhase?.skills.map((slot) => slot.slot_role)).toEqual([
+      "mandatory",
+      "mandatory",
+      "priority",
+      "mandatory",
+      "filler",
+    ]);
+    expect(loopEarthPhase?.transition_rules?.[0]).toMatchObject({
+      label: "Weave Self ready at Earth/Earth",
+      target_phase: "Weave Self - Earth opener",
+    });
     expect(preset.state_schema?.markers[0]?.id).toBe("attunement");
     expect(serializedPreset).toContain("attune_fire_primary");
+    expect(serializedPreset).toContain("pixel_point_nearest");
+    expect(serializedPreset).toContain("candidate_point_ids");
+    expect(serializedPreset).toContain("min_margin");
     expect(serializedPreset).toContain("weaver_fire_pistol_2");
     expect(serializedPreset).not.toContain("weaver_weapon_2");
     expect(serializedPreset).not.toContain("weaver_weapon_3");

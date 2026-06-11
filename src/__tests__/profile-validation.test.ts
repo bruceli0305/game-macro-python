@@ -112,6 +112,78 @@ describe("profile validation", () => {
     );
   });
 
+  it("accepts nearest point classifier references before save", () => {
+    const profile = createDefaultProfile();
+    profile.skills.skills = [skill("sk1")];
+    profile.points.points = [point("fire"), point("water"), point("air"), point("earth")];
+    profile.rotations = [
+      {
+        name: "cycle",
+        poll_interval_ms: 100,
+        max_cycles: 0,
+        phases: [
+          {
+            name: "phase",
+            complete_when: "any_fired",
+            skills: [
+              {
+                skill_id: "sk1",
+                priority: 1,
+                label: "",
+                condition_expr: {
+                  type: "pixel_point_nearest",
+                  expected_point_id: "fire",
+                  candidate_point_ids: ["fire", "water", "air", "earth"],
+                  max_delta: 96,
+                  min_margin: 20,
+                },
+                start_expr: null,
+                complete_expr: null,
+                override_cast_ms: null,
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    expect(validateProfileForSave(profile)).toEqual([]);
+  });
+
+  it("rejects invalid skill slot roles before save", () => {
+    const profile = createDefaultProfile();
+    profile.skills.skills = [skill("sk1")];
+    profile.rotations = [
+      {
+        name: "cycle",
+        poll_interval_ms: 100,
+        max_cycles: 0,
+        phases: [
+          {
+            name: "phase",
+            complete_when: "any_fired",
+            skills: [
+              {
+                skill_id: "sk1",
+                priority: 1,
+                label: "",
+                slot_role: "burst" as any,
+                condition_expr: null,
+                start_expr: null,
+                complete_expr: null,
+                override_cast_ms: null,
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    expect(validateProfileForSave(profile).map((item) => item.path)).toContain(
+      "rotations[0].phases[0].skills[0].slot_role"
+    );
+  });
+
   it("validates assist lane config before save", () => {
     const profile = createDefaultProfile();
     profile.skills.skills = [skill("sk1")];

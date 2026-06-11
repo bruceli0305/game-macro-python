@@ -61,11 +61,8 @@ fn gw2_skill_search_inner(_query: &str) -> AppResult<Vec<Gw2SkillInfo>> {
 }
 
 fn find_skills_json() -> AppResult<PathBuf> {
-    // Tauri dev 模式 cwd 在 src-tauri/，所以 assets/gw2/ 直接可用
-    let candidates: Vec<PathBuf> = vec![
-        PathBuf::from("assets/gw2/skills_all.json"),
-        PathBuf::from("../assets/gw2/skills_all.json"),
-    ];
+    // Tauri dev/build resolves this from src-tauri/.
+    let candidates: Vec<PathBuf> = vec![PathBuf::from("assets/gw2/skills_all.json")];
     for p in &candidates {
         if p.exists() {
             tracing::info!("找到技能文件: {}", p.display());

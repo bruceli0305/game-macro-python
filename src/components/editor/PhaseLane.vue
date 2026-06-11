@@ -4,7 +4,13 @@ import { NButton, NInput, NPopconfirm, NSelect } from "naive-ui";
 import { IconChevronDown, IconChevronRight, IconPlus, IconTrash } from "@tabler/icons-vue";
 import SkillCard from "./SkillCard.vue";
 import ConditionBuilder from "./ConditionBuilder.vue";
-import type { CyclePhase, PhaseFallbackTransition, PhaseTransitionRule } from "../../types/cycle";
+import type {
+  CyclePhase,
+  PhaseFallbackTransition,
+  PhaseTransitionRule,
+  SkillSlot,
+  SkillSlotRole,
+} from "../../types/cycle";
 
 interface SkillCardMeta {
   triggerKey: string;
@@ -30,7 +36,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:phase": [phase: CyclePhase];
   remove: [];
-  addSlot: [];
+  addSlot: [role?: SkillSlotRole];
   editSlot: [index: number];
   removeSlot: [index: number];
   toggleCollapse: [];
@@ -43,15 +49,55 @@ const completeOptions = [
   { label: "每次执行后立即进入下一阶段", value: "always" },
 ];
 
-const phaseSelectOptions = computed(() =>
-  props.phaseOptions.map((phase) => ({ label: phase.name, value: phase.id }))
-);
-
-const fallbackTypeOptions = [
+const fallbackTypeOptions: { label: string; value: PhaseFallbackTransition["type"] }[] = [
   { label: "停留当前阶段", value: "stay" },
   { label: "进入下一阶段", value: "next" },
   { label: "跳转到阶段", value: "phase" },
 ];
+
+const roleDefinitions: {
+  role: SkillSlotRole;
+  title: string;
+  hint: string;
+  className: string;
+}[] = [
+  {
+    role: "mandatory",
+    title: "必放",
+    hint: "决定阶段完成",
+    className: "phase-role-mandatory",
+  },
+  {
+    role: "priority",
+    title: "优先",
+    hint: "可插入，不阻塞阶段",
+    className: "phase-role-priority",
+  },
+  {
+    role: "filler",
+    title: "填充",
+    hint: "空档补放",
+    className: "phase-role-filler",
+  },
+];
+
+const phaseSelectOptions = computed(() =>
+  props.phaseOptions.map((phase) => ({ label: phase.name, value: phase.id }))
+);
+
+const roleSections = computed(() =>
+  roleDefinitions.map((definition) => ({
+    ...definition,
+    items: props.phase.skills
+      .map((slot, index): { slot: SkillSlot; index: number } => ({ slot, index }))
+      .filter(({ slot }) => (slot.slot_role ?? "mandatory") === definition.role)
+      .sort((a, b) => a.slot.priority - b.slot.priority),
+  }))
+);
+
+const roleSummary = computed(() =>
+  roleSections.value.map((section) => `${section.title} ${section.items.length}`).join(" · ")
+);
 
 function completeLabel(value: string) {
   return completeOptions.find((option) => option.value === value)?.label ?? value;
@@ -153,42 +199,52 @@ function setFallbackTarget(targetPhase: string) {
     </div>
 
     <div v-if="!collapsed" class="phase-body px-3 py-3">
-      <div
-        v-if="phase.skills.length > 0"
-        class="phase-skill-row flex min-h-[124px] w-full flex-nowrap items-stretch gap-3 overflow-x-auto pb-1"
-      >
-        <template v-for="(slot, slotIndex) in phase.skills" :key="slotIndex">
-          <div class="phase-skill-item flex flex-shrink-0 items-center gap-2">
-            <SkillCard
-              :slot="slot"
-              :index="slotIndex"
-              :skill-name="skillNames[slot.skill_id] || null"
-              :meta="skillMeta[slot.skill_id] || null"
-              @edit="emit('editSlot', slotIndex)"
-              @remove="emit('removeSlot', slotIndex)"
-            />
-            <span v-if="slotIndex < phase.skills.length - 1" class="text-base leading-none text-gray-500">→</span>
+      <div class="phase-role-stack space-y-2">
+        <section
+          v-for="section in roleSections"
+          :key="section.role"
+          class="phase-role-section grid gap-2 rounded border border-white/10 bg-black/10 p-2"
+          :class="section.className"
+        >
+          <div class="phase-role-label min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="role-dot" />
+              <span class="text-xs font-semibold text-gray-200">{{ section.title }}</span>
+              <span class="text-[11px] text-gray-500">{{ section.items.length }}</span>
+            </div>
+            <div class="mt-1 text-[11px] text-gray-500">{{ section.hint }}</div>
           </div>
-        </template>
 
-        <n-button size="small" dashed class="phase-add-card h-[112px] w-28 flex-shrink-0" @click="emit('addSlot')">
-          <template #icon><IconPlus :size="16" /></template>
-          添加技能
-        </n-button>
-      </div>
+          <div class="phase-skill-row flex min-h-[116px] min-w-0 flex-nowrap items-stretch gap-3 overflow-x-auto pb-1">
+            <template v-for="item in section.items" :key="item.index">
+              <SkillCard
+                :slot="item.slot"
+                :index="item.index"
+                :skill-name="skillNames[item.slot.skill_id] || null"
+                :meta="skillMeta[item.slot.skill_id] || null"
+                @edit="emit('editSlot', item.index)"
+                @remove="emit('removeSlot', item.index)"
+              />
+            </template>
 
-      <div
-        v-else
-        class="phase-empty flex min-h-[124px] flex-col items-center justify-center gap-3 rounded border border-dashed border-white/10 bg-black/10 px-4 py-6 text-center"
-      >
-        <div>
-          <div class="text-sm font-medium text-gray-300">当前阶段还没有技能</div>
-          <div class="mt-1 text-xs text-gray-500">添加技能槽后，双击卡片编辑条件、读条和完成检测</div>
-        </div>
-        <n-button size="small" type="primary" @click="emit('addSlot')">
-          <template #icon><IconPlus :size="16" /></template>
-          添加技能
-        </n-button>
+            <div
+              v-if="section.items.length === 0"
+              class="phase-role-empty flex h-[112px] w-44 flex-shrink-0 items-center justify-center rounded border border-dashed border-white/10 text-xs text-gray-500"
+            >
+              暂无{{ section.title }}技能
+            </div>
+
+            <n-button
+              size="small"
+              dashed
+              class="phase-add-card h-[112px] w-28 flex-shrink-0"
+              @click="emit('addSlot', section.role)"
+            >
+              <template #icon><IconPlus :size="16" /></template>
+              添加{{ section.title }}
+            </n-button>
+          </div>
+        </section>
       </div>
 
       <div class="phase-transitions mt-3 border-t border-white/10 pt-3">
@@ -273,7 +329,7 @@ function setFallbackTarget(targetPhase: string) {
     </div>
 
     <div v-else class="phase-collapsed px-3 py-2 text-xs text-gray-500">
-      {{ phase.skills.length }} 个技能 · {{ completeLabel(phase.complete_when) }}
+      {{ phase.skills.length }} 个技能 · {{ roleSummary }} · {{ completeLabel(phase.complete_when) }}
     </div>
   </div>
 </template>
@@ -290,12 +346,40 @@ function setFallbackTarget(targetPhase: string) {
   grid-template-columns: auto auto minmax(160px, 220px) minmax(220px, 320px) minmax(20px, 1fr) auto;
 }
 
+.phase-role-section {
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.phase-role-section .role-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.phase-role-mandatory .role-dot {
+  background: #18a058;
+}
+
+.phase-role-priority .role-dot {
+  background: #f0a020;
+}
+
+.phase-role-filler .role-dot {
+  background: #2080f0;
+}
+
 .phase-skill-row {
   scrollbar-width: thin;
 }
 
 .phase-add-card {
   flex: 0 0 112px;
+}
+
+.phase-role-empty {
+  background: rgb(255 255 255 / 2%);
 }
 
 @media (max-width: 760px) {
@@ -309,6 +393,10 @@ function setFallbackTarget(targetPhase: string) {
 
   .phase-header-spacer {
     display: none;
+  }
+
+  .phase-role-section {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

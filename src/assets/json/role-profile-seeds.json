@@ -249,10 +249,11 @@
       "label": "Condition Weaver - Pistol/Dagger",
       "description": "Frame-driven Condition Weaver profile seed: semantic skills, attunement points, Weave Self burst, and steady Fire/Earth loop.",
       "rotation_id": "condition_weaver_pistol_dagger",
+      "default_shots_per_cycle": 0,
       "skills": [
         {
           "id": "weaver_auto_1",
-          "name": "Auto Attack",
+          "name": "Scorching Shot",
           "key": "1",
           "x": 628,
           "y": 1028,
@@ -260,8 +261,26 @@
           "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
+          "id": "weaver_air_auto_1",
+          "name": "Electric Exposure",
+          "key": "1",
+          "x": 628,
+          "y": 1028,
+          "color": "0xFFFCFF",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
+        },
+        {
+          "id": "weaver_earth_auto_1",
+          "name": "Piercing Pebble",
+          "key": "1",
+          "x": 628,
+          "y": 1028,
+          "color": "0xF1E9D4",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
+        },
+        {
           "id": "weaver_fire_pistol_2",
-          "name": "Fire Pistol 2",
+          "name": "Raging Ricochet",
           "key": "2",
           "x": 688,
           "y": 1028,
@@ -269,8 +288,28 @@
           "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {
+          "id": "weaver_water_pistol_2",
+          "name": "Frigid Flurry",
+          "key": "2",
+          "x": 688,
+          "y": 1028,
+          "color": "0x082CD8",
+          "cooldownMs": 5000,
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
+        },
+        {
+          "id": "weaver_air_pistol_2",
+          "name": "Dazing Discharge",
+          "key": "2",
+          "x": 688,
+          "y": 1028,
+          "color": "0xFFF6FF",
+          "cooldownMs": 8000,
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
+        },
+        {
           "id": "weaver_earth_pistol_2",
-          "name": "Earth Pistol 2",
+          "name": "Shattering Stone",
           "key": "2",
           "x": 688,
           "y": 1028,
@@ -279,7 +318,7 @@
         },
         {
           "id": "weaver_fire_dual_3",
-          "name": "Dual Fire Attack 3",
+          "name": "Searing Salvo",
           "key": "3",
           "x": 756,
           "y": 1035,
@@ -288,7 +327,7 @@
         },
         {
           "id": "weaver_earth_dual_3",
-          "name": "Dual Earth Attack 3",
+          "name": "Boulder Blast",
           "key": "3",
           "x": 756,
           "y": 1015,
@@ -297,7 +336,7 @@
         },
         {
           "id": "weaver_fire_earth_dual_3",
-          "name": "Fire/Earth Dual Attack 3",
+          "name": "Molten Meteor",
           "key": "3",
           "x": 744,
           "y": 1035,
@@ -306,7 +345,7 @@
         },
         {
           "id": "weaver_earth_fire_dual_3",
-          "name": "Earth/Fire Dual Attack 3",
+          "name": "Piercing Pebble",
           "key": "3",
           "x": 744,
           "y": 1035,
@@ -315,7 +354,7 @@
         },
         {
           "id": "weaver_air_earth_dual_3",
-          "name": "Air/Earth Dual Attack 3",
+          "name": "Enervating Earth",
           "key": "3",
           "x": 744,
           "y": 1015,
@@ -324,7 +363,7 @@
         },
         {
           "id": "weaver_fire_air_dual_3",
-          "name": "Fire/Air Dual Attack 3",
+          "name": "Purblinding Plasma",
           "key": "3",
           "x": 744,
           "y": 1020,
@@ -333,7 +372,7 @@
         },
         {
           "id": "weaver_water_earth_dual_3",
-          "name": "Water/Earth Dual Attack 3",
+          "name": "Echoing Erosion",
           "key": "3",
           "x": 756,
           "y": 1028,
@@ -342,7 +381,7 @@
         },
         {
           "id": "weaver_fire_water_dual_3",
-          "name": "Fire/Water Dual Attack 3",
+          "name": "Frostfire Flurry",
           "key": "3",
           "x": 744,
           "y": 1020,
@@ -365,6 +404,16 @@
           "x": 870,
           "y": 1015,
           "color": "0xD7BB42",
+          "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
+        },
+        {
+          "id": "weaver_air_dagger_4_ride_lightning",
+          "name": "Ride the Lightning",
+          "key": "4",
+          "x": 811,
+          "y": 1015,
+          "color": "0x52008F",
+          "cooldownMs": 20000,
           "note": "Sampled from img/gw005-gw021 at 1920x1080. Re-pick if UI scale, skill order, keybinds, or skin changes."
         },
         {

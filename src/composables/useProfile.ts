@@ -39,7 +39,7 @@ export function createDefaultProfile(name = DEFAULT_PROFILE_NAME): Profile {
         mouse_avoid_offset_y: 80,
         mouse_avoid_settle_ms: 80,
       },
-      io: { auto_save: true, backup_on_save: false },
+      io: { backup_on_save: false },
       cast_bar: {
         mode: "timer",
         point_id: "",

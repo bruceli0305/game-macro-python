@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::capture::capturer::CachedPixelSampler;
 use serde::{Deserialize, Serialize};
 
 use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiState, CastBarRoiStats};
@@ -54,16 +55,32 @@ struct CastBarRoiTracker {
     stats: CastBarRoiStats,
 }
 
-pub struct ScreenCastBarRoiProvider {
+pub struct ScreenCastBarRoiProvider<'a> {
     config: CastBarRoiConfig,
     tracker: Mutex<CastBarRoiTracker>,
+    /// Optional shared pixel sampler — when set, the ROI provider will try
+    /// to reuse the sampler's cached monitor frame instead of capturing
+    /// independently.
+    shared_sampler: Option<&'a CachedPixelSampler>,
 }
 
-impl ScreenCastBarRoiProvider {
+impl<'a> ScreenCastBarRoiProvider<'a> {
     pub fn new(config: CastBarRoiConfig) -> Self {
         Self {
             config,
             tracker: Mutex::new(CastBarRoiTracker::default()),
+            shared_sampler: None,
+        }
+    }
+
+    /// Build a provider that reuses the `CachedPixelSampler`'s tick frame
+    /// cache so pixel conditions and ROI sampling share a single xcap capture
+    /// per monitor per tick.
+    pub fn with_shared_sampler(config: CastBarRoiConfig, shared: &'a CachedPixelSampler) -> Self {
+        Self {
+            config,
+            tracker: Mutex::new(CastBarRoiTracker::default()),
+            shared_sampler: Some(shared),
         }
     }
 
@@ -94,9 +111,32 @@ impl ScreenCastBarRoiProvider {
             return Err("cast bar ROI has empty dimensions".into());
         }
 
-        let capture = CaptureManager::new()?;
         let request = CastBarRoiRequest::from(&self.config);
-        let sample = sample_cast_bar_roi(&capture, &request)?;
+
+        // Try shared sampler cache first to avoid a duplicate xcap capture.
+        let image = if let Some(sampler) = self.shared_sampler {
+            sampler.ensure_monitor_frame(&request.monitor)
+        } else {
+            None
+        };
+
+        let sample = if let Some((image, mx, my)) = image {
+            // Use the shared frame — compute relative coords from the cached
+            // origin.
+            let x_rel = request.x - mx;
+            let y_rel = request.y - my;
+            let x0 = x_rel.max(0) as u32;
+            let y0 = y_rel.max(0) as u32;
+            let x1 = (x_rel.saturating_add(request.width as i32)).max(0) as u32;
+            let y1 = (y_rel.saturating_add(request.height as i32)).max(0) as u32;
+            let x1 = x1.min(image.width());
+            let y1 = y1.min(image.height());
+            sample_cast_bar_roi_image(&image, &request.monitor, &request, x0, y0, x1, y1)?
+        } else {
+            // Fall back to independent capture.
+            let capture = CaptureManager::new()?;
+            sample_cast_bar_roi(&capture, &request)?
+        };
         let visible_raw = sample.changed_from_baseline || sample.border_visible;
         let gone_raw = !visible_raw;
 
@@ -149,7 +189,7 @@ impl ScreenCastBarRoiProvider {
     }
 }
 
-impl CastBarRoiProvider for ScreenCastBarRoiProvider {
+impl CastBarRoiProvider for ScreenCastBarRoiProvider<'_> {
     fn begin_tick(&self, tick_ms: u64) {
         let Ok(mut tracker) = self.tracker.lock() else {
             return;

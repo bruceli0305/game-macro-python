@@ -61,7 +61,10 @@ export interface SkillSlot {
   skill_id: string;
   priority: number;
   label: string;
+  slot_role?: SkillSlotRole;
   condition_expr: Record<string, unknown> | null;
+  readiness_expr?: Record<string, unknown> | null;
+  readiness_policy?: ReadinessPolicy;
   start_expr: Record<string, unknown> | null;
   complete_expr: Record<string, unknown> | null;
   override_cast_ms: number | null;
@@ -69,6 +72,10 @@ export interface SkillSlot {
   attempt_policy?: AttemptPolicy | null;
   post_actions?: RuntimeAction[];
 }
+
+export type SkillSlotRole = "mandatory" | "priority" | "filler";
+
+export type ReadinessPolicy = "required" | "advisory";
 
 export interface AttemptPolicy {
   max_attempts: number;

@@ -366,7 +366,7 @@ onUnmounted(() => window.removeEventListener("profile:active-changed", onActiveP
             <n-input-number v-model:value="form.cooldown_ms" :min="0" :max="600000" />
           </n-form-item>
           <n-form-item label="每轮次数">
-            <n-input-number v-model:value="form.shots_per_cycle" :min="1" :max="99" />
+            <n-input-number v-model:value="form.shots_per_cycle" :min="0" :max="99" />
           </n-form-item>
 
           <n-divider>像素检测</n-divider>

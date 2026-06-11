@@ -1,4 +1,4 @@
-﻿//! Engine start, stop, status, and simulation commands.
+//! Engine start, stop, status, and simulation commands.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -11,17 +11,18 @@ use tokio_util::sync::CancellationToken;
 use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiStats, PixelSampler};
 use crate::capture::capturer::{CachedPixelSampler, DirectPixelSampler};
 use crate::capture::cast_bar_roi::ScreenCastBarRoiProvider;
+use crate::commands::profile_cmd::validate_profile_references;
 use crate::engine::cycle_executor::CycleExecutor;
 use crate::engine::runtime_state::{AttemptStage, RuntimeState};
 use crate::engine::skill_attempt::{KeySender, SkillAttemptConfig};
 use crate::error::{AppError, AppResult, CommandResult};
 use crate::input::EnigoKeySender;
 use crate::models::base::BaseConfig;
-use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot};
+use crate::models::cycle::{CycleConfig, CyclePhase, SkillSlot, SkillSlotRole};
 use crate::models::point::Point;
 use crate::models::profile::Profile;
 use crate::models::skill::{CastConfig, ColorRGB, PixelSpec, SampleConfig, Skill};
-use crate::store::profile_store::{ProfileStore, default_profile};
+use crate::store::profile_store::{ProfileStore, app_data_dir, default_profile};
 use crate::{AppState, EngineTaskHandle};
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,7 +166,7 @@ fn load_profile_config(
     let store = ProfileStore::new(dir);
     let (profile_name, profile) = store.load_active_or_default()?;
 
-    validate_engine_profile(&profile, require_exec_enabled)?;
+    validate_profile_for_engine(&profile, require_exec_enabled)?;
     let attempt_cfg = attempt_config_from_base(&profile.base);
 
     let config =
@@ -188,7 +189,7 @@ fn load_profile_config(
 fn simulation_inputs_from_profile(
     profile: Profile,
 ) -> AppResult<(CycleConfig, Vec<Skill>, Vec<Point>, SkillAttemptConfig)> {
-    validate_engine_profile(&profile, false)?;
+    validate_profile_for_engine(&profile, false)?;
     let attempt_cfg = attempt_config_from_base(&profile.base);
 
     let config = profile
@@ -289,11 +290,14 @@ fn smoke_fixture_profile() -> Profile {
                 skill_id: "smoke-skill".into(),
                 priority: 1,
                 label: "smoke-skill".into(),
+                slot_role: SkillSlotRole::Mandatory,
                 condition_expr: Some(serde_json::json!({
                     "type": "pixel_point",
                     "point_id": "smoke-point",
                     "tolerance": 0
                 })),
+                readiness_expr: None,
+                readiness_policy: Default::default(),
                 start_expr: None,
                 complete_expr: None,
                 override_cast_ms: None,
@@ -392,6 +396,11 @@ fn validate_engine_profile(profile: &Profile, require_exec_enabled: bool) -> App
     Ok(())
 }
 
+fn validate_profile_for_engine(profile: &Profile, require_exec_enabled: bool) -> AppResult<()> {
+    validate_profile_references(profile)?;
+    validate_engine_profile(profile, require_exec_enabled)
+}
+
 fn count_executable_slots(profile: &Profile) -> usize {
     let Some(rotation) = profile.rotations.first() else {
         return 0;
@@ -416,7 +425,7 @@ fn count_executable_slots(profile: &Profile) -> usize {
 }
 
 fn preflight_report_from_profile(profile: &Profile, engine_running: bool) -> EnginePreflightReport {
-    let validation = validate_engine_profile(profile, true);
+    let validation = validate_profile_for_engine(profile, true);
     EnginePreflightReport {
         ready: validation.is_ok() && !engine_running,
         engine_running,
@@ -431,22 +440,6 @@ fn preflight_report_from_profile(profile: &Profile, engine_running: bool) -> Eng
         } else {
             validation.err().map(|error| error.to_string())
         },
-    }
-}
-
-fn app_data_dir() -> AppResult<std::path::PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        let local = std::env::var("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-        Ok(local.join("game-macro-tauri"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let dir = dirs::data_dir()
-            .ok_or_else(|| AppError::Config("unable to determine data directory".into()))?;
-        Ok(dir.join("game-macro-tauri"))
     }
 }
 
@@ -619,7 +612,7 @@ async fn run_engine_loop(
     let roi_provider = attempt_cfg
         .cast_bar_roi
         .clone()
-        .map(ScreenCastBarRoiProvider::new);
+        .map(|cfg| ScreenCastBarRoiProvider::with_shared_sampler(cfg, &sampler));
     let mut executor = CycleExecutor::new(&config, &points, &skills, &sampler, attempt_cfg)
         .with_cast_bar_roi_provider(
             roi_provider
@@ -633,16 +626,16 @@ async fn run_engine_loop(
             Box::new(sender)
         }
         Err(error) => {
-            tracing::warn!("enigo unavailable ({error}); using noop key sender");
-
-            struct NoopSender;
-            impl KeySender for NoopSender {
-                fn send_key(&mut self, _key: &str) -> bool {
-                    true
-                }
-            }
-
-            Box::new(NoopSender)
+            let reason = format!("key sender unavailable: {error}");
+            tracing::error!(reason = %reason, "engine failed to initialize key sender");
+            executor.runtime.engine_stopped(&reason);
+            let _ = app.emit(
+                "engine:log",
+                serde_json::json!({ "event": "engine_start_failed", "reason": reason }),
+            );
+            let _ = app.emit("engine:stopped", EngineStatus { running: false });
+            emit_runtime_snapshot(&app, &executor, &config, &skills, 0);
+            return;
         }
     };
 
@@ -651,6 +644,7 @@ async fn run_engine_loop(
     let mut last_runtime_emit = Instant::now();
 
     executor.runtime.engine_started(&config.name);
+    let _ = executor.reacquire_phase_from_current_frame(0);
     let _ = app.emit("engine:started", EngineStatus { running: true });
     emit_runtime_snapshot(&app, &executor, &config, &skills, 0);
 
@@ -780,12 +774,14 @@ pub fn engine_start(app: AppHandle, state: State<'_, AppState>) -> CommandResult
 }
 
 #[tauri::command]
-pub fn engine_stop(state: State<'_, AppState>) -> CommandResult<String> {
+pub async fn engine_stop(state: State<'_, AppState>) -> CommandResult<String> {
     let task = take_engine_task(&state.engine_task)?;
 
     if let Some(task) = task {
         task.cancel();
         tracing::info!("engine stopping");
+        task.shutdown().await;
+        tracing::info!("engine stopped");
     }
 
     Ok("stopped".into())
@@ -1071,6 +1067,9 @@ mod tests {
                 skill_id: skill_id.into(),
                 priority: 1,
                 label: String::new(),
+                slot_role: SkillSlotRole::Mandatory,
+                readiness_expr: None,
+                readiness_policy: Default::default(),
                 condition_expr: None,
                 start_expr: None,
                 complete_expr: None,
@@ -1120,6 +1119,21 @@ mod tests {
         profile.base.exec.enabled = true;
 
         assert!(validate_engine_profile(&profile, true).is_ok());
+    }
+
+    #[test]
+    fn test_engine_validation_rejects_invalid_expr_reference() {
+        let mut profile = profile_with_slot("skill-1");
+        profile.rotations[0].phases[0].skills[0].condition_expr = Some(serde_json::json!({
+            "type": "pixel_point",
+            "point_id": "missing",
+            "tolerance": 10
+        }));
+
+        assert!(matches!(
+            validate_profile_for_engine(&profile, false),
+            Err(AppError::Config(_))
+        ));
     }
 
     #[test]
@@ -1214,6 +1228,9 @@ mod tests {
                     skill_id: "skill-1".into(),
                     priority: 1,
                     label: String::new(),
+                    slot_role: SkillSlotRole::Mandatory,
+                    readiness_expr: None,
+                    readiness_policy: Default::default(),
                     condition_expr: Some(serde_json::json!({
                         "type": "pixel_point",
                         "point_id": "point-1",
@@ -1287,6 +1304,9 @@ mod tests {
                     skill_id: "skill-1".into(),
                     priority: 1,
                     label: String::new(),
+                    slot_role: SkillSlotRole::Mandatory,
+                    readiness_expr: None,
+                    readiness_policy: Default::default(),
                     condition_expr: Some(serde_json::json!({
                         "type": "pixel_point",
                         "point_id": "point-1",
