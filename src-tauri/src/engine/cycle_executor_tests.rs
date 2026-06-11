@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::ast::evaluator::{CastBarRoiProvider, CastBarRoiState, PixelSampler};
 use crate::models::cycle::{

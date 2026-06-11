@@ -9,6 +9,7 @@ pub mod skill_attempt;
 mod attempt_tracker;
 mod lane_executor;
 mod phase_manager;
+mod phase_scanner;
 mod readiness;
 mod runtime_actions;
 mod runtime_config;
