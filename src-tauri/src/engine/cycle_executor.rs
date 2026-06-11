@@ -9,63 +9,18 @@
 
 use crate::ast::evaluator::{CastBarRoiProvider, PixelSampler};
 use crate::ast::nodes::Expr;
-use crate::engine::phase_scanner::PhaseScanOutcome;
 use crate::engine::runtime_state::RuntimeState;
-use crate::engine::skill_attempt::{AttemptEvent, KeySender, SkillAttemptConfig};
-// Re-exported for tests (CompletePolicy is used in test fixtures).
-#[allow(unused_imports)]
-pub(crate) use crate::engine::skill_attempt::CompletePolicy;
-use crate::models::cycle::{CycleConfig, SkillSlot};
+use crate::engine::skill_attempt::SkillAttemptConfig;
+use crate::models::cycle::CycleConfig;
 use crate::models::point::Point;
 use crate::models::skill::Skill;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-// ---------------------------------------------------------------------------
-// Cycle execution state.
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Default)]
-pub struct CycleExecState {
-    pub phase_index: usize,
-    pub next_ready_ms: u64,
-    pub cycle_count: u32,
-    pub fired_in_phase: HashSet<String>,
-    pub fired_in_cycle: HashSet<String>,
-    pub fired_count_in_cycle: HashMap<String, u32>,
-    pub skill_ready_at_ms: HashMap<String, u64>,
-    pub observer_lane_next_check_ms: HashMap<String, u64>,
-    pub assist_lane_next_check_ms: HashMap<String, u64>,
-    pub total_executed: u32,
-    pub last_skill_id: String,
-    pub last_outcome: String,
-    pub phase_entry_applied: bool,
-}
-
-// ---------------------------------------------------------------------------
-// CycleExecLogEntry
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct CycleExecLogEntry {
-    pub ts_ms: u64,
-    pub phase_index: usize,
-    pub phase_name: String,
-    pub event: String,
-    pub skill_id: String,
-    pub skill_name: String,
-    pub outcome: String,
-    pub reason: String,
-}
-
-pub(crate) struct CycleLogEvent<'a> {
-    pub(crate) ts_ms: u64,
-    pub(crate) phase_index: usize,
-    pub(crate) phase_name: &'a str,
-    pub(crate) event: &'a str,
-    pub(crate) skill_id: &'a str,
-    pub(crate) outcome: &'a str,
-    pub(crate) reason: &'a str,
-}
+pub(crate) use crate::engine::cycle_state::CycleLogEvent;
+pub use crate::engine::cycle_state::{CycleExecLogEntry, CycleExecState};
+// Re-exported for tests that import the executor module with `super::*`.
+#[cfg(test)]
+pub(crate) use crate::engine::skill_attempt::{CompletePolicy, KeySender};
 
 // ---------------------------------------------------------------------------
 // Cycle executor.
@@ -93,7 +48,7 @@ pub struct CycleExecutor<'a> {
 // Re-export items moved to sibling modules so `super::*` in tests still sees them.
 pub(crate) use crate::engine::phase_manager::phase_reacquire_score;
 pub(crate) use crate::engine::runtime_config::{
-    AttemptContext, CompiledSlotExprs, ObserverActionExprKey, PendingAttempt, SlotExprKey,
+    CompiledSlotExprs, ObserverActionExprKey, PendingAttempt, SlotExprKey,
     build_observer_action_expr_cache, build_slot_expr_cache, build_transition_rule_expr_cache,
 };
 
@@ -196,117 +151,6 @@ impl<'a> CycleExecutor<'a> {
         }
 
         best_phase
-    }
-
-    /// Advance the cycle executor by one scheduler tick.
-    pub fn tick(
-        &mut self,
-        key_sender: &mut dyn KeySender,
-        stopped: &dyn Fn() -> bool,
-        now_ms: u64,
-    ) -> bool {
-        self.runtime.set_now_ms(now_ms);
-        self.sampler.begin_tick(now_ms);
-        if let Some(provider) = self.cast_bar_roi {
-            provider.begin_tick(now_ms);
-        }
-
-        if stopped() {
-            if let Some(pending) = self.pending_attempt.take() {
-                self.apply_attempt_event(AttemptEvent::Stopped {
-                    skill_id: pending.skill_id,
-                });
-            }
-            if let Some(pending) = self.suspended_main_attempt.take() {
-                self.apply_attempt_event(AttemptEvent::Stopped {
-                    skill_id: pending.skill_id,
-                });
-            }
-            return false;
-        }
-
-        self.try_observer_lanes(now_ms);
-
-        if let Some(pending) = self.pending_attempt.take() {
-            if matches!(pending.context, AttemptContext::Main { .. })
-                && !pending.protected_release
-                && self.suspended_main_attempt.is_none()
-                && self.try_assist_lanes(key_sender, stopped, now_ms, Some(pending.stage))
-            {
-                if self.pending_attempt.is_some() {
-                    self.suspended_main_attempt = Some(pending);
-                } else {
-                    self.pending_attempt = Some(pending);
-                }
-                return true;
-            }
-            return self.advance_pending_attempt(key_sender, stopped, now_ms, pending);
-        }
-
-        match self.scan_active_phase(key_sender, stopped, now_ms) {
-            PhaseScanOutcome::Acted => true,
-            PhaseScanOutcome::AllowAssist => {
-                self.try_assist_lanes(key_sender, stopped, now_ms, None)
-            }
-            PhaseScanOutcome::Blocked => false,
-        }
-    }
-
-    pub(super) fn apply_attempt_event(&mut self, event: AttemptEvent) {
-        match event {
-            AttemptEvent::AttemptStarted { skill_id } => {
-                self.runtime.mark_attempt_started(&skill_id);
-            }
-            AttemptEvent::KeySentOk { skill_id } => {
-                self.runtime.mark_key_sent_ok(&skill_id);
-            }
-            AttemptEvent::CastStarted { skill_id } => {
-                self.runtime.mark_cast_started(&skill_id);
-            }
-            AttemptEvent::CompleteWaitStarted { skill_id } => {
-                self.runtime.mark_complete_wait_started(&skill_id);
-            }
-            AttemptEvent::Succeeded { skill_id } => {
-                self.runtime.mark_success(&skill_id);
-            }
-            AttemptEvent::Failed { skill_id, reason } => {
-                self.runtime.mark_fail(&skill_id, &reason);
-            }
-            AttemptEvent::Stopped { skill_id } => {
-                self.runtime.mark_stopped(&skill_id);
-            }
-        }
-    }
-
-    pub(super) fn log_event(&mut self, event: CycleLogEvent<'_>) {
-        let skill_name = self
-            .skills
-            .iter()
-            .find(|s| s.id.as_str() == event.skill_id)
-            .map(|s| s.name.as_str())
-            .unwrap_or("");
-        self.log.push(CycleExecLogEntry {
-            ts_ms: event.ts_ms,
-            phase_index: event.phase_index,
-            phase_name: event.phase_name.into(),
-            event: event.event.into(),
-            skill_id: event.skill_id.into(),
-            skill_name: skill_name.into(),
-            outcome: event.outcome.into(),
-            reason: event.reason.into(),
-        });
-    }
-
-    /// Returns skill slots sorted by priority for a phase.
-    pub fn sorted_slots_for_phase(&self, phase_idx: usize) -> Vec<&SkillSlot> {
-        let mut slots: Vec<_> = self
-            .config
-            .phases
-            .get(phase_idx)
-            .map(|p| p.skills.iter().collect())
-            .unwrap_or_default();
-        slots.sort_by_key(|s| s.priority);
-        slots
     }
 }
 
